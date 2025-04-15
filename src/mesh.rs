@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::simplify::simplify_mesh;
+use cache_access::cache_access;
 
 #[derive(Default, Debug, Clone)]
 struct InnerCache {
@@ -83,31 +84,23 @@ impl Trimesh {
     }
 
     /// Calculate the normals for each face of the mesh.
+    ///
+    #[cache_access]
     pub fn face_normals(&self) -> Arc<Vec<Vector3<f64>>> {
-        if self._cache.read().unwrap().face_normals.is_none() {
-            let vertices = &self.vertices;
+        let vertices = &self.vertices;
 
-            let temp = self
-                .faces
-                .par_iter()
-                .map(|face| {
-                    let v0 = vertices[face.0];
-                    let v1 = vertices[face.1];
-                    let v2 = vertices[face.2];
-                    ((v1 - v0).cross(&(v2 - v0))).normalize()
-                })
-                .collect();
-            let mut cache = self._cache.write().unwrap();
-            cache.face_normals = Some(Arc::new(temp));
-        }
+        let normals: Vec<Vector3<f64>> = self
+            .faces
+            .par_iter()
+            .map(|face| {
+                let v0 = vertices[face.0];
+                let v1 = vertices[face.1];
+                let v2 = vertices[face.2];
+                ((v1 - v0).cross(&(v2 - v0))).normalize()
+            })
+            .collect();
 
-        self._cache
-            .read()
-            .unwrap()
-            .face_normals
-            .as_ref()
-            .unwrap()
-            .clone()
+        Arc::new(normals)
     }
 
     // Get the edges calculated from the faces
@@ -271,9 +264,8 @@ impl MeshFormat {
     }
 }
 
-
 /// Load a mesh from a file, doing no initial processing.
-#[pyfunction(name="load_mesh")]
+#[pyfunction(name = "load_mesh")]
 pub fn py_load_mesh(file_data: &[u8], file_type: String) -> Result<Trimesh> {
     load_mesh(file_data, MeshFormat::from_string(&file_type)?)
 }
@@ -285,8 +277,6 @@ pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
         MeshFormat::PLY => todo!(),
     }
 }
-
-
 
 pub fn create_box(extents: &[f64; 3]) -> Trimesh {
     let half_extents = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];

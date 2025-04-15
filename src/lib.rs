@@ -2,7 +2,7 @@ mod mesh;
 mod simplify;
 use pyo3::prelude::*;
 
-use mesh::{Trimesh, py_load_mesh};
+use mesh::{py_load_mesh, Trimesh};
 
 /// A Python module implemented in Rust.
 #[pymodule]
