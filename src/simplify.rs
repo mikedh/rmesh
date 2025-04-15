@@ -1,5 +1,4 @@
 use nalgebra::{Point3, Vector3};
-use std::cmp::Ordering;
 use std::ops::{Add, AddAssign};
 
 // Type aliases for clarity
@@ -367,7 +366,7 @@ impl Simplifier {
         // Initialize Quadrics (Q) and identify border vertices on first iteration
         if iteration == 0 {
             // --- Identify Border Vertices ---
-            let mut v_on_edge_count: Vec<Vec<usize>> = vec![Vec::new(); self.vertices.len()];
+            let v_on_edge_count: Vec<Vec<usize>> = vec![Vec::new(); self.vertices.len()];
 
             // Count how many non-deleted triangles share each edge connected to a vertex
             for v_idx in 0..self.vertices.len() {
@@ -396,12 +395,10 @@ impl Simplifier {
                 }
                 // If an edge (v_idx, neighbor_idx) is only part of one triangle, it's a border edge
                 for (neighbor_idx, count) in edges {
-                    if count == 1 {
-                        if neighbor_idx < self.vertices.len() {
-                            // Bounds check
-                            self.vertices[v_idx].border = true;
-                            self.vertices[neighbor_idx].border = true;
-                        }
+                    if count == 1 && neighbor_idx < self.vertices.len() {
+                        // Bounds check
+                        self.vertices[v_idx].border = true;
+                        self.vertices[neighbor_idx].border = true;
                     }
                 }
             }
@@ -614,7 +611,7 @@ impl Simplifier {
     // Remove deleted triangles and unused vertices, re-index faces
     fn compact_mesh(&mut self) {
         // 1. Filter out deleted triangles
-        let mut old_triangle_count = self.triangles.len();
+        let old_triangle_count = self.triangles.len();
         self.triangles.retain(|t| !t.deleted);
         // println!("Compacted triangles: {} -> {}", old_triangle_count, self.triangles.len());
 
@@ -636,13 +633,11 @@ impl Simplifier {
         let mut new_vertices = Vec::with_capacity(new_vertex_count);
         let mut current_new_idx = 0;
         for (old_idx, used) in vertex_used.iter().enumerate() {
-            if *used {
-                if old_idx < self.vertices.len() {
-                    // Bounds check
-                    new_vertices.push(self.vertices[old_idx].clone()); // Clone the used vertex data
-                    vertex_remap[old_idx] = current_new_idx;
-                    current_new_idx += 1;
-                }
+            if *used && old_idx < self.vertices.len() {
+                // Bounds check
+                new_vertices.push(self.vertices[old_idx].clone()); // Clone the used vertex data
+                vertex_remap[old_idx] = current_new_idx;
+                current_new_idx += 1;
             }
         }
         // println!("Compacted vertices: {} -> {}", self.vertices.len(), new_vertices.len());

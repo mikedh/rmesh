@@ -168,11 +168,11 @@ impl Trimesh {
         }
 
         // start with bounds from the first vertex
-        let (mut lower, mut upper) = (self.vertices[0].clone(), self.vertices[0].clone());
+        let (mut lower, mut upper) = (self.vertices[0], self.vertices[0]);
         for vertex in self.vertices.iter().skip(1) {
             // use componentwise min/max
-            lower = lower.inf(&vertex);
-            upper = upper.sup(&vertex);
+            lower = lower.inf(vertex);
+            upper = upper.sup(vertex);
         }
 
         if lower == upper {
@@ -180,6 +180,17 @@ impl Trimesh {
         }
 
         Ok((lower, upper))
+    }
+}
+
+#[pymethods]
+impl Trimesh {
+    #[new]
+    pub fn py_new(vertices: &[u8], faces: &[u8]) -> Result<Self> {
+        let vertices: &[f64] = bytemuck::cast_slice::<u8, f64>(vertices);
+        let faces: &[usize] = bytemuck::cast_slice::<u8, usize>(faces);
+
+        Self::from_slice(vertices, faces)
     }
 }
 
@@ -242,20 +253,40 @@ impl BinaryStl {
 }
 
 // An enum to represent the different mesh file formats.
-enum MeshFileFormat {
+enum MeshFormat {
     STL,
     OBJ,
     PLY,
 }
 
-/// Load a mesh from a file, doing no initial processing.
-pub fn load_mesh(file_data: &[u8], file_type: MeshFileFormat) -> Result<Trimesh> {
-    match file_type {
-        MeshFileFormat::STL => Ok(BinaryStl::from_bytes(file_data)?.to_mesh()),
-        MeshFileFormat::OBJ => todo!(),
-        MeshFileFormat::PLY => todo!(),
+impl MeshFormat {
+    /// Convert a string to a MeshFormat enum.
+    pub fn from_string(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().trim() {
+            "stl" => Ok(MeshFormat::STL),
+            "obj" => Ok(MeshFormat::OBJ),
+            "ply" => Ok(MeshFormat::PLY),
+            _ => Err(anyhow::anyhow!("Unsupported file type: {}", s)),
+        }
     }
 }
+
+
+/// Load a mesh from a file, doing no initial processing.
+#[pyfunction(name="load_mesh")]
+pub fn py_load_mesh(file_data: &[u8], file_type: String) -> Result<Trimesh> {
+    load_mesh(file_data, MeshFormat::from_string(&file_type)?)
+}
+
+pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
+    match file_type {
+        MeshFormat::STL => Ok(BinaryStl::from_bytes(file_data)?.to_mesh()),
+        MeshFormat::OBJ => todo!(),
+        MeshFormat::PLY => todo!(),
+    }
+}
+
+
 
 pub fn create_box(extents: &[f64; 3]) -> Trimesh {
     let half_extents = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];
@@ -322,7 +353,7 @@ mod tests {
     fn test_mesh_stl() {
         let stl_data = include_bytes!("../test/data/unit_cube.STL");
 
-        let mesh = load_mesh(stl_data, MeshFileFormat::STL).unwrap();
+        let mesh = load_mesh(stl_data, MeshFormat::STL).unwrap();
 
         assert_eq!(mesh.vertices.len(), 36);
         assert_eq!(mesh.faces.len(), 12);
