@@ -243,7 +243,7 @@ impl BinaryStl {
 }
 
 // An enum to represent the different mesh file formats.
-enum MeshFormat {
+pub enum MeshFormat {
     STL,
     OBJ,
     PLY,
@@ -275,6 +275,17 @@ pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
     }
 }
 
+/// Create a mesh of a box centered at the origin with the
+/// specified axis aligned bounding box size.
+///
+/// Parameters
+/// -------------
+/// extents
+///   The size of the box in each dimension.
+///
+/// Returns
+/// -------------
+///  A Trimesh representing the box.
 pub fn create_box(extents: &[f64; 3]) -> Trimesh {
     let half_extents = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];
     let vertices = vec![
