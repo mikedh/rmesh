@@ -1,3 +1,5 @@
+// This was ported from fast-mesh-simplify using Gemini2.5-pro
+
 use nalgebra::{Point3, Vector3};
 use std::ops::{Add, AddAssign};
 
