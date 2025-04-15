@@ -13,8 +13,8 @@ use cache_access::cache_access;
 
 #[derive(Default, Debug, Clone)]
 struct InnerCache {
-    face_adjacency: Option<Arc<Vec<(usize, usize)>>>, // cache for face adjacency
-    face_normals: Option<Arc<Vec<Vector3<f64>>>>,     // cache for face normals
+    face_adjacency: Option<Vec<(usize, usize)>>, // cache for face adjacency
+    face_normals: Option<Vec<Vector3<f64>>>,     // cache for face normals
 }
 
 #[pyclass]
@@ -86,11 +86,9 @@ impl Trimesh {
     /// Calculate the normals for each face of the mesh.
     ///
     #[cache_access]
-    pub fn face_normals(&self) -> Arc<Vec<Vector3<f64>>> {
+    pub fn face_normals(&self) -> Vec<Vector3<f64>> {
         let vertices = &self.vertices;
-
-        let normals: Vec<Vector3<f64>> = self
-            .faces
+        self.faces
             .par_iter()
             .map(|face| {
                 let v0 = vertices[face.0];
@@ -98,9 +96,7 @@ impl Trimesh {
                 let v2 = vertices[face.2];
                 ((v1 - v0).cross(&(v2 - v0))).normalize()
             })
-            .collect();
-
-        Arc::new(normals)
+            .collect()
     }
 
     // Get the edges calculated from the faces
@@ -112,6 +108,7 @@ impl Trimesh {
     }
 
     // What are the pairs of face indices that share an edge?
+    #[cache_access]
     pub fn face_adjacency(&self) -> Vec<(usize, usize)> {
         let mut edge_map = AHashMap::new();
         let mut adjacency = Vec::new();
