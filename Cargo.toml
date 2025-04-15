@@ -1,0 +1,21 @@
+[package]
+name = "rmesh"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "rmesh"
+crate-type = ["cdylib"]
+
+[dependencies]
+ahash = "0.8.11"
+anyhow = "1.0.98"
+itertools = "0.14.0"
+pyo3 = "0.24.0"
+rayon = "1.10.0"
+nalgebra = { version = "0.33.2", features=["bytemuck"] }
+bytemuck = { version = "1.22.0", features = ["derive", "extern_crate_alloc"] }
+
+[dev-dependencies]
+approx = "0.5.1"
