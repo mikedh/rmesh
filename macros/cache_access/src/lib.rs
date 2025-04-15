@@ -19,7 +19,7 @@ pub fn cache_access(_attr: TokenStream, item: TokenStream) -> TokenStream {
             if self._cache.read().unwrap().#fn_name_ident.is_none() {
                 let temp = (|| #fn_body)();
                 let mut cache = self._cache.write().unwrap();
-                cache.#fn_name_ident = Some(Arc::new(temp));
+                cache.#fn_name_ident = Some(temp);
             }
 
             self._cache
