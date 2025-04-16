@@ -789,13 +789,8 @@ mod tests {
         let aggressiveness = 7.0;
         let verbose = true;
 
-        let (simplified_vertices, simplified_faces) = simplify_mesh(
-            &vertices,
-            &faces,
-            target_face_count,
-            aggressiveness,
-            verbose,
-        );
+        let (simplified_vertices, simplified_faces) =
+            simplify_mesh(&vertices, &faces, target_face_count, aggressiveness, true);
 
         // Assert the simplified mesh has the expected number of vertices and faces
         assert!(simplified_vertices.len() <= vertices.len());

@@ -24,12 +24,12 @@ pub struct Trimesh {
 }
 
 impl Clone for Trimesh {
-    // Implement a custom clone method to avoid copying the cache
     fn clone(&self) -> Self {
+        let cache = self._cache.read().unwrap();
         Self {
             vertices: self.vertices.clone(),
             faces: self.faces.clone(),
-            _cache: RwLock::new(InnerCache::default()),
+            _cache: RwLock::new(cache.clone()),
         }
     }
 }
@@ -43,10 +43,14 @@ impl Trimesh {
         }
     }
 
-    /// Simplify the mesh using quadric edge collapse.
-    pub fn simplify(&self, target_count: usize) -> Self {
-        let (vertices, faces) =
-            simplify_mesh(&self.vertices, &self.faces, target_count, 1.0, false);
+    pub fn simplify(&self, target_count: usize, aggressiveness: f64) -> Self {
+        let (vertices, faces) = simplify_mesh(
+            &self.vertices,
+            &self.faces,
+            target_count,
+            aggressiveness,
+            false,
+        );
 
         Trimesh {
             vertices,
