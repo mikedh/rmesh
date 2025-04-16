@@ -9,10 +9,10 @@ name = "rmesh_python"
 crate-type = ["cdylib"]
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = {workspace=true}
+bytemuck = {workspace=true}
 pyo3 = { version = "0.24.0", features=["anyhow"] }
-bytemuck = { version = "1.22.0", features = ["derive", "extern_crate_alloc"] }
-rmesh = { path = "../" }
+rmesh = { path = "../rmesh" }
 
 
 [dev-dependencies]

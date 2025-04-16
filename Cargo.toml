@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+bytemuck = { version = "1.22.0", features = ["derive", "extern_crate_alloc"] }
