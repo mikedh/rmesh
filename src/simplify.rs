@@ -10,7 +10,7 @@ type Vector = Vector3<f64>;
 // --- Helper: Symmetric Matrix (Quadric) ---
 
 #[derive(Debug, Clone, Copy)]
-struct SymmetricMatrix {
+pub struct SymmetricMatrix {
     m: [f64; 10],
 }
 
