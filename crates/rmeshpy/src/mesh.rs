@@ -29,7 +29,7 @@ impl PyTrimesh {
 /// Load a mesh from a file, doing no initial processing.
 #[pyfunction(name = "load_mesh")]
 pub fn py_load_mesh(file_data: &[u8], file_type: String) -> Result<PyTrimesh> {
-    let data = load_mesh(file_data, MeshFormat::from_string(&file_type)?);
+    let data = load_mesh(file_data, MeshFormat::from_string(&file_type)?)?;
 
     Ok(PyTrimesh { data })
 }
@@ -40,7 +40,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_mesh() {
+    fn test_mesh_python() {
         let m = PyTrimesh::new(
             &bytemuck::cast_slice::<f64, u8>(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
             &bytemuck::cast_slice::<usize, u8>(&[0, 1, 2]),

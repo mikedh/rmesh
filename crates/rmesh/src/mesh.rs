@@ -2,15 +2,13 @@ use std::sync::RwLock;
 
 use ahash::AHashMap;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use itertools::Itertools;
-use nalgebra::{convert, Point3, Vector3};
+use nalgebra::{Point3, Vector3, convert};
 use rayon::prelude::*;
 
 use crate::simplify::simplify_mesh;
 use cache_access::cache_access;
-
-
 
 #[derive(Default, Debug, Clone)]
 struct InnerCache {
@@ -174,7 +172,6 @@ impl Trimesh {
     }
 }
 
-
 pub struct BinaryStl {
     pub header: String,
     pub triangles: Vec<BinaryStlTriangle>,
@@ -334,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_mesh_stl() {
-        let stl_data = include_bytes!("../test/data/unit_cube.STL");
+        let stl_data = include_bytes!("../../../test/data/unit_cube.STL");
 
         let mesh = load_mesh(stl_data, MeshFormat::STL).unwrap();
 
