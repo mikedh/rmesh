@@ -1,6 +1,5 @@
-use anyhow::{anyhow, Result};
 use pyo3::prelude::*;
-
+use anyhow::{anyhow, Result};
 use crate::rmesh::mesh::{load_mesh, BinaryStl, MeshFormat, Trimesh};
 
 #[pymethods]
@@ -13,7 +12,6 @@ impl Trimesh {
         Self::from_slice(vertices, faces)
     }
 
-    #[pyfunction]
     pub fn py_check(&self) -> usize {
         10
     }
