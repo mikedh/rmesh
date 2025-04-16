@@ -7,7 +7,7 @@ use itertools::Itertools;
 use nalgebra::{convert, Point3, Vector3};
 use rayon::prelude::*;
 
-use crate::simplify::{simplify_mesh};
+use crate::simplify::simplify_mesh;
 use cache_access::cache_access;
 
 
@@ -45,6 +45,7 @@ impl Trimesh {
         }
     }
 
+    /// Simplify the mesh using quadric edge collapse.
     pub fn simplify(&self, target_count: usize) -> Self {
         let (vertices, faces) =
             simplify_mesh(&self.vertices, &self.faces, target_count, 1.0, false);

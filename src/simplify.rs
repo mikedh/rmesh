@@ -787,7 +787,7 @@ mod tests {
         // Simplify the cube mesh
         let target_face_count = 6; // Target number of faces
         let aggressiveness = 7.0;
-        let verbose = false;
+        let verbose = true;
 
         let (simplified_vertices, simplified_faces) = simplify_mesh(
             &vertices,
