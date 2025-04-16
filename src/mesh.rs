@@ -5,11 +5,12 @@ use ahash::AHashMap;
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
 use nalgebra::{convert, Point3, Vector3};
-use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::simplify::simplify_mesh;
 use cache_access::cache_access;
+
+
 
 #[derive(Default, Debug, Clone)]
 struct InnerCache {
@@ -17,7 +18,6 @@ struct InnerCache {
     face_normals: Option<Vec<Vector3<f64>>>,     // cache for face normals
 }
 
-#[pyclass]
 pub struct Trimesh {
     pub vertices: Vec<Point3<f64>>,
     pub faces: Vec<(usize, usize, usize)>,
@@ -45,6 +45,7 @@ impl Trimesh {
         }
     }
 
+    /// Simplify the mesh using quadric edge collapse.
     pub fn simplify(&self, target_count: usize) -> Self {
         let (vertices, faces) =
             simplify_mesh(&self.vertices, &self.faces, target_count, 1.0, false);
@@ -173,16 +174,6 @@ impl Trimesh {
     }
 }
 
-#[pymethods]
-impl Trimesh {
-    #[new]
-    pub fn py_new(vertices: &[u8], faces: &[u8]) -> Result<Self> {
-        let vertices: &[f64] = bytemuck::cast_slice::<u8, f64>(vertices);
-        let faces: &[usize] = bytemuck::cast_slice::<u8, usize>(faces);
-
-        Self::from_slice(vertices, faces)
-    }
-}
 
 pub struct BinaryStl {
     pub header: String,
@@ -259,12 +250,6 @@ impl MeshFormat {
             _ => Err(anyhow::anyhow!("Unsupported file type: {}", s)),
         }
     }
-}
-
-/// Load a mesh from a file, doing no initial processing.
-#[pyfunction(name = "load_mesh")]
-pub fn py_load_mesh(file_data: &[u8], file_type: String) -> Result<Trimesh> {
-    load_mesh(file_data, MeshFormat::from_string(&file_type)?)
 }
 
 pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
