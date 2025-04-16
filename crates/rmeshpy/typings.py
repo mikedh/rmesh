@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 # absolute location of current directory and PYI output
+
 cwd = os.path.abspath(os.path.expanduser(os.path.dirname(__file__)))
 root = os.path.abspath(os.path.join(cwd, "..", ".."))
-pyi = os.path.join(root, "rmesh", "__init__.pyi")
+target = os.path.join(root, "target")
+pyi = os.path.join(cwd, "__init__.pyi")
 
 
 def run_json_docgen():
@@ -17,9 +19,10 @@ def run_json_docgen():
 def run_formatter():
     os.system(f"ruff format {pyi} && ruff check --fix {pyi} && ruff format {pyi}")
 
+
 def get_typings():
     run_json_docgen()
-    json_path = os.path.join(root, "target", "doc", "rmesh.json")
+    json_path = os.path.join(target, "doc", "rmesh.json")
     with open(json_path, encoding="utf8") as src:
         return json.load(src)["index"]
 

@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 [dependencies]
 anyhow = {workspace=true}
 bytemuck = {workspace=true}
+nalgebra = {workspace=true}
+numpy = "0.24.0"
 pyo3 = { version = "0.24.0", features=["anyhow"] }
 rmesh = { path = "../rmesh" }
 

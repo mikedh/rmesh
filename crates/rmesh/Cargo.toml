@@ -6,10 +6,10 @@ edition = "2024"
 [dependencies]
 anyhow = {workspace=true}
 bytemuck = {workspace=true}
+nalgebra = {workspace=true}
 ahash = "0.8.11"
 itertools = "0.14.0"
 rayon = "1.10.0"
-nalgebra = { version = "0.33.2", features=["bytemuck"] }
 cache_access = {path = "../cache_access"}
 
 [dev-dependencies]

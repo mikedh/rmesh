@@ -5,3 +5,4 @@ resolver = "2"
 [workspace.dependencies]
 anyhow = "1.0.98"
 bytemuck = { version = "1.22.0", features = ["derive", "extern_crate_alloc"] }
+nalgebra = { version = "0.33.2", features=["bytemuck"] }
