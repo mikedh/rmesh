@@ -4,7 +4,8 @@ use pyo3::prelude::*;
 
 use numpy::PyReadonlyArray3;
 
-use rmesh::mesh::{load_mesh, MeshFormat, Trimesh};
+use rmesh::exchange::{load_mesh, MeshFormat};
+use rmesh::mesh::Trimesh;
 
 //use crate::rmesh::mesh::{load_mesh, MeshFormat, Trimesh};
 
@@ -57,7 +58,7 @@ mod tests {
 
     use super::*;
 
-    use rmesh::mesh::create_box;
+    use rmesh::creation::create_box;
 
     #[test]
     fn test_mesh_python() {

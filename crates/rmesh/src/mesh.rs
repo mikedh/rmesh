@@ -2,9 +2,9 @@ use std::sync::RwLock;
 
 use ahash::AHashMap;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use itertools::Itertools;
-use nalgebra::{Point3, Vector3, convert};
+use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 
 use crate::simplify::simplify_mesh;
@@ -20,6 +20,8 @@ pub struct Trimesh {
     pub vertices: Vec<Point3<f64>>,
     pub faces: Vec<(usize, usize, usize)>,
 
+    // pub vertex_attributes: Vec<Attribute>,
+    // pub face_attributes: Vec<Attribute>,
     _cache: RwLock<InnerCache>,
 }
 
@@ -155,6 +157,8 @@ impl Trimesh {
     }
 
     /// Calculate an axis-aligned bounding box (AABB) for the mesh.
+    ///
+    /// If the mesh has no vertices an error is returned.
     pub fn bounds(&self) -> Result<(Point3<f64>, Point3<f64>)> {
         if self.vertices.is_empty() {
             return Err(anyhow::anyhow!("Mesh has no vertices"));
@@ -176,137 +180,12 @@ impl Trimesh {
     }
 }
 
-pub struct BinaryStl {
-    pub header: String,
-    pub triangles: Vec<BinaryStlTriangle>,
-}
-#[repr(C, packed)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct BinaryStlTriangle {
-    pub normal: Vector3<f32>,
-    pub vertices: [Point3<f32>; 3],
-    pub attributes: u16,
-}
-
-impl BinaryStlTriangle {
-    pub fn normal(&self) -> Vector3<f32> {
-        self.normal
-    }
-
-    pub fn convert_vertices(&self) -> [Point3<f64>; 3] {
-        [
-            convert(self.vertices[0]),
-            convert(self.vertices[1]),
-            convert(self.vertices[2]),
-        ]
-    }
-}
-
-impl BinaryStl {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 84 {
-            return Err(anyhow::anyhow!("STL file too short"));
-        }
-
-        let header = String::from_utf8_lossy(&bytes[0..80]).to_string();
-        // let triangle_count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
-
-        let triangles: &[BinaryStlTriangle] = bytemuck::try_cast_slice(&bytes[84..])
-            .map_err(|_e| anyhow!("Could not interpret bytes as STL triangles!"))?;
-
-        Ok(Self {
-            header,
-            triangles: triangles.to_vec(),
-        })
-    }
-
-    pub fn to_mesh(&self) -> Trimesh {
-        // convert STL f32 vertices to f64
-        let vertices: Vec<Point3<f64>> = self
-            .triangles
-            .par_iter()
-            .flat_map(|triangle| triangle.convert_vertices())
-            .collect();
-
-        let faces: Vec<(usize, usize, usize)> = (0..vertices.len()).tuples().collect();
-
-        Trimesh::new(vertices, faces)
-    }
-}
-
-// An enum to represent the different mesh file formats.
-pub enum MeshFormat {
-    STL,
-    OBJ,
-    PLY,
-}
-
-impl MeshFormat {
-    /// Convert a string to a MeshFormat enum.
-    pub fn from_string(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().trim() {
-            "stl" => Ok(MeshFormat::STL),
-            "obj" => Ok(MeshFormat::OBJ),
-            "ply" => Ok(MeshFormat::PLY),
-            _ => Err(anyhow::anyhow!("Unsupported file type: {}", s)),
-        }
-    }
-}
-
-pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
-    match file_type {
-        MeshFormat::STL => Ok(BinaryStl::from_bytes(file_data)?.to_mesh()),
-        MeshFormat::OBJ => todo!(),
-        MeshFormat::PLY => todo!(),
-    }
-}
-
-/// Create a mesh of a box centered at the origin with the
-/// specified axis aligned bounding box size.
-///
-/// Parameters
-/// -------------
-/// extents
-///   The size of the box in each dimension.
-///
-/// Returns
-/// -------------
-///  A Trimesh representing the box.
-pub fn create_box(extents: &[f64; 3]) -> Trimesh {
-    let half_extents = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];
-    let vertices = vec![
-        Point3::new(-half_extents[0], -half_extents[1], -half_extents[2]),
-        Point3::new(half_extents[0], -half_extents[1], -half_extents[2]),
-        Point3::new(half_extents[0], half_extents[1], -half_extents[2]),
-        Point3::new(-half_extents[0], half_extents[1], -half_extents[2]),
-        Point3::new(-half_extents[0], -half_extents[1], half_extents[2]),
-        Point3::new(half_extents[0], -half_extents[1], half_extents[2]),
-        Point3::new(half_extents[0], half_extents[1], half_extents[2]),
-        Point3::new(-half_extents[0], half_extents[1], half_extents[2]),
-    ];
-
-    let faces = vec![
-        (0, 1, 2),
-        (0, 2, 3),
-        (4, 5, 6),
-        (4, 6, 7),
-        (0, 1, 5),
-        (0, 5, 4),
-        (2, 3, 7),
-        (2, 7, 6),
-        (1, 2, 6),
-        (1, 6, 5),
-        (3, 0, 4),
-        (3, 4, 7),
-    ];
-
-    Trimesh::new(vertices, faces)
-}
-
 #[cfg(test)]
 mod tests {
 
     use super::*;
+    use crate::creation::create_box;
+    use crate::exchange::{MeshFormat, load_mesh};
     use approx::relative_eq;
 
     #[test]
