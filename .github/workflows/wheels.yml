@@ -41,14 +41,14 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           manylinux: auto
-          working-directory: "rmesh_python"
+          working-directory: "crates/rmesh_python"
       - name: Run Tests
         run: cargo test
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.platform.target }}
-          path: rmesh_python/dist
+          path: crates/rmesh_python/dist
 
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
@@ -75,12 +75,12 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
-          working-directory: "rmesh_python"
+          working-directory: "crates/rmesh_python"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-musllinux-${{ matrix.platform.target }}
-          path: rmesh_python/dist
+          path: crates/rmesh_python/dist
 
   windows:
     runs-on: ${{ matrix.platform.runner }}
@@ -103,12 +103,12 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          working-directory: "rmesh_python"
+          working-directory: "crates/rmesh_python"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.platform.target }}
-          path: rmesh_python/dist
+          path: crates/rmesh_python/dist
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
@@ -130,12 +130,12 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          working-directory: "rmesh_python"
+          working-directory: "crates/rmesh_python"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.platform.target }}
-          path: rmesh_python/dist
+          path: crates/rmesh_python/dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -146,12 +146,12 @@ jobs:
         with:
           command: sdist
           args: --out dist
-          working-directory: "rmesh_python"
+          working-directory: "crates/rmesh_python"
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
-          path: rmesh_python/dist
+          path: crates/rmesh_python/dist
 
   release:
     name: Release
@@ -177,4 +177,4 @@ jobs:
         with:
           command: upload
           args: --non-interactive --skip-existing wheels-*/*
-          working-directory: "rmesh_python"
+          working-directory: "crates/rmesh_python"
