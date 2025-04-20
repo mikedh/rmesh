@@ -11,6 +11,7 @@ ahash = "0.8.11"
 itertools = "0.14.0"
 rayon = "1.10.0"
 rmesh_macro = { path = "../rmesh_macro" }
+earcut = "0.4.4"
 
 [dev-dependencies]
 approx = "0.5.1"
