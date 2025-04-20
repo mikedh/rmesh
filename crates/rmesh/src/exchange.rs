@@ -85,13 +85,22 @@ enum ObjLine {
     UseMtl(String),
     // A mtllib command defining a particular material
     MtlLib(String),
-    // Somethign we don't care about
+
+    // Something we don't care about
     Ignore(String),
 }
 
 impl ObjLine {
     fn from_line(line: &str) -> Self {
-        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        // clean up a raw OBJ line: ignore anything after a comment then cleanly split it
+        let parts: Vec<&str> = line
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .split_whitespace()
+            .collect();
+
         match parts.as_slice() {
             ["v", x, y, z] => ObjLine::V(Point3::new(
                 x.parse().unwrap(),
@@ -104,10 +113,11 @@ impl ObjLine {
                 z.parse().unwrap(),
             )),
             ["vt", u, v] => ObjLine::Vt(Vector3::new(u.parse().unwrap(), v.parse().unwrap(), 0.0)),
-            ["o", name] => ObjLine::O(name.to_string()),
-            ["g", name] => ObjLine::G(name.to_string()),
+            ["o", name @ ..] => ObjLine::O(name.join(" ")),
+            ["g", name @ ..] => ObjLine::G(name.join(" ")),
+            ["usemtl", name] => ObjLine::UseMtl(name.to_string()),
+            ["mtllib", name] => ObjLine::MtlLib(name.to_string()),
             ["f", blob @ ..] => {
-                // so keep them
                 // the OBJ format allows v/vt/vn, v//vn, v/vt, v
                 let payload: Vec<Vec<Option<usize>>> = blob
                     .iter()
@@ -125,10 +135,13 @@ impl ObjLine {
 }
 
 pub struct ObjMesh {
+
+    // the raw values, most people shouldn't
     lines: Vec<ObjLine>,
 }
 
 impl ObjMesh {
+    /// Parse a loaded string into an ObjMesh.
     pub fn from_string(data: &str) -> Result<Self> {
         let lines: Vec<ObjLine> = data
             .lines()
@@ -137,8 +150,10 @@ impl ObjMesh {
             .map(|line| ObjLine::from_line(line))
             .collect();
 
-        println!("lines: {:?}", lines);
-
+        // todo : this is for debug
+        for line in lines.iter() {
+            println!("{:?}", line);
+        }
         return Ok(Self { lines });
     }
 
@@ -197,6 +212,8 @@ mod tests {
         let data = include_bytes!("../../../test/data/basic.obj");
 
         let mesh = load_mesh(data, MeshFormat::OBJ).unwrap();
+
+        // let required: Vec<ObjLine> = vec![ObjLine::O("cube for life!!".to_string())];
 
         //assert_eq!(mesh.vertices.len(), 36);
         //assert_eq!(mesh.faces.len(), 12);
