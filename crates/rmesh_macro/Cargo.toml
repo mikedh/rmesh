@@ -1,5 +1,6 @@
 [package]
-name = "cache_access"
+name = "rmesh_macro"
+description = "The proc macros for rmesh, primarily to manage caching."
 version = "0.1.0"
 edition = "2024"
 

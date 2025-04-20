@@ -10,7 +10,7 @@ nalgebra = {workspace=true}
 ahash = "0.8.11"
 itertools = "0.14.0"
 rayon = "1.10.0"
-cache_access = {path = "../cache_access"}
+rmesh_macro = { path = "../rmesh_macro" }
 
 [dev-dependencies]
 approx = "0.5.1"
