@@ -63,6 +63,9 @@ impl BinaryStl {
     }
 }
 
+/// The intermediate representation of a single line from an OBJ file,
+/// which can later be turned into a more useful structure.
+#[derive(Debug)]
 enum ObjLine {
     V(Point3<f64>),
     Vn(Vector3<f64>),
@@ -70,6 +73,56 @@ enum ObjLine {
     F(Vec<(usize, usize, usize)>),
     O(String),
     G(String),
+    Ignore(String),
+}
+
+impl ObjLine {
+    fn from_line(line: &str) -> Self {
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        match parts.as_slice() {
+            ["v", x, y, z] => ObjLine::V(Point3::new(
+                x.parse().unwrap(),
+                y.parse().unwrap(),
+                z.parse().unwrap(),
+            )),
+            ["vn", x, y, z] => ObjLine::Vn(Vector3::new(
+                x.parse().unwrap(),
+                y.parse().unwrap(),
+                z.parse().unwrap(),
+            )),
+            ["vt", u, v] => ObjLine::Vt(Vector3::new(u.parse().unwrap(), v.parse().unwrap(), 0.0)),
+            ["o", name] => ObjLine::O(name.to_string()),
+            ["g", name] => ObjLine::G(name.to_string()),
+
+            _ => ObjLine::Ignore(line.to_string()),
+        }
+    }
+}
+
+pub struct ObjMesh {
+    lines: Vec<ObjLine>,
+}
+
+impl ObjMesh {
+    pub fn from_string(data: &str) -> Result<Self> {
+        let lines: Vec<ObjLine> = data
+            .lines()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .map(|line| ObjLine::from_line(line))
+            .collect();
+
+        println!("lines: {:?}", lines);
+
+        todo!("made it to the end");
+    }
+
+    pub fn to_mesh(&self) -> Trimesh {
+        // convert OBJ f32 vertices to f64
+        let vertices: Vec<Point3<f64>> = vec![];
+        let faces: Vec<(usize, usize, usize)> = vec![];
+        Trimesh::new(vertices, faces)
+    }
 }
 
 // An enum to represent the different mesh file formats.
@@ -94,7 +147,7 @@ impl MeshFormat {
 pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
     match file_type {
         MeshFormat::STL => Ok(BinaryStl::from_bytes(file_data)?.to_mesh()),
-        MeshFormat::OBJ => todo!(),
+        MeshFormat::OBJ => Ok(ObjMesh::from_string(std::str::from_utf8(file_data)?)?.to_mesh()),
         MeshFormat::PLY => todo!(),
     }
 }
@@ -109,6 +162,16 @@ mod tests {
         let stl_data = include_bytes!("../../../test/data/unit_cube.STL");
 
         let mesh = load_mesh(stl_data, MeshFormat::STL).unwrap();
+
+        assert_eq!(mesh.vertices.len(), 36);
+        assert_eq!(mesh.faces.len(), 12);
+    }
+
+    #[test]
+    fn test_mesh_obj() {
+        let data = include_bytes!("../../../test/data/basic.obj");
+
+        let mesh = load_mesh(data, MeshFormat::OBJ).unwrap();
 
         assert_eq!(mesh.vertices.len(), 36);
         assert_eq!(mesh.faces.len(), 12);
