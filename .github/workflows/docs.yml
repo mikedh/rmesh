@@ -1,0 +1,25 @@
+name: Release Website
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  site:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout rmesh
+      uses: actions/checkout@v4
+    - name: Docs
+      run: |
+        cargo install mdbook
+        cd docs
+        mdbook build
+    - name: Deploy Github Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./docs/book
+        force_orphan: true

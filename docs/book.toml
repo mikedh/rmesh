@@ -4,3 +4,16 @@ language = "en"
 multilingual = false
 src = "src"
 title = "rmesh"
+
+[output.html]
+default-theme = "latte"
+preferred-dark-theme = "mocha"
+additional-css = [
+  "./theme/catppuccin.css",
+]
+no-section-label = true
+git-repository-url = "https://github.com/mikedh/rmesh"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/mikedh/rmesh/edit/main/example/{path}"
+
+cname = "rme.sh"

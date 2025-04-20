@@ -63,6 +63,15 @@ impl BinaryStl {
     }
 }
 
+enum ObjLine {
+    V(Point3<f64>),
+    Vn(Vector3<f64>),
+    Vt(Vector3<f64>),
+    F(Vec<(usize, usize, usize)>),
+    O(String),
+    G(String),
+}
+
 // An enum to represent the different mesh file formats.
 pub enum MeshFormat {
     STL,
