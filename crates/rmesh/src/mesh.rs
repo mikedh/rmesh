@@ -3,25 +3,26 @@ use std::sync::RwLock;
 use ahash::AHashMap;
 
 use anyhow::Result;
-use itertools::Itertools;
+
+use crate::{attributes::Attribute, simplify::simplify_mesh};
 use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
-
-use crate::simplify::simplify_mesh;
 use rmesh_macro::cache_access;
 
 #[derive(Default, Debug, Clone)]
 struct InnerCache {
-    face_adjacency: Option<Vec<(usize, usize)>>, // cache for face adjacency
-    face_normals: Option<Vec<Vector3<f64>>>,     // cache for face normals
+    face_adjacency: Option<Vec<(usize, usize)>>,
+    face_normals: Option<Vec<Vector3<f64>>>, // cache for face normals
 }
 
+#[derive(Default, Debug)]
 pub struct Trimesh {
     pub vertices: Vec<Point3<f64>>,
     pub faces: Vec<(usize, usize, usize)>,
 
-    // pub vertex_attributes: Vec<Attribute>,
-    // pub face_attributes: Vec<Attribute>,
+    pub attributes_vertex: Vec<Attribute>,
+    pub attributes_face: Vec<Attribute>,
+
     _cache: RwLock<InnerCache>,
 }
 
@@ -32,17 +33,40 @@ impl Clone for Trimesh {
             vertices: self.vertices.clone(),
             faces: self.faces.clone(),
             _cache: RwLock::new(cache.clone()),
+            ..Default::default()
         }
     }
 }
 
 impl Trimesh {
-    pub fn new(vertices: Vec<Point3<f64>>, faces: Vec<(usize, usize, usize)>) -> Self {
-        Self {
+    /// Create a new trimesh from a vec of tuple values.
+    pub fn new(vertices: Vec<Point3<f64>>, faces: Vec<(usize, usize, usize)>) -> Result<Self> {
+        Ok(Self {
             vertices,
             faces,
             _cache: RwLock::new(InnerCache::default()),
-        }
+            ..Default::default()
+        })
+    }
+
+    /// Create a Trimesh from flat slices of vertices and faces.
+    pub fn from_slice(vertices: &[f64], faces: &[usize]) -> Result<Self> {
+        let vertices: Vec<Point3<f64>> = vertices
+            .chunks_exact(3)
+            .map(|chunk| Point3::new(chunk[0], chunk[1], chunk[2]))
+            .collect();
+
+        let faces: Vec<(usize, usize, usize)> = faces
+            .chunks_exact(3)
+            .map(|chunk| (chunk[0], chunk[1], chunk[2]))
+            .collect();
+
+        Ok(Self {
+            vertices,
+            faces,
+            _cache: RwLock::new(InnerCache::default()),
+            ..Default::default()
+        })
     }
 
     pub fn simplify(&self, target_count: usize, aggressiveness: f64) -> Self {
@@ -54,42 +78,15 @@ impl Trimesh {
             false,
         );
 
-        Trimesh {
+        Self {
             vertices,
             faces,
             _cache: RwLock::new(InnerCache::default()),
+            ..Default::default()
         }
-    }
-
-    /// Create a Trimesh from flat slices of vertices and faces.
-    pub fn from_slice(vertices: &[f64], faces: &[usize]) -> Result<Self> {
-        if vertices.len() % 3 != 0 {
-            return Err(anyhow::anyhow!("Vertices must be a multiple of 3"));
-        }
-        if faces.len() % 3 != 0 {
-            return Err(anyhow::anyhow!("Faces must be a multiple of 3"));
-        }
-
-        let v = vertices
-            .chunks_exact(3)
-            .map(|chunk| Point3::new(chunk[0], chunk[1], chunk[2]))
-            .collect::<Vec<_>>();
-
-        let f: Vec<(usize, usize, usize)> = faces
-            .chunks_exact(3)
-            .map(|chunk| (chunk[0], chunk[1], chunk[2]))
-            .collect();
-
-        Ok(Self {
-            vertices: v,
-            faces: f,
-
-            _cache: RwLock::new(InnerCache::default()),
-        })
     }
 
     /// Calculate the normals for each face of the mesh.
-    ///
     #[cache_access]
     pub fn face_normals(&self) -> Vec<Vector3<f64>> {
         let vertices = &self.vertices;
@@ -164,8 +161,7 @@ impl Trimesh {
             return Err(anyhow::anyhow!("Mesh has no vertices"));
         }
 
-        // start with bounds from the first vertex
-        let (mut lower, mut upper) = (self.vertices[0], self.vertices[0]);
+        let (mut lower, mut upper) = (self.vertices[0].clone(), self.vertices[0].clone());
         for vertex in self.vertices.iter().skip(1) {
             // use componentwise min/max
             lower = lower.inf(vertex);
