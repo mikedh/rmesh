@@ -2,7 +2,7 @@ use anyhow::Result;
 use nalgebra::Point3;
 use pyo3::prelude::*;
 
-use numpy::PyReadonlyArray3;
+use numpy::PyReadonlyArray2;
 
 use rmesh::exchange::{load_mesh, MeshFormat};
 use rmesh::mesh::Trimesh;
@@ -19,9 +19,16 @@ pub struct PyTrimesh {
 impl PyTrimesh {
     #[new]
     pub fn new<'py>(
-        vertices: PyReadonlyArray3<'py, f64>,
-        faces: PyReadonlyArray3<'py, i64>,
+        vertices: PyReadonlyArray2<'py, f64>,
+        faces: PyReadonlyArray2<'py, i64>,
     ) -> Result<Self> {
+        let vertices: Vec<Point3<f64>> = vertices
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|x| Point3::new(x[0], x[1], x[2]))
+            .collect::<Vec<_>>();
+
         let faces: Vec<(usize, usize, usize)> = faces
             .as_array()
             .rows()
@@ -29,14 +36,8 @@ impl PyTrimesh {
             .map(|x| (x[0] as usize, x[1] as usize, x[2] as usize))
             .collect::<Vec<_>>();
 
-        let vertices: Vec<Point3<f64>> = vertices
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|x| Point3::new(x[0], x[1], x[2]))
-            .collect::<Vec<_>>();
         Ok(PyTrimesh {
-            data: Trimesh::new(vertices, faces),
+            data: Trimesh::new(vertices, faces)?,
         })
     }
 

@@ -18,30 +18,36 @@ pub fn create_box(extents: &[f64; 3]) -> Trimesh {
 
     // Flattened vertices array
     let vertices = vec![
-        -half_extents[0], -half_extents[1], -half_extents[2],
-         half_extents[0], -half_extents[1], -half_extents[2],
-         half_extents[0],  half_extents[1], -half_extents[2],
-        -half_extents[0],  half_extents[1], -half_extents[2],
-        -half_extents[0], -half_extents[1],  half_extents[2],
-         half_extents[0], -half_extents[1],  half_extents[2],
-         half_extents[0],  half_extents[1],  half_extents[2],
-        -half_extents[0],  half_extents[1],  half_extents[2],
+        -half_extents[0],
+        -half_extents[1],
+        -half_extents[2],
+        half_extents[0],
+        -half_extents[1],
+        -half_extents[2],
+        half_extents[0],
+        half_extents[1],
+        -half_extents[2],
+        -half_extents[0],
+        half_extents[1],
+        -half_extents[2],
+        -half_extents[0],
+        -half_extents[1],
+        half_extents[2],
+        half_extents[0],
+        -half_extents[1],
+        half_extents[2],
+        half_extents[0],
+        half_extents[1],
+        half_extents[2],
+        -half_extents[0],
+        half_extents[1],
+        half_extents[2],
     ];
 
     // Flattened faces array
     let faces = vec![
-        0, 1, 2,
-        0, 2, 3,
-        4, 5, 6,
-        4, 6, 7,
-        0, 1, 5,
-        0, 5, 4,
-        2, 3, 7,
-        2, 7, 6,
-        1, 2, 6,
-        1, 6, 5,
-        3, 0, 4,
-        3, 4, 7,
+        0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5,
+        3, 0, 4, 3, 4, 7,
     ];
 
     // Create the mesh using Trimesh::from_slice

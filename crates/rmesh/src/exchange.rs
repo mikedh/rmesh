@@ -17,7 +17,6 @@ struct BinaryStlTriangle {
     pub attributes: u16,
 }
 
-
 impl BinaryStl {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 84 {
@@ -36,16 +35,18 @@ impl BinaryStl {
         })
     }
 
-    pub fn to_mesh(&self) -> Trimesh {
+    pub fn to_mesh(&self) -> Result<Trimesh> {
         // convert STL f32 vertices to f64
         let vertices: Vec<f64> = self
             .triangles
             .par_iter()
-            .flat_map(|triangle| triangle.convert_vertices())
+            .flat_map(|t| {
+                let vertices = t.vertices; // Copy the packed field to a local variable
+                vertices.iter().map(|&v| v as f64).collect::<Vec<_>>()
+            })
             .collect();
 
-        let faces: Vec<usize> = (0..vertices.len()).collect();
-
+        let faces: Vec<usize> = (0..(vertices.len() / 3)).collect();
 
         Trimesh::from_slice(&vertices, &faces)
     }
@@ -55,20 +56,20 @@ impl BinaryStl {
 /// which can later be turned into a more useful structure.
 #[derive(Debug, PartialEq)]
 enum ObjLine {
-    // A vertex position
-    V(Point3<f64>),
+    // A vertex position and optionally a vertex color in some OBJ exporters.
+    V(Point3<f64>, Option<[u8; 4]>),
     // A vertex normal
     Vn(Vector3<f64>),
     // A vertex UV texture coordinate
     Vt(Vector3<f64>),
-    // A vertex color
-    Vc(Vector4<f64>),
     // An OBJ face
     F(Vec<Vec<Option<usize>>>),
     // A new-object command
     O(String),
     // A group command
     G(String),
+    // A smoothing group command
+    S(String),
     // A usemtl command
     UseMtl(String),
     // A mtllib command defining a particular material
@@ -90,32 +91,38 @@ impl ObjLine {
             .collect();
 
         match parts.as_slice() {
-            ["v", x, y, z] => ObjLine::V(Point3::new(
-                x.parse().unwrap(),
-                y.parse().unwrap(),
-                z.parse().unwrap(),
-            )),
+            ["v", x, y, z] => ObjLine::V(
+                Point3::new(x.parse().unwrap(), y.parse().unwrap(), z.parse().unwrap()),
+                None,
+            ),
+            ["v", x, y, z, color @ ..] => {
+                // they've encoded some other color data after the vertex
+                ObjLine::V(
+                    Point3::new(x.parse().unwrap(), y.parse().unwrap(), z.parse().unwrap()),
+                    float_to_rgba(color),
+                )
+            }
             ["vn", x, y, z] => ObjLine::Vn(Vector3::new(
                 x.parse().unwrap(),
                 y.parse().unwrap(),
                 z.parse().unwrap(),
             )),
-            ["vt", u, v] => ObjLine::Vt(Vector3::new(u.parse().unwrap(), v.parse().unwrap(), 0.0)),
-            ["o", name @ ..] => ObjLine::O(name.join(" ")),
-            ["g", name @ ..] => ObjLine::G(name.join(" ")),
-            ["usemtl", name] => ObjLine::UseMtl(name.to_string()),
-            ["mtllib", name] => ObjLine::MtlLib(name.to_string()),
-            ["f", blob @ ..] => {
-                // the OBJ format allows v/vt/vn, v//vn, v/vt, v
-                let payload: Vec<Vec<Option<usize>>> = blob
-                    .iter()
-                    .map(|f| f.split('/').map(|s| s.parse::<usize>().ok()).collect())
-                    .collect();
-
-                // println!("blob: {:?}", blob);
-                // println!("payload: {:?}", payload);
-                ObjLine::F(payload)
+            ["vt", u, v, _garbage @ ..] => {
+                ObjLine::Vt(Vector3::new(u.parse().unwrap(), v.parse().unwrap(), 0.0))
             }
+            ["o", name @ ..] => ObjLine::O(name.join(" ")),
+            ["s", name @ ..] => ObjLine::S(name.join(" ")),
+            ["g", name @ ..] => ObjLine::G(name.join(" ")),
+            ["usemtl", name @ ..] => ObjLine::UseMtl(name.join(" ")),
+            ["mtllib", name @ ..] => ObjLine::MtlLib(name.join(" ")),
+            ["f", blob @ ..] => ObjLine::F(
+                // this way of parsing supports face references like:
+                // 1/2/3, 1//3, 1/2, 1
+                // and will return None for any missing values which can be analyzed later
+                blob.iter()
+                    .map(|f| f.split('/').map(|s| s.parse::<usize>().ok()).collect())
+                    .collect(),
+            ),
 
             _ => ObjLine::Ignore(line.to_string()),
         }
@@ -144,14 +151,34 @@ impl ObjMesh {
         return Ok(Self { lines });
     }
 
-    pub fn to_mesh(&self) -> Trimesh {
+    pub fn to_mesh(&self) -> Result<Trimesh> {
         // convert OBJ f32 vertices to f64
-        let vertices: Vec<Point3<f64>> = vec![];
-        let faces: Vec<(usize, usize, usize)> = vec![];
-        Trimesh::new(vertices, faces)
+        let vertices: Vec<f64> = vec![];
+        let faces: Vec<usize> = vec![];
+        Trimesh::from_slice(&vertices, &faces)
     }
 }
 
+fn float_to_rgba(raw: &[&str]) -> Option<[u8; 4]> {
+    if raw.len() < 3 {
+        return None;
+    }
+
+    // start with only alpha set
+    let mut color = [0u8, 0u8, 0u8, 255u8];
+    for (i, c) in raw.iter().enumerate() {
+        if i > 4 {
+            break;
+        }
+        let value = c.parse::<f64>();
+        match value {
+            Ok(v) => color[i] = (v * 255.0).round().clamp(0.0, 255.0) as u8,
+            Err(_) => return None,
+        }
+    }
+
+    Some(color)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 // An enum to represent the different mesh file formats.
@@ -176,8 +203,8 @@ impl MeshFormat {
 
 pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
     match file_type {
-        MeshFormat::STL => Ok(BinaryStl::from_bytes(file_data)?.to_mesh()),
-        MeshFormat::OBJ => Ok(ObjMesh::from_string(std::str::from_utf8(file_data)?)?.to_mesh()),
+        MeshFormat::STL => BinaryStl::from_bytes(file_data)?.to_mesh(),
+        MeshFormat::OBJ => ObjMesh::from_string(std::str::from_utf8(file_data)?)?.to_mesh(),
         MeshFormat::PLY => todo!(),
     }
 }
@@ -205,7 +232,6 @@ mod tests {
         assert_eq!(MeshFormat::from_string(".STL").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string("  .StL ").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
-
     }
 
     #[test]

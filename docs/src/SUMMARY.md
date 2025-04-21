@@ -1,2 +1,2 @@
-- [Introduction](./introduction.md)
-- [Available Packages](./packages.md)
+- [Introduction](../../README.md)
+- [Packaging](./packages.md)
