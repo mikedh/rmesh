@@ -12,24 +12,11 @@ pub struct BinaryStl {
 #[repr(C, packed)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct BinaryStlTriangle {
-    pub normal: Vector3<f32>,
-    pub vertices: [Point3<f32>; 3],
+    pub normal: [f32; 3],
+    pub vertices: [f32; 9],
     pub attributes: u16,
 }
 
-impl BinaryStlTriangle {
-    pub fn convert_normal(&self) -> Vector3<f64> {
-        convert(self.normal)
-    }
-
-    pub fn convert_vertices(&self) -> [Point3<f64>; 3] {
-        [
-            convert(self.vertices[0]),
-            convert(self.vertices[1]),
-            convert(self.vertices[2]),
-        ]
-    }
-}
 
 impl BinaryStl {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
@@ -51,21 +38,22 @@ impl BinaryStl {
 
     pub fn to_mesh(&self) -> Trimesh {
         // convert STL f32 vertices to f64
-        let vertices: Vec<Point3<f64>> = self
+        let vertices: Vec<f64> = self
             .triangles
             .par_iter()
             .flat_map(|triangle| triangle.convert_vertices())
             .collect();
 
-        let faces: Vec<(usize, usize, usize)> = (0..vertices.len()).tuples().collect();
+        let faces: Vec<usize> = (0..vertices.len()).collect();
 
-        Trimesh::new(vertices, faces)
+
+        Trimesh::from_slice(&vertices, &faces)
     }
 }
 
 /// The intermediate representation of a single line from an OBJ file,
 /// which can later be turned into a more useful structure.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum ObjLine {
     // A vertex position
     V(Point3<f64>),
@@ -135,9 +123,8 @@ impl ObjLine {
 }
 
 pub struct ObjMesh {
-
     // the raw values, most people shouldn't
-    lines: Vec<ObjLine>,
+    pub lines: Vec<ObjLine>,
 }
 
 impl ObjMesh {
@@ -165,6 +152,8 @@ impl ObjMesh {
     }
 }
 
+
+#[derive(Debug, Clone, PartialEq)]
 // An enum to represent the different mesh file formats.
 pub enum MeshFormat {
     STL,
@@ -175,7 +164,8 @@ pub enum MeshFormat {
 impl MeshFormat {
     /// Convert a string to a MeshFormat enum.
     pub fn from_string(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().trim() {
+        // clean up to match 'stl', '.stl', ' .STL ', etc
+        match s.to_ascii_lowercase().trim().trim_start_matches('.') {
             "stl" => Ok(MeshFormat::STL),
             "obj" => Ok(MeshFormat::OBJ),
             "ply" => Ok(MeshFormat::PLY),
@@ -208,12 +198,37 @@ mod tests {
     }
 
     #[test]
+    fn test_mesh_format_keys() {
+        assert_eq!(MeshFormat::from_string("stl").unwrap(), MeshFormat::STL);
+        assert_eq!(MeshFormat::from_string("STL").unwrap(), MeshFormat::STL);
+        assert_eq!(MeshFormat::from_string(".stl").unwrap(), MeshFormat::STL);
+        assert_eq!(MeshFormat::from_string(".STL").unwrap(), MeshFormat::STL);
+        assert_eq!(MeshFormat::from_string("  .StL ").unwrap(), MeshFormat::STL);
+        assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
+
+    }
+
+    #[test]
     fn test_mesh_obj() {
         let data = include_bytes!("../../../test/data/basic.obj");
 
-        let mesh = load_mesh(data, MeshFormat::OBJ).unwrap();
+        let parsed = ObjMesh::from_string(std::str::from_utf8(data).unwrap())
+            .unwrap()
+            .lines;
 
-        // let required: Vec<ObjLine> = vec![ObjLine::O("cube for life!!".to_string())];
+        // check a few parse results of more difficult lines
+        let required: Vec<ObjLine> = vec![ObjLine::O("cube for life!!!".to_string())];
+
+        // make sure we implemented the PartialEq trait
+        assert_eq!(required[0], required[0]);
+
+        // we should
+        for req in required.iter() {
+            assert!(parsed.contains(&req), "missing line: {:?}", req);
+        }
+
+        // make sure the OBJ file was loadable into a mesh
+        let mesh = load_mesh(data, MeshFormat::OBJ).unwrap();
 
         //assert_eq!(mesh.vertices.len(), 36);
         //assert_eq!(mesh.faces.len(), 12);
