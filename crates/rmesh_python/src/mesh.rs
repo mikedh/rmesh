@@ -17,7 +17,9 @@ pub struct PyTrimesh {
 
 #[pymethods]
 impl PyTrimesh {
+
     #[new]
+    /// (pyfunc) Create a new Trimesh from vertices and faces.
     pub fn new<'py>(
         vertices: PyReadonlyArray2<'py, f64>,
         faces: PyReadonlyArray2<'py, i64>,
@@ -46,7 +48,7 @@ impl PyTrimesh {
     }
 }
 
-/// Load a mesh from a file, doing no initial processing.
+/// (pyfunc) Load a mesh from a file, doing no initial processing.
 #[pyfunction(name = "load_mesh")]
 pub fn py_load_mesh(file_data: &[u8], file_type: String) -> Result<PyTrimesh> {
     let data = load_mesh(file_data, MeshFormat::from_string(&file_type)?)?;

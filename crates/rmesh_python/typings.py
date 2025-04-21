@@ -22,7 +22,7 @@ def run_formatter():
 
 def get_typings():
     run_json_docgen()
-    json_path = os.path.join(target, "doc", "rmesh.json")
+    json_path = os.path.join(target, "doc", "rmesh_python.json")
     with open(json_path, encoding="utf8") as src:
         return json.load(src)["index"]
 
@@ -56,7 +56,12 @@ def clean_type(typename: str) -> str:
 
 
 def get_inner_type(info: TypeInfo):
-    return info["resolved_path"]["args"]["angle_bracketed"]["args"][0]["type"]
+    try:
+        args = info["resolved_path"]["args"]["angle_bracketed"]["args"]
+    except KeyError:
+        return None
+
+    return next((a["type"] for a in args if "type" in a), None)
 
 
 def clean_name(name: str) -> str:
@@ -87,6 +92,17 @@ def format_type(info: TypeInfo, classname: Optional[str] = None) -> str:
             return format_type(get_inner_type(info), classname)
         elif resolved_name == "Vec":
             return f"list[{format_type(get_inner_type(info), classname)}]"
+        elif resolved_name.startswith("PyReadonlyArray"):
+            prim = get_inner_type(info)["primitive"]
+            if prim == "f32":
+                return "NDArray[float32]"
+            elif prim == "f64":
+                return "NDArray[float64]"
+            elif prim == "i64":
+                return "NDArray[int64]"
+            else:
+                raise ValueError(info)
+                return "NDArray"
         else:
             return clean_name(clean_type(resolved_name))  # '"' + resolved_name + '"'
     elif "borrowed_ref" in info:
@@ -184,6 +200,9 @@ def find_methods(typings: dict[str, TypeInfo]) -> dict[str, list[FuncInfo]]:
                     res[classname].append(extract_func(typings[str(item)]))
             elif docstr.startswith("(pyfunc)"):
                 res["__global"].append(extract_func(v))
+            else:
+                print(f"Unknown docstr: {docstr}")
+
     return res
 
 
@@ -201,13 +220,24 @@ def emit_methods(methods: list[FuncInfo], classname: str | None) -> str:
     return res + "\n".join(sorted(bodies))
 
 
-PREAMBLE = """from typing import Any"""
+# ruff postprocessing will remove anything that wasn't used
+PREAMBLE = "\n".join(
+    [
+        "from typing import Any",
+        "from numpy.typing import NDArray",
+        "from numpy import float64, float32, int64, uint32",
+    ]
+)
+
 
 if __name__ == "__main__":
     run_json_docgen()
     print("Emitted JSON")
     typings = get_typings()
     meths = find_methods(typings)
+
+    print(meths)
+
     items = [emit_methods(v, k) for k, v in meths.items()]
     print(typings)
     items = sorted(items)

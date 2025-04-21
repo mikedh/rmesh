@@ -1,6 +1,8 @@
-use pyo3::prelude::*;
 mod mesh;
-use mesh::{py_load_mesh, PyTrimesh};
+
+pub use mesh::{py_load_mesh, PyTrimesh};
+
+use pyo3::prelude::*;
 
 /// A Python module implemented in Rust.
 #[pymodule]
