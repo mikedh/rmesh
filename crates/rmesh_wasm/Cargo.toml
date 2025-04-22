@@ -25,9 +25,8 @@ rmesh = { path = "../rmesh" }
 console_error_panic_hook = { version = "0.1.7", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# required for wasm to build correctly
 getrandom = { version = "0.2", features = ["js"] }
-
-
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

@@ -20,6 +20,9 @@ pub struct Trimesh {
     pub vertices: Vec<Point3<f64>>,
     pub faces: Vec<(usize, usize, usize)>,
 
+    // A flat list of attributes so we can define things like
+    // multiple colors, normals, uv coordinates, etc and can pick
+    // which ones we want to use at runtime or at the application level
     pub attributes_vertex: Vec<Attribute>,
     pub attributes_face: Vec<Attribute>,
 

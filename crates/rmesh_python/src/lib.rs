@@ -1,6 +1,6 @@
 mod mesh;
 
-pub use mesh::{py_load_mesh, PyTrimesh};
+pub use mesh::{PyTrimesh, py_load_mesh};
 
 use pyo3::prelude::*;
 

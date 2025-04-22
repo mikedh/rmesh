@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 
 use numpy::PyReadonlyArray2;
 
-use rmesh::exchange::{load_mesh, MeshFormat};
+use rmesh::exchange::{MeshFormat, load_mesh};
 use rmesh::mesh::Trimesh;
 
 //use crate::rmesh::mesh::{load_mesh, MeshFormat, Trimesh};
@@ -17,7 +17,6 @@ pub struct PyTrimesh {
 
 #[pymethods]
 impl PyTrimesh {
-
     #[new]
     /// (pyfunc) Create a new Trimesh from vertices and faces.
     pub fn new<'py>(

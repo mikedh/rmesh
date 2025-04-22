@@ -4,15 +4,15 @@
 
 ## Background
 
-Trimesh was originally a [research codebase](https://github.com/mikedh/ifab_archive) that grew organically to solve problems [I care about](https://carvewizard.com). It's probably popular because it tries quite hard to avoid being annoying: `pip install` always works, it caches expensive values automatically on the mesh object, and it uses [occasionally convoluted numpy indexing tricks](https://github.com/mikedh/trimesh/blob/4c83215f3ad749c4d4596598dbb6bcc26c0647cf/trimesh/exchange/obj.py#L137-L151) to avoid Evil Python Behavior such as loops of any sort. When I've benchmarked it, it often performs order-of-magnitude similar to carefully written compiled mesh codebases for many common tasks. It also is opinionated and maybe a little too magical sometimes, given my Very Strong Opinions that most applications for meshes are should be like 10 lines. 
+Trimesh was originally a [research codebase](https://github.com/mikedh/ifab_archive) that grew organically to solve problems [I care about](https://carvewizard.com). It's probably popular because it tries quite hard to avoid being annoying: `pip install` always works, it caches expensive values automatically on the mesh object, and it uses [occasionally convoluted numpy indexing tricks](https://github.com/mikedh/trimesh/blob/4c83215f3ad749c4d4596598dbb6bcc26c0647cf/trimesh/exchange/obj.py#L137-L151) to avoid Evil Python Behavior such as loops of any sort. When I've benchmarked it, it often performs order-of-magnitude similar to carefully written compiled mesh codebases for many common tasks. It also is opinionated and maybe a little too magical sometimes, given my Very Strong Opinions that most applications that consume meshes should be like 10 lines.
 
 It also predates type hints and has a [larger than ideal number of optional dependencies](https://trimesh.org/install.html#dependency-overview) which require some effort to maintain. There's also been a revolution in the Python ecosystem where some great [Python libraries](https://github.com/astral-sh/ruff) are now written in Rust, thanks to the awesome work of [`PyO3`](https://pyo3.rs) and [`cibuildwheel`](https://github.com/pypa/cibuildwheel). Rmesh is intended to package similarly to [`polars`](https://pola.rs/), where it is written in Rust but usable from both Python and Rust. Rust is also a nice low-level language with great tooling and is fast enough to implement very sensitive iterative algorithms.
 
 
 ## Goals
-- Targeting use as a clean Rust crate  (i.e. doesn't depend on PyO3), a nicely type hinted Python module, and a WASM build.
-- Be faster than trimesh for every function call and pass many-to-most of trimesh's unit tests.
-- Have a relatively small number of carefully chosen dependencies, and prefer to vendor/re-write the rest in Rust. Generally try to keep it to major crates, like `nalgebra`, `anyhow`, `bytemuck`, although if there's a well-maintained implementation of something in pure Rust we should use it.
+- Targeting use as a Rust crate, a nicely type hinted Python module, and WASM. WASM is mostly because `wasm-pack` made it kind of easy, and keeping the build in CI from the start makes sure we don't add things that break WASM builds.
+- Be generally faster than trimesh and pass many-to-most of trimesh's unit tests.
+- Have a relatively small number of carefully chosen dependencies, and prefer to vendor/re-write the rest in Rust. Generally try to keep it to major crates, like `nalgebra`, `anyhow`, `bytemuck`, although if there's a well-maintained implementation of something in pure Rust we should use it (i.e. [earcut](https://github.com/ciscorn/earcut-rs)).
 - Build Python wheels for every platform using cibuildwheel.
 
 

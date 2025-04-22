@@ -57,7 +57,7 @@ impl BinaryStl {
 #[derive(Debug, PartialEq)]
 enum ObjLine {
     // A vertex position and optionally a vertex color in some OBJ exporters.
-    V(Point3<f64>, Option<[u8; 4]>),
+    V(Point3<f64>, Option<Vector4<u8>>),
     // A vertex normal
     Vn(Vector3<f64>),
     // A vertex UV texture coordinate
@@ -152,14 +152,44 @@ impl ObjMesh {
     }
 
     pub fn to_mesh(&self) -> Result<Trimesh> {
-        // convert OBJ f32 vertices to f64
-        let vertices: Vec<f64> = vec![];
-        let faces: Vec<usize> = vec![];
-        Trimesh::from_slice(&vertices, &faces)
+        let mut vertices: Vec<Point3<f64>> = vec![];
+        let mut vertex_normals: Vec<Vector3<f64>> = vec![];
+        let mut vertex_uvs: Vec<Vector3<f64>> = vec![];
+        let mut vertex_groups: Vec<Vec<usize>> = vec![];
+        let mut vertex_materials: Vec<usize> = vec![];
+        let mut vertex_colors: Vec<Vector4<u8>> = vec![];
+
+        let mut faces: Vec<(usize, usize, usize)> = vec![];
+
+        let mut current_material: Option<String> = None;
+        let mut current_group: Option<String> = None;
+        for line in self.lines.iter() {
+            match line {
+                ObjLine::V(p, color) => {
+                    vertices.push(*p);
+                    if let Some(c) = color {
+                        vertex_colors.push(*c);
+                    } else {
+                        vertex_colors.push(Vector4::new(255, 255, 255, 255));
+                    }
+                }
+                ObjLine::Vn(n) => vertex_normals.push(*n),
+                ObjLine::Vt(t) => vertex_uvs.push(*t),
+                ObjLine::F(faces_raw) => (),
+                ObjLine::O(_) => (),
+                ObjLine::G(_) => (),
+                ObjLine::S(_) => (),
+                ObjLine::UseMtl(name) => current_material = Some(name.to_string()),
+                ObjLine::MtlLib(_) => (),
+                ObjLine::Ignore(_) => (),
+            }
+        }
+        Trimesh::new(vertices, faces)
     }
 }
 
-fn float_to_rgba(raw: &[&str]) -> Option<[u8; 4]> {
+/// Convert a string slice containing float color values to a Vector4<u8>.
+fn float_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
     if raw.len() < 3 {
         return None;
     }
@@ -177,7 +207,7 @@ fn float_to_rgba(raw: &[&str]) -> Option<[u8; 4]> {
         }
     }
 
-    Some(color)
+    Some(color.into())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,11 +222,13 @@ impl MeshFormat {
     /// Convert a string to a MeshFormat enum.
     pub fn from_string(s: &str) -> Result<Self> {
         // clean up to match 'stl', '.stl', ' .STL ', etc
-        match s.to_ascii_lowercase().trim().trim_start_matches('.') {
+        let binding = s.to_ascii_lowercase();
+        let clean = binding.trim().trim_start_matches('.');
+        match clean {
             "stl" => Ok(MeshFormat::STL),
             "obj" => Ok(MeshFormat::OBJ),
             "ply" => Ok(MeshFormat::PLY),
-            _ => Err(anyhow::anyhow!("Unsupported file type: {}", s)),
+            _ => Err(anyhow::anyhow!("Unsupported file type: `{}`", clean)),
         }
     }
 }
@@ -226,21 +258,30 @@ mod tests {
 
     #[test]
     fn test_mesh_format_keys() {
+        // check our string cleanup logic
         assert_eq!(MeshFormat::from_string("stl").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string("STL").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string(".stl").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string(".STL").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string("  .StL ").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
+
+        assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
+
+        assert_eq!(MeshFormat::from_string("ply").unwrap(), MeshFormat::PLY);
+        assert_eq!(MeshFormat::from_string("PLY").unwrap(), MeshFormat::PLY);
+        assert_eq!(MeshFormat::from_string(".ply").unwrap(), MeshFormat::PLY);
+        assert_eq!(MeshFormat::from_string(".PLY").unwrap(), MeshFormat::PLY);
+        assert_eq!(MeshFormat::from_string("  .pLy ").unwrap(), MeshFormat::PLY);
+
+        assert!(MeshFormat::from_string("foo").is_err());
     }
 
     #[test]
     fn test_mesh_obj() {
-        let data = include_bytes!("../../../test/data/basic.obj");
+        let data = include_str!("../../../test/data/basic.obj");
 
-        let parsed = ObjMesh::from_string(std::str::from_utf8(data).unwrap())
-            .unwrap()
-            .lines;
+        let parsed = ObjMesh::from_string(data).unwrap().lines;
 
         // check a few parse results of more difficult lines
         let required: Vec<ObjLine> = vec![ObjLine::O("cube for life!!!".to_string())];
@@ -254,9 +295,12 @@ mod tests {
         }
 
         // make sure the OBJ file was loadable into a mesh
-        let mesh = load_mesh(data, MeshFormat::OBJ).unwrap();
+        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
 
-        //assert_eq!(mesh.vertices.len(), 36);
-        //assert_eq!(mesh.faces.len(), 12);
+        // should have loaded a vertex for every occurance of 'v '
+        assert_eq!(mesh.vertices.len(), data.matches("v ").count());
+        // todo : implement faces
+        // should have loaded a face for every occurance of 'f '
+        // assert_eq!(mesh.faces.len(), data.matches("f ").count());
     }
 }
