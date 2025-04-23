@@ -297,10 +297,10 @@ mod tests {
         // make sure the OBJ file was loadable into a mesh
         let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
 
-        // should have loaded a vertex for every occurance of 'v '
+        // should have loaded a vertex for every occurrence of 'v '
         assert_eq!(mesh.vertices.len(), data.matches("v ").count());
         // todo : implement faces
-        // should have loaded a face for every occurance of 'f '
+        // should have loaded a face for every occurrence of 'f '
         // assert_eq!(mesh.faces.len(), data.matches("f ").count());
     }
 }
