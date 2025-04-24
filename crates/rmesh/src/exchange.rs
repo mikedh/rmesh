@@ -101,7 +101,7 @@ impl ObjLine {
                 // they've encoded some other color data after the vertex
                 ObjLine::V(
                     Point3::new(x.parse().unwrap(), y.parse().unwrap(), z.parse().unwrap()),
-                    float_to_rgba(color),
+                    str_to_rgba(color),
                 )
             }
             ["vn", x, y, z] => ObjLine::Vn(Vector3::new(
@@ -230,18 +230,24 @@ impl ObjMesh {
     }
 }
 
-/// Convert a string slice containing float color values to a Vector4<u8>.
-fn float_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
+/// Convert a string slice containing 0.0 to 1.0 float colors
+/// to a Vector4<u8> color.
+///
+/// Parameters
+/// -----------
+/// raw
+///   A slice of string slices containing the color values.
+/// Returns
+/// --------
+///   An RGBA color or None if the input is invalid.
+fn str_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
     if raw.len() < 3 {
         return None;
     }
 
-    // start with only alpha set
-    let mut color = [0u8, 0u8, 0u8, 255u8];
-    for (i, c) in raw.iter().enumerate() {
-        if i > 4 {
-            break;
-        }
+    // start with only alpha
+    let mut color: Vector4<u8> = Vector4::new(0u8, 0u8, 0u8, 255u8);
+    for (i, c) in raw.iter().take(4).enumerate() {
         let value = c.parse::<f64>();
         match value {
             Ok(v) => color[i] = (v * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -287,6 +293,23 @@ pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn test_color_parse() {
+        let raw = vec!["0.5", "0.5", "0.5", "0.5"];
+        let color = str_to_rgba(&raw).unwrap();
+        assert_eq!(color, Vector4::new(128, 128, 128, 128));
+
+        let raw = vec!["0.5", "0.5", "0.5"];
+        let color = str_to_rgba(&raw).unwrap();
+        assert_eq!(color, Vector4::new(128, 128, 128, 255));
+        let raw = vec!["0.5", "0.5"];
+        let color = str_to_rgba(&raw);
+        assert_eq!(color, None);
+        let raw = vec!["1.0", "1", "1", "0.0"];
+        let color = str_to_rgba(&raw).unwrap();
+        assert_eq!(color, Vector4::new(255, 255, 255, 0));
+    }
 
     #[test]
     fn test_mesh_stl() {
