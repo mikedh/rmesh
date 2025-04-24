@@ -3,6 +3,7 @@ use itertools::Itertools;
 use nalgebra::{Point3, Vector3, Vector4, convert};
 use rayon::prelude::*;
 
+use crate::creation::Triangulator;
 use crate::mesh::Trimesh;
 
 pub struct BinaryStl {
@@ -80,6 +81,7 @@ enum ObjLine {
 }
 
 impl ObjLine {
+    /// Parse a single raw OBJ line into native types
     fn from_line(line: &str) -> Self {
         // clean up a raw OBJ line: ignore anything after a comment then cleanly split it
         let parts: Vec<&str> = line
@@ -152,6 +154,7 @@ impl ObjMesh {
     }
 
     pub fn to_mesh(&self) -> Result<Trimesh> {
+        // keep a bunch of mutable arrays as we go
         let mut vertices: Vec<Point3<f64>> = vec![];
         let mut vertex_normals: Vec<Vector3<f64>> = vec![];
         let mut vertex_uvs: Vec<Vector3<f64>> = vec![];
@@ -159,10 +162,26 @@ impl ObjMesh {
         let mut vertex_materials: Vec<usize> = vec![];
         let mut vertex_colors: Vec<Vector4<u8>> = vec![];
 
+        // todo : this one sucks
         let mut faces: Vec<(usize, usize, usize)> = vec![];
 
-        let mut current_material: Option<String> = None;
+        // in an OBJ file if there is a "directive" like "usemtl" or "g"
+        // it means that the faces or vertices that follow it are part of that
+        // directive until it's overridden by another directive
+        // so we need to keep track of the current directive and apply it as we go.
+        let mut current_material: usize = 0;
+        let mut materials: Vec<Option<String>> = vec![None];
+        let mut groups: Vec<Option<String>> = vec![None];
+        let mut current_group: usize = 0;
+
         let mut current_group: Option<String> = None;
+        let mut current_object: Option<String> = None;
+        let mut current_smooth: Option<String> = None;
+
+        let mut triangulator = Triangulator::new();
+
+        let mut collect_faces: Vec<ObjLine> = vec![];
+
         for line in self.lines.iter() {
             match line {
                 ObjLine::V(p, color) => {
@@ -175,11 +194,34 @@ impl ObjMesh {
                 }
                 ObjLine::Vn(n) => vertex_normals.push(*n),
                 ObjLine::Vt(t) => vertex_uvs.push(*t),
-                ObjLine::F(faces_raw) => (),
-                ObjLine::O(_) => (),
-                ObjLine::G(_) => (),
-                ObjLine::S(_) => (),
-                ObjLine::UseMtl(name) => current_material = Some(name.to_string()),
+                ObjLine::F(raw) => {
+                    // just take the vertex index for now
+                    let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
+
+                    if f.len() == 3 {
+                        // if we have a triangle this is easy
+                        faces.push((f[0], f[1], f[2]));
+                    } else if f.len() == 4 {
+                        // if we have a quad, split it into two triangles
+                        faces.push((f[0], f[1], f[2]));
+                        faces.push((f[0], f[2], f[3]));
+                    } else if f.len() > 4 {
+                        // if we have a polygon triangulate it with earcut
+                        // you could also do a simple fan triangulation here:
+                        // faces.extend((1..f.len() - 1).map(|i| (f[0], f[i], f[i + 1])));
+
+                        // TODO : do we have to do this in a second pass to avoid referencing vertices
+                        // that haven't been added yet?
+                        faces.extend(triangulator.triangulate_3d(&f, &[], &vertices))
+                    }
+                }
+                ObjLine::O(name) => current_object = Some(name.to_string()),
+                ObjLine::G(name) => current_group = Some(name.to_string()),
+                ObjLine::S(name) => current_smooth = Some(name.to_string()),
+                ObjLine::UseMtl(name) => {
+                    materials.push(Some(name.to_string()));
+                    current_material = materials.len();
+                }
                 ObjLine::MtlLib(_) => (),
                 ObjLine::Ignore(_) => (),
             }
@@ -301,6 +343,8 @@ mod tests {
         assert_eq!(mesh.vertices.len(), data.matches("v ").count());
         // todo : implement faces
         // should have loaded a face for every occurrence of 'f '
-        // assert_eq!(mesh.faces.len(), data.matches("f ").count());
+        assert_eq!(mesh.faces.len(), data.matches("f ").count());
+
+        println!("mesh: {:?}", mesh);
     }
 }
