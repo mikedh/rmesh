@@ -3,6 +3,7 @@ use itertools::Itertools;
 use nalgebra::{Point3, Vector3, Vector4, convert};
 use rayon::prelude::*;
 
+use crate::creation::Triangulator;
 use crate::mesh::Trimesh;
 
 pub struct BinaryStl {
@@ -80,6 +81,7 @@ enum ObjLine {
 }
 
 impl ObjLine {
+    /// Parse a single raw OBJ line into native types
     fn from_line(line: &str) -> Self {
         // clean up a raw OBJ line: ignore anything after a comment then cleanly split it
         let parts: Vec<&str> = line
@@ -99,7 +101,7 @@ impl ObjLine {
                 // they've encoded some other color data after the vertex
                 ObjLine::V(
                     Point3::new(x.parse().unwrap(), y.parse().unwrap(), z.parse().unwrap()),
-                    float_to_rgba(color),
+                    str_to_rgba(color),
                 )
             }
             ["vn", x, y, z] => ObjLine::Vn(Vector3::new(
@@ -152,6 +154,7 @@ impl ObjMesh {
     }
 
     pub fn to_mesh(&self) -> Result<Trimesh> {
+        // keep a bunch of mutable arrays as we go
         let mut vertices: Vec<Point3<f64>> = vec![];
         let mut vertex_normals: Vec<Vector3<f64>> = vec![];
         let mut vertex_uvs: Vec<Vector3<f64>> = vec![];
@@ -159,10 +162,26 @@ impl ObjMesh {
         let mut vertex_materials: Vec<usize> = vec![];
         let mut vertex_colors: Vec<Vector4<u8>> = vec![];
 
+        // todo : this one sucks
         let mut faces: Vec<(usize, usize, usize)> = vec![];
 
-        let mut current_material: Option<String> = None;
+        // in an OBJ file if there is a "directive" like "usemtl" or "g"
+        // it means that the faces or vertices that follow it are part of that
+        // directive until it's overridden by another directive
+        // so we need to keep track of the current directive and apply it as we go.
+        let mut current_material: usize = 0;
+        let mut materials: Vec<Option<String>> = vec![None];
+        let mut groups: Vec<Option<String>> = vec![None];
+        let mut current_group: usize = 0;
+
         let mut current_group: Option<String> = None;
+        let mut current_object: Option<String> = None;
+        let mut current_smooth: Option<String> = None;
+
+        let mut triangulator = Triangulator::new();
+
+        let mut collect_faces: Vec<ObjLine> = vec![];
+
         for line in self.lines.iter() {
             match line {
                 ObjLine::V(p, color) => {
@@ -175,11 +194,34 @@ impl ObjMesh {
                 }
                 ObjLine::Vn(n) => vertex_normals.push(*n),
                 ObjLine::Vt(t) => vertex_uvs.push(*t),
-                ObjLine::F(faces_raw) => (),
-                ObjLine::O(_) => (),
-                ObjLine::G(_) => (),
-                ObjLine::S(_) => (),
-                ObjLine::UseMtl(name) => current_material = Some(name.to_string()),
+                ObjLine::F(raw) => {
+                    // just take the vertex index for now
+                    let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
+
+                    if f.len() == 3 {
+                        // if we have a triangle this is easy
+                        faces.push((f[0], f[1], f[2]));
+                    } else if f.len() == 4 {
+                        // if we have a quad, split it into two triangles
+                        faces.push((f[0], f[1], f[2]));
+                        faces.push((f[0], f[2], f[3]));
+                    } else if f.len() > 4 {
+                        // if we have a polygon triangulate it with earcut
+                        // you could also do a simple fan triangulation here:
+                        // faces.extend((1..f.len() - 1).map(|i| (f[0], f[i], f[i + 1])));
+
+                        // TODO : do we have to do this in a second pass to avoid referencing vertices
+                        // that haven't been added yet?
+                        faces.extend(triangulator.triangulate_3d(&f, &[], &vertices))
+                    }
+                }
+                ObjLine::O(name) => current_object = Some(name.to_string()),
+                ObjLine::G(name) => current_group = Some(name.to_string()),
+                ObjLine::S(name) => current_smooth = Some(name.to_string()),
+                ObjLine::UseMtl(name) => {
+                    materials.push(Some(name.to_string()));
+                    current_material = materials.len();
+                }
                 ObjLine::MtlLib(_) => (),
                 ObjLine::Ignore(_) => (),
             }
@@ -188,18 +230,24 @@ impl ObjMesh {
     }
 }
 
-/// Convert a string slice containing float color values to a Vector4<u8>.
-fn float_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
+/// Convert a string slice containing 0.0 to 1.0 float colors
+/// to a Vector4<u8> color.
+///
+/// Parameters
+/// -----------
+/// raw
+///   A slice of string slices containing the color values.
+/// Returns
+/// --------
+///   An RGBA color or None if the input is invalid.
+fn str_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
     if raw.len() < 3 {
         return None;
     }
 
-    // start with only alpha set
-    let mut color = [0u8, 0u8, 0u8, 255u8];
-    for (i, c) in raw.iter().enumerate() {
-        if i > 4 {
-            break;
-        }
+    // start with only alpha
+    let mut color: Vector4<u8> = Vector4::new(0u8, 0u8, 0u8, 255u8);
+    for (i, c) in raw.iter().take(4).enumerate() {
         let value = c.parse::<f64>();
         match value {
             Ok(v) => color[i] = (v * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -245,6 +293,23 @@ pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn test_color_parse() {
+        let raw = vec!["0.5", "0.5", "0.5", "0.5"];
+        let color = str_to_rgba(&raw).unwrap();
+        assert_eq!(color, Vector4::new(128, 128, 128, 128));
+
+        let raw = vec!["0.5", "0.5", "0.5"];
+        let color = str_to_rgba(&raw).unwrap();
+        assert_eq!(color, Vector4::new(128, 128, 128, 255));
+        let raw = vec!["0.5", "0.5"];
+        let color = str_to_rgba(&raw);
+        assert_eq!(color, None);
+        let raw = vec!["1.0", "1", "1", "0.0"];
+        let color = str_to_rgba(&raw).unwrap();
+        assert_eq!(color, Vector4::new(255, 255, 255, 0));
+    }
 
     #[test]
     fn test_mesh_stl() {
@@ -297,10 +362,12 @@ mod tests {
         // make sure the OBJ file was loadable into a mesh
         let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
 
-        // should have loaded a vertex for every occurance of 'v '
+        // should have loaded a vertex for every occurrence of 'v '
         assert_eq!(mesh.vertices.len(), data.matches("v ").count());
         // todo : implement faces
-        // should have loaded a face for every occurance of 'f '
-        // assert_eq!(mesh.faces.len(), data.matches("f ").count());
+        // should have loaded a face for every occurrence of 'f '
+        assert_eq!(mesh.faces.len(), data.matches("f ").count());
+
+        println!("mesh: {:?}", mesh);
     }
 }

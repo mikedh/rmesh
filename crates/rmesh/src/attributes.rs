@@ -11,7 +11,7 @@ pub enum Attribute {
     // What material was this face or vertex assigned to?
     Material(Vec<usize>),
     // Was this vertex or face part of a group?
-    Group(Vec<usize>),
+    Grouping(Vec<usize>),
     // RGB or RGBA color
     Color(Vec<Vector4<u8>>),
     // A normal vector
@@ -19,4 +19,16 @@ pub enum Attribute {
     // A (key, value) pair for custom attributes
     CustomFloat((String, Vec<Vector3<f64>>)),
     CustomInt((String, Vec<Vector3<i64>>)),
+}
+
+pub struct Grouping {
+    pub name: String,
+}
+
+pub struct Material {
+    pub name: String,
+    pub diffuse: Vector3<f64>,
+    pub specular: Vector3<f64>,
+    pub shininess: f64,
+    pub alpha: f64,
 }
