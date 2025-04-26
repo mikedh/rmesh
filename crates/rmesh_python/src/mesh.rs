@@ -38,7 +38,7 @@ impl PyTrimesh {
             .collect::<Vec<_>>();
 
         Ok(PyTrimesh {
-            data: Trimesh::new(vertices, faces)?,
+            data: Trimesh::new(vertices, faces, None)?,
         })
     }
 

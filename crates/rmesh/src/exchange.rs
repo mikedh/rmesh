@@ -3,6 +3,7 @@ use itertools::Itertools;
 use nalgebra::{Point3, Vector3, Vector4, convert};
 use rayon::prelude::*;
 
+use crate::attributes::Material;
 use crate::creation::{Triangulator, triangulate_fan};
 use crate::mesh::Trimesh;
 
@@ -129,12 +130,25 @@ impl ObjLine {
             _ => ObjLine::Ignore(line.to_string()),
         }
     }
+
+    fn load_materials(&self) -> Option<Vec<Material>> {
+        match self {
+            ObjLine::MtlLib(name) => {
+                // TODO : load the materials from the file
+                // and return them as a vector of Materials
+                // for now just return an empty vector
+                Some(vec![])
+            }
+            _ => None,
+        }
+    }
 }
 
 pub struct ObjMesh {
     // each line of the OBJ file parsed into a native type
     // but not evaluated into a mesh
     lines: Vec<ObjLine>,
+    materials: Vec<Material>,
 }
 
 impl ObjMesh {
@@ -146,12 +160,10 @@ impl ObjMesh {
             .iter() // TODO : check performance of par_iter ;)
             .map(|line| ObjLine::from_line(line))
             .collect();
-
-        // todo : this is for debug
-        for line in lines.iter() {
-            println!("{:?}", line);
-        }
-        return Ok(Self { lines });
+        Ok(Self {
+            lines,
+            materials: vec![],
+        })
     }
 
     /// Convert the parsed OBJ file into a mesh.
@@ -169,8 +181,6 @@ impl ObjMesh {
             pub vertices: Vec<Point3<f64>>,
             pub normal: Vec<Vector3<f64>>,
             pub uv: Vec<Vector3<f64>>,
-            pub group: Vec<Vec<usize>>,
-            pub material: Vec<usize>,
             // collect colors as a vertex index and a color
             // so that if only one vertex has a color we can index it later
             // and in the majority of cases we can do nothing as there
@@ -183,18 +193,30 @@ impl ObjMesh {
         // directive until it's overridden by another directive
         // so we need to keep track of the current directive and apply it as we go.
         #[derive(Default, Clone)]
-        struct State {
+        struct Faces {
             // the index of the current value
             pub material: usize,
             pub group: usize,
             pub smooth: usize,
             pub object: usize,
 
-            // now the actual collected values that the indices point to
+            // the faces we're collecting
+            pub faces: Vec<(usize, usize, usize)>,
+            pub faces_material: Vec<usize>,
+            pub faces_group: Vec<usize>,
+            pub faces_smooth: Vec<usize>,
+            pub faces_object: Vec<usize>,
+
+            // now the actual collected values
+            // the *name* of the material that we will use for the index `material`
             pub materials: Vec<String>,
             pub groups: Vec<String>,
             pub smooths: Vec<String>,
             pub objects: Vec<String>,
+
+            // the actual materials which may not match the order of `materials` name
+            // until we load them from the file and re-order them at the end.
+            pub materials_obj: Vec<Material>,
         }
 
         /// A helper function to upsert a value into a vector and return its index.
@@ -207,7 +229,7 @@ impl ObjMesh {
             }
         }
 
-        impl State {
+        impl Faces {
             pub fn upsert_material(&mut self, name: &str) {
                 self.material = upsert(name, &mut self.materials);
             }
@@ -220,12 +242,16 @@ impl ObjMesh {
             pub fn upsert_object(&mut self, name: &str) {
                 self.object = upsert(name, &mut self.objects);
             }
+
+            pub fn extend(&mut self, faces: &[(usize, usize, usize)]) {
+                self.faces.extend(faces);
+                self.faces_material.extend(vec![self.material; faces.len()]);
+            }
         }
 
         // todo : this one sucks
-        let mut faces: Vec<(usize, usize, usize)> = vec![];
         let mut vertex = Vertices::default();
-        let mut state = State::default();
+        let mut faces = Faces::default();
 
         // we may have to triangulate 3D polygon faces as we go
         let mut triangulator = Triangulator::new();
@@ -246,34 +272,37 @@ impl ObjMesh {
 
                     if f.len() == 3 {
                         // if we have a triangle this is easy
-                        faces.push((f[0], f[1], f[2]));
+                        faces.extend(&[(f[0], f[1], f[2])]);
                     } else if f.len() == 4 {
                         // if we have a quad split it into two triangles
-                        faces.push((f[0], f[1], f[2]));
-                        faces.push((f[0], f[2], f[3]));
+                        faces.extend(&[(f[0], f[1], f[2]), (f[0], f[2], f[3])]);
                     } else if f.len() > 4 {
                         // if we have a polygon triangulate it
-                        // TODO : ugh do we have to do this in a second pass to avoid
+                        // TODO : do we have to do this in a second pass to avoid
                         // referencing vertices that haven't been added yet?
                         if let Ok(tri) = triangulator.triangulate_3d(&f, &[], &vertex.vertices) {
-                            faces.extend(tri);
+                            faces.extend(&tri);
                         } else {
                             // if our fancy triangulator fails we can
                             // always fall back to a fan triangulation
-                            faces.extend(triangulate_fan(&f));
+                            faces.extend(&triangulate_fan(&f));
                         }
                     }
                 }
-                ObjLine::O(name) => state.upsert_object(name),
-                ObjLine::G(name) => state.upsert_group(name),
-                ObjLine::S(name) => state.upsert_smooth(name),
-                ObjLine::UseMtl(name) => state.upsert_material(name),
-
-                ObjLine::MtlLib(_) => (),
+                ObjLine::O(name) => faces.upsert_object(name),
+                ObjLine::G(name) => faces.upsert_group(name),
+                ObjLine::S(name) => faces.upsert_smooth(name),
+                ObjLine::UseMtl(name) => faces.upsert_material(name),
+                ObjLine::MtlLib(_) => {
+                    // try to load the materials from the `mtl` file specified
+                    if let Some(materials) = line.load_materials() {
+                        faces.materials_obj.extend(materials);
+                    }
+                }
                 ObjLine::Ignore(_) => (),
             }
         }
-        Trimesh::new(vertex.vertices, faces)
+        Trimesh::new(vertex.vertices, faces.faces, None)
     }
 }
 
@@ -291,18 +320,18 @@ fn str_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
     if raw.len() < 3 {
         return None;
     }
-
     // start with only alpha
     let mut color: Vector4<u8> = Vector4::new(0u8, 0u8, 0u8, 255u8);
     for (i, c) in raw.iter().take(4).enumerate() {
-        let value = c.parse::<f64>();
-        match value {
-            Ok(v) => color[i] = (v * 255.0).round().clamp(0.0, 255.0) as u8,
-            Err(_) => return None,
+        if let Ok(value) = c.parse::<f64>() {
+            color[i] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
+        } else {
+            // if any of the values fail to parse return None
+            return None;
         }
     }
 
-    Some(color.into())
+    Some(color)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -388,7 +417,22 @@ mod tests {
     }
 
     #[test]
+    fn test_mesh_obj_tex() {
+        // has many of the test cases we need
+        let data = include_str!("../../../test/data/fuze.obj");
+        // make sure the OBJ file was loadable into a mesh
+        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
+
+        // should have loaded a vertex for every occurrence of 'v '
+        assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
+        // todo : implement faces
+        // should have loaded a face for every occurrence of 'f '
+        assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
+    }
+
+    #[test]
     fn test_mesh_obj() {
+        // has many of the test cases we need
         let data = include_str!("../../../test/data/basic.obj");
 
         let parsed = ObjMesh::from_string(data).unwrap().lines;
@@ -408,10 +452,10 @@ mod tests {
         let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
 
         // should have loaded a vertex for every occurrence of 'v '
-        assert_eq!(mesh.vertices.len(), data.matches("v ").count());
+        assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
         // todo : implement faces
         // should have loaded a face for every occurrence of 'f '
-        assert_eq!(mesh.faces.len(), data.matches("f ").count());
+        assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
 
         println!("mesh: {:?}", mesh);
     }

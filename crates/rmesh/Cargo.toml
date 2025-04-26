@@ -14,6 +14,7 @@ rmesh_macro = { path = "../rmesh_macro" }
 earcut = "0.4.4"
 ndarray = "0.16.1"
 approx = "0.5.1"
+image = "0.25.6"
 
 [dev-dependencies]
 approx = "0.5.1"

@@ -1,6 +1,5 @@
+use image::DynamicImage;
 use nalgebra::{Vector2, Vector3, Vector4};
-
-/// Enum representing the kind of attribute for vertices or faces
 
 #[derive(Debug, Clone, Default)]
 pub enum Attribute {
@@ -16,19 +15,31 @@ pub enum Attribute {
     Color(Vec<Vector4<u8>>),
     // A normal vector
     Normal(Vec<Vector3<f64>>),
-    // A (key, value) pair for custom attributes
-    CustomFloat((String, Vec<Vector3<f64>>)),
-    CustomInt((String, Vec<Vector3<i64>>)),
 }
 
 pub struct Grouping {
     pub name: String,
 }
 
-pub struct Material {
+#[derive(Debug, Clone)]
+pub struct SimpleMaterial {
     pub name: String,
-    pub diffuse: Vector3<f64>,
-    pub specular: Vector3<f64>,
-    pub shininess: f64,
-    pub alpha: f64,
+    pub diffuse: Option<Vector3<f64>>,
+    pub specular: Option<Vector3<f64>>,
+    pub shininess: Option<f64>,
+    pub alpha: Option<f64>,
+    pub image: Option<DynamicImage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PBRMaterial {}
+
+#[derive(Debug, Clone)]
+pub struct EmptyMaterial {}
+
+#[derive(Debug, Clone)]
+pub enum Material {
+    Empty(EmptyMaterial),
+    Simple(SimpleMaterial),
+    PBR(PBRMaterial),
 }

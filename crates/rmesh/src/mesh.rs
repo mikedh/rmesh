@@ -43,10 +43,15 @@ impl Clone for Trimesh {
 
 impl Trimesh {
     /// Create a new trimesh from a vec of tuple values.
-    pub fn new(vertices: Vec<Point3<f64>>, faces: Vec<(usize, usize, usize)>) -> Result<Self> {
+    pub fn new(
+        vertices: Vec<Point3<f64>>,
+        faces: Vec<(usize, usize, usize)>,
+        attributes_vertex: Option<Vec<Attribute>>,
+    ) -> Result<Self> {
         Ok(Self {
             vertices,
             faces,
+            attributes_vertex: attributes_vertex.unwrap_or_default(),
             _cache: RwLock::new(InnerCache::default()),
             ..Default::default()
         })

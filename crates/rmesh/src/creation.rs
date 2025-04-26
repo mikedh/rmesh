@@ -159,6 +159,7 @@ impl Triangulator {
         Ok(self.trianglate_2d(exterior, interiors, &on_plane))
     }
 }
+
 /// Triangulate a polygon using a triangle fan. This requires no knowledge
 /// of the position of the vertices, but may produce incorrect triangulations
 /// for non-convex polygons and does not support interiors.
@@ -183,6 +184,19 @@ pub struct Plane {
 }
 
 impl Plane {
+    /// Create a new plane with the specified normal vector and origin point.
+    ///
+    /// Parameters
+    /// -------------
+    /// normal
+    ///   The normal vector of the plane.
+    /// origin
+    ///  The origin point of the plane.
+    ///
+    /// Returns
+    /// ------------
+    /// plane
+    ///  The new plane object.
     pub fn new(normal: Vector3<f64>, origin: Point3<f64>) -> Self {
         Plane { normal, origin }
     }
@@ -204,7 +218,6 @@ impl Plane {
     /// ------------
     /// plane
     ///   The plane that best fits the points using the specified method.
-    ///  
     pub fn from_points(points: &[Point3<f64>], method_cross: bool) -> Result<Self> {
         if points.len() < 3 {
             return Err(anyhow::anyhow!(
@@ -295,6 +308,18 @@ impl Plane {
             .collect()
     }
 
+    /// Convert 2D points into 3D points by applying the inverse of the
+    /// transformation matrix defined by this object.
+    ///
+    /// Parameters
+    /// -------------
+    /// points
+    ///   The 2D points to convert into 3D points.
+    ///
+    /// Returns
+    /// -------------
+    /// converted
+    ///   The converted points in 3D space.
     pub fn to_3d(&self, points: &[Point2<f64>]) -> Vec<Point3<f64>> {
         let transform = self.to_plane().try_inverse().unwrap();
         points
@@ -330,10 +355,12 @@ pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Matrix4<f64> {
     if relative_eq!(a, b, epsilon = f64::EPSILON) {
         return Transform3::identity().to_homogeneous();
     }
+
+    // find the axis as the mutually perpendicular vector from the cross product
     let axis = a.cross(&b);
+    // find the angle between the two vectors
     let angle = a.dot(&b).acos();
 
-    // todo : check for zero axis and return a reverse
     if axis.norm() < f64::EPSILON {
         // If the axis is zero, it means the vectors are opposite
         // We can rotate by 180 degrees around any perpendicular axis
@@ -382,6 +409,24 @@ mod tests {
         let normals = m.face_normals();
         assert_eq!(normals.len(), 1);
         assert_relative_eq!(normals[0], Vector3::new(0.0, 0.0, 1.0), epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_align_vectors() {
+        for theta in 0..3600 {
+            let a = Vector3::new(1.0, 0.0, 0.0);
+            let b = Rotation3::from_axis_angle(
+                &Vector3::z_axis(),
+                ((theta as f64) / 10.0).to_radians(),
+            )
+            .transform_vector(&a);
+            let rotation = align_vectors(a, b);
+
+            // Check if the rotation matrix rotates a to b
+            let rotated_a = rotation * a.to_homogeneous();
+            assert_relative_eq!(rotated_a.x, b.x, epsilon = 1e-6);
+            assert_relative_eq!(rotated_a.y, b.y, epsilon = 1e-6);
+        }
     }
 
     #[test]
