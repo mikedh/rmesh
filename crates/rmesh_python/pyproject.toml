@@ -14,3 +14,7 @@ dynamic = ["version"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+[tool.cibuildwheel]
+# run rust tests before building any wheels
+before-build = "cargo test"

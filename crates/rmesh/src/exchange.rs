@@ -3,7 +3,7 @@ use itertools::Itertools;
 use nalgebra::{Point3, Vector3, Vector4, convert};
 use rayon::prelude::*;
 
-use crate::creation::Triangulator;
+use crate::creation::{Triangulator, triangulate_fan};
 use crate::mesh::Trimesh;
 
 pub struct BinaryStl {
@@ -24,7 +24,7 @@ impl BinaryStl {
             return Err(anyhow::anyhow!("STL file too short"));
         }
 
-        let header = String::from_utf8_lossy(&bytes[0..80]).to_string();
+        let header = String::from_utf8_lossy(&bytes[0..80]).trim().to_string();
         // let triangle_count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
 
         let triangles: &[BinaryStlTriangle] = bytemuck::try_cast_slice(&bytes[84..])
@@ -132,8 +132,9 @@ impl ObjLine {
 }
 
 pub struct ObjMesh {
-    // the raw values, most people shouldn't
-    pub lines: Vec<ObjLine>,
+    // each line of the OBJ file parsed into a native type
+    // but not evaluated into a mesh
+    lines: Vec<ObjLine>,
 }
 
 impl ObjMesh {
@@ -153,47 +154,92 @@ impl ObjMesh {
         return Ok(Self { lines });
     }
 
+    /// Convert the parsed OBJ file into a mesh.
+    ///
+    ///
+    /// Returns
+    /// ---------
+    /// mesh
+    ///   A Trimesh object containing the vertices and faces of the mesh
+    ///   and attributes for normals, colors, materials, and UVs.
     pub fn to_mesh(&self) -> Result<Trimesh> {
         // keep a bunch of mutable arrays as we go
-        let mut vertices: Vec<Point3<f64>> = vec![];
-        let mut vertex_normals: Vec<Vector3<f64>> = vec![];
-        let mut vertex_uvs: Vec<Vector3<f64>> = vec![];
-        let mut vertex_groups: Vec<Vec<usize>> = vec![];
-        let mut vertex_materials: Vec<usize> = vec![];
-        let mut vertex_colors: Vec<Vector4<u8>> = vec![];
+        #[derive(Default)]
+        struct Vertices {
+            pub vertices: Vec<Point3<f64>>,
+            pub normal: Vec<Vector3<f64>>,
+            pub uv: Vec<Vector3<f64>>,
+            pub group: Vec<Vec<usize>>,
+            pub material: Vec<usize>,
+            // collect colors as a vertex index and a color
+            // so that if only one vertex has a color we can index it later
+            // and in the majority of cases we can do nothing as there
+            // are no vertex colors
+            pub color: Vec<(usize, Vector4<u8>)>,
+        }
 
-        // todo : this one sucks
-        let mut faces: Vec<(usize, usize, usize)> = vec![];
-
-        // in an OBJ file if there is a "directive" like "usemtl" or "g"
+        // in an OBJ file if there is a directive like "usemtl" or "g"
         // it means that the faces or vertices that follow it are part of that
         // directive until it's overridden by another directive
         // so we need to keep track of the current directive and apply it as we go.
-        let mut current_material: usize = 0;
-        let mut materials: Vec<Option<String>> = vec![None];
-        let mut groups: Vec<Option<String>> = vec![None];
-        let mut current_group: usize = 0;
+        #[derive(Default, Clone)]
+        struct State {
+            // the index of the current value
+            pub material: usize,
+            pub group: usize,
+            pub smooth: usize,
+            pub object: usize,
 
-        let mut current_group: Option<String> = None;
-        let mut current_object: Option<String> = None;
-        let mut current_smooth: Option<String> = None;
+            // now the actual collected values that the indices point to
+            pub materials: Vec<String>,
+            pub groups: Vec<String>,
+            pub smooths: Vec<String>,
+            pub objects: Vec<String>,
+        }
 
+        /// A helper function to upsert a value into a vector and return its index.
+        fn upsert(name: &str, values: &mut Vec<String>) -> usize {
+            if let Some(index) = values.iter().position(|m| m == name) {
+                index
+            } else {
+                values.push(name.to_string());
+                values.len() - 1
+            }
+        }
+
+        impl State {
+            pub fn upsert_material(&mut self, name: &str) {
+                self.material = upsert(name, &mut self.materials);
+            }
+            pub fn upsert_group(&mut self, name: &str) {
+                self.group = upsert(name, &mut self.groups);
+            }
+            pub fn upsert_smooth(&mut self, name: &str) {
+                self.smooth = upsert(name, &mut self.smooths);
+            }
+            pub fn upsert_object(&mut self, name: &str) {
+                self.object = upsert(name, &mut self.objects);
+            }
+        }
+
+        // todo : this one sucks
+        let mut faces: Vec<(usize, usize, usize)> = vec![];
+        let mut vertex = Vertices::default();
+        let mut state = State::default();
+
+        // we may have to triangulate 3D polygon faces as we go
         let mut triangulator = Triangulator::new();
-
-        let mut collect_faces: Vec<ObjLine> = vec![];
 
         for line in self.lines.iter() {
             match line {
                 ObjLine::V(p, color) => {
-                    vertices.push(*p);
+                    vertex.vertices.push(*p);
                     if let Some(c) = color {
-                        vertex_colors.push(*c);
-                    } else {
-                        vertex_colors.push(Vector4::new(255, 255, 255, 255));
+                        vertex.color.push((vertex.vertices.len(), *c));
                     }
                 }
-                ObjLine::Vn(n) => vertex_normals.push(*n),
-                ObjLine::Vt(t) => vertex_uvs.push(*t),
+                ObjLine::Vn(n) => vertex.normal.push(*n),
+                ObjLine::Vt(t) => vertex.uv.push(*t),
                 ObjLine::F(raw) => {
                     // just take the vertex index for now
                     let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
@@ -202,31 +248,32 @@ impl ObjMesh {
                         // if we have a triangle this is easy
                         faces.push((f[0], f[1], f[2]));
                     } else if f.len() == 4 {
-                        // if we have a quad, split it into two triangles
+                        // if we have a quad split it into two triangles
                         faces.push((f[0], f[1], f[2]));
                         faces.push((f[0], f[2], f[3]));
                     } else if f.len() > 4 {
-                        // if we have a polygon triangulate it with earcut
-                        // you could also do a simple fan triangulation here:
-                        // faces.extend((1..f.len() - 1).map(|i| (f[0], f[i], f[i + 1])));
-
-                        // TODO : do we have to do this in a second pass to avoid referencing vertices
-                        // that haven't been added yet?
-                        faces.extend(triangulator.triangulate_3d(&f, &[], &vertices))
+                        // if we have a polygon triangulate it
+                        // TODO : ugh do we have to do this in a second pass to avoid
+                        // referencing vertices that haven't been added yet?
+                        if let Ok(tri) = triangulator.triangulate_3d(&f, &[], &vertex.vertices) {
+                            faces.extend(tri);
+                        } else {
+                            // if our fancy triangulator fails we can
+                            // always fall back to a fan triangulation
+                            faces.extend(triangulate_fan(&f));
+                        }
                     }
                 }
-                ObjLine::O(name) => current_object = Some(name.to_string()),
-                ObjLine::G(name) => current_group = Some(name.to_string()),
-                ObjLine::S(name) => current_smooth = Some(name.to_string()),
-                ObjLine::UseMtl(name) => {
-                    materials.push(Some(name.to_string()));
-                    current_material = materials.len();
-                }
+                ObjLine::O(name) => state.upsert_object(name),
+                ObjLine::G(name) => state.upsert_group(name),
+                ObjLine::S(name) => state.upsert_smooth(name),
+                ObjLine::UseMtl(name) => state.upsert_material(name),
+
                 ObjLine::MtlLib(_) => (),
                 ObjLine::Ignore(_) => (),
             }
         }
-        Trimesh::new(vertices, faces)
+        Trimesh::new(vertex.vertices, faces)
     }
 }
 
@@ -271,7 +318,7 @@ impl MeshFormat {
     pub fn from_string(s: &str) -> Result<Self> {
         // clean up to match 'stl', '.stl', ' .STL ', etc
         let binding = s.to_ascii_lowercase();
-        let clean = binding.trim().trim_start_matches('.');
+        let clean = binding.trim().trim_start_matches('.').trim();
         match clean {
             "stl" => Ok(MeshFormat::STL),
             "obj" => Ok(MeshFormat::OBJ),
@@ -330,9 +377,7 @@ mod tests {
         assert_eq!(MeshFormat::from_string(".STL").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string("  .StL ").unwrap(), MeshFormat::STL);
         assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
-
         assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
-
         assert_eq!(MeshFormat::from_string("ply").unwrap(), MeshFormat::PLY);
         assert_eq!(MeshFormat::from_string("PLY").unwrap(), MeshFormat::PLY);
         assert_eq!(MeshFormat::from_string(".ply").unwrap(), MeshFormat::PLY);

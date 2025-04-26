@@ -42,8 +42,6 @@ jobs:
           args: --release --out dist --find-interpreter
           manylinux: auto
           working-directory: "crates/rmesh_python"
-      - name: Run Tests
-        run: cargo test
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:

@@ -13,6 +13,7 @@ rayon = "1.10.0"
 rmesh_macro = { path = "../rmesh_macro" }
 earcut = "0.4.4"
 ndarray = "0.16.1"
+approx = "0.5.1"
 
 [dev-dependencies]
 approx = "0.5.1"
