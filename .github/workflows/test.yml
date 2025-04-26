@@ -13,13 +13,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    container:
-      image: xd009642/tarpaulin:develop-nightly
-      options: --security-opt seccomp=unconfined
     steps:
       - uses: actions/checkout@v4
-      - name: Generate code coverage
-        run: |
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall cargo-tarpaulin
           cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
-      - name: Upload to codecov.io
-        uses: codecov/codecov-action@v2
+          bash <(curl -s https://codecov.io/bash)
