@@ -1,6 +1,7 @@
 use anyhow::Result;
 use approx::relative_eq;
 use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, SVD, Transform3, Unit, Vector3};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::mesh::Trimesh;
 
@@ -60,6 +61,7 @@ use earcut::Earcut;
 
 /// A wrapper object for a triangulator
 pub struct Triangulator {
+    // lazily initialized earcut triangulator
     earcut: Option<Earcut<f64>>,
 }
 
@@ -301,7 +303,7 @@ impl Plane {
     pub fn to_2d(&self, points: &[Point3<f64>]) -> Vec<Point2<f64>> {
         let transform = self.to_plane();
         points
-            .iter()
+            .par_iter()
             .map(|p| {
                 let p = Point3::from_homogeneous(transform * p.to_homogeneous()).unwrap();
                 Point2::new(p.x, p.y)
@@ -324,7 +326,7 @@ impl Plane {
     pub fn to_3d(&self, points: &[Point2<f64>]) -> Vec<Point3<f64>> {
         let transform = self.to_plane().try_inverse().unwrap();
         points
-            .iter()
+            .par_iter()
             .map(|p| {
                 Point3::from_homogeneous(transform * Point3::new(p.x, p.y, 0.0).to_homogeneous())
                     .unwrap()
@@ -364,9 +366,9 @@ pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Matrix4<f64> {
 
     if axis.norm() < f64::EPSILON {
         // If the axis is zero here since we already checked for equality
-        // it means the vectors are exactly reverse of each other and
-        // we can rotate by 180 degrees around any perpendicular axis
+        // it means the vectors are exactly reverse of each other
         let perp = Unit::new_normalize(perpendicular(&a));
+        // we can rotate by 180 degrees around any perpendicular axis
         return Rotation3::from_axis_angle(&perp, std::f64::consts::PI).to_homogeneous();
     }
 
