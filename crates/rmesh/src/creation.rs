@@ -210,9 +210,9 @@ impl Plane {
     /// points
     ///   The points to fit our current plane to
     /// method_cross
-    ///   Picks some arbitrary points that meet a heuristic for "probably not colinear"
-    ///   and then runs the cross product to find the normal
-    ///   Otherwise use the optimization methods to find the best fit plane.
+    ///   Picks three arbitrary points that meet a heuristic for "probably not
+    ///   colinear" and then runs the cross product to find the normal. If not
+    ///   set will use optimization methods to fit a plane.
     ///
     /// Returns
     /// ------------
@@ -245,8 +245,9 @@ impl Plane {
 
                 // run the cross product
                 let normal = v1.cross(&v2);
+                // this should only be zero if the points are colinear or identical
                 if normal.norm() > 1e-10 {
-                    // return a plane
+                    // we have a nonzero norm so return a plane
                     return Ok(Plane::new(normal.normalize(), p0));
                 }
             }
@@ -362,8 +363,9 @@ pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Matrix4<f64> {
     let angle = a.dot(&b).acos();
 
     if axis.norm() < f64::EPSILON {
-        // If the axis is zero, it means the vectors are opposite
-        // We can rotate by 180 degrees around any perpendicular axis
+        // If the axis is zero here since we already checked for equality
+        // it means the vectors are exactly reverse of each other and
+        // we can rotate by 180 degrees around any perpendicular axis
         let perp = Unit::new_normalize(perpendicular(&a));
         return Rotation3::from_axis_angle(&perp, std::f64::consts::PI).to_homogeneous();
     }
@@ -385,13 +387,16 @@ pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Matrix4<f64> {
 /// -------------
 /// perpendicular
 ///   Any perpendicular vector to `v`.
-///
 pub fn perpendicular(v: &Vector3<f64>) -> Vector3<f64> {
-    // Find a vector that is perpendicular to v
-    if v.x.abs() > v.y.abs() {
-        Vector3::new(-v.z, 0.0, v.x) / v.x.abs()
+    if v.norm() < f64::EPSILON {
+        // a zero vector should return a zero vector
+        Vector3::new(0.0, 0.0, 0.0)
+    } else if v.x.abs() > v.y.abs() {
+        // if the x component is the largest, we can use the y and z components
+        Vector3::new(-v.z, 0.0, v.x).normalize()
     } else {
-        Vector3::new(0.0, v.z, -v.y) / v.y.abs()
+        // otherwise we can use the x and z components
+        Vector3::new(0.0, v.z, -v.y).normalize()
     }
 }
 
@@ -401,6 +406,12 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use nalgebra::Vector3;
+
+    /// Helper function to create a linear space of values
+    fn linspace(start: f64, end: f64, count: usize) -> Vec<f64> {
+        let step = (end - start) / (count as f64 - 1.0);
+        (0..count).map(|i| start + i as f64 * step).collect()
+    }
 
     #[test]
     fn test_mesh_normals() {
@@ -413,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_align_vectors() {
-        for theta in 0..3600 {
+        for theta in linspace(0.0, 360.0, 10000) {
             let a = Vector3::new(1.0, 0.0, 0.0);
             let b = Rotation3::from_axis_angle(
                 &Vector3::z_axis(),
@@ -451,6 +462,35 @@ mod tests {
         assert_eq!(back.len(), points.len());
         for i in 0..points.len() {
             assert_relative_eq!(back[i], points[i], epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_perpendicular() {
+        // check through a grid of of vectors including the cardinal axes
+        // should always return a perpendicular vector or if
+        // the input is zero return a zero vector
+        for x in linspace(-1.0, 1.0, 20) {
+            for y in linspace(-1.0, 1.0, 20) {
+                for z in linspace(-1.0, 1.0, 20) {
+                    let v = Vector3::new(x as f64, y as f64, z as f64);
+                    if v.norm() > 0.0 {
+                        let perp = perpendicular(&v);
+                        // should never include NaN or Inf
+                        assert!(perp.x.is_finite() && perp.y.is_finite() && perp.z.is_finite());
+
+                        // a zero vector should return a zero vector
+                        if v.x == 0.0 && v.y == 0.0 && v.z == 0.0 {
+                            assert_eq!(perp, Vector3::new(0.0, 0.0, 0.0));
+                        }
+
+                        // the dot product of the two vectors should always be zero
+                        let dot = v.dot(&perp);
+                        assert!(dot.is_finite());
+                        assert!(dot.abs() < 1e-10, "v: {:?}, perp: {:?}", v, perp);
+                    }
+                }
+            }
         }
     }
 

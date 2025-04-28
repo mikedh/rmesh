@@ -7,14 +7,11 @@ edition = "2024"
 anyhow = {workspace=true}
 bytemuck = {workspace=true}
 nalgebra = {workspace=true}
+rmesh_macro = { path = "../rmesh_macro" }
+
 ahash = "0.8.11"
 itertools = "0.14.0"
 rayon = "1.10.0"
-rmesh_macro = { path = "../rmesh_macro" }
 earcut = "0.4.4"
-ndarray = "0.16.1"
 approx = "0.5.1"
 image = "0.25.6"
-
-[dev-dependencies]
-approx = "0.5.1"
