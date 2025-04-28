@@ -1,4 +1,5 @@
 # rmesh
+[![codecov](https://codecov.io/github/mikedh/rmesh/graph/badge.svg?token=Z33O31BODL)](https://codecov.io/github/mikedh/rmesh)
 
 `rmesh` is an experimental reimplementation of [`trimesh`](https://trimesh.org) in Rust using [`PyO3`](https://pyo3.rs). It is not currently released and may never be. The general idea of `rmesh` is to be mostly API compatible and pass trimesh's [large test suite](https://app.codecov.io/gh/mikedh/trimesh) with the exception of behavior changes made for quality reasons. 
 
