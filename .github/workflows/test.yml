@@ -18,4 +18,6 @@ jobs:
       - name: Run Tests With Coverage In Docker
         run: docker run --security-opt seccomp=unconfined -v "${PWD}:/volume" xd009642/tarpaulin:0.32.3 sh -c "apt-get update && apt-get install -y python3-dev && cargo tarpaulin --out xml"
       - name: Upload Test Coverage
-        run: "bash <(curl -s https://codecov.io/bash)"
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
