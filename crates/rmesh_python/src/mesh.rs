@@ -1,8 +1,9 @@
 use anyhow::Result;
 use nalgebra::Point3;
+use numpy::ndarray::Array2;
 use pyo3::prelude::*;
 
-use numpy::PyReadonlyArray2;
+use numpy::{PyArray2, PyReadonlyArray2};
 
 use rmesh::exchange::{MeshFormat, load_mesh};
 use rmesh::mesh::Trimesh;
@@ -40,6 +41,43 @@ impl PyTrimesh {
         Ok(PyTrimesh {
             data: Trimesh::new(vertices, faces, None)?,
         })
+    }
+
+    #[getter]
+    pub fn get_vertices<'py>(&self, py: Python<'py>) -> Py<PyArray2<f64>> {
+        // todo : is this the best way to do these conversions from Vec<Point3<f64>> to ndarray?
+        // todo : the output array should be read-only
+        // todo : should we cache this numpy conversion?
+        let vertices = &self.data.vertices;
+        let shape = (vertices.len(), 3);
+
+        let arr = Array2::from_shape_vec(
+            shape,
+            vertices
+                .into_iter()
+                .flat_map(|p| p.coords.iter().cloned().collect::<Vec<_>>())
+                .collect(),
+        )
+        .unwrap();
+
+        PyArray2::from_array(py, &arr).to_owned().into()
+    }
+
+    #[getter]
+    pub fn get_faces<'py>(&self, py: Python<'py>) -> Py<PyArray2<i64>> {
+        let faces = &self.data.faces;
+        let shape = (faces.len(), 3);
+
+        let arr = Array2::from_shape_vec(
+            shape,
+            faces
+                .into_iter()
+                .flat_map(|&(a, b, c)| vec![a as i64, b as i64, c as i64])
+                .collect(),
+        )
+        .unwrap();
+
+        PyArray2::from_array(py, &arr).to_owned().into()
     }
 
     pub fn py_check(&self) -> usize {

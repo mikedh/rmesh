@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "rmesh_python"
+name = "rmesh"
 crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = {workspace=true}
 bytemuck = {workspace=true}
 nalgebra = {workspace=true}
-numpy = "0.24.0"
-pyo3 = { version = "0.24.0", features=["anyhow"] }
 rmesh = { path = "../rmesh" }
 
+numpy = "0.24.0"
+pyo3 = { version = "0.24.0", features=["anyhow"] }
 
 [dev-dependencies]
 approx = "0.5.1"
