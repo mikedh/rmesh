@@ -15,6 +15,10 @@ def test_load_stl():
     assert m.vertices.dtype == np.float64
     assert m.faces.dtype == np.int64
 
+    # todo : fix this
+    # assert not m.vertices.flags.writeable
+    # assert not m.faces.flags.writeable
+
     # make sure this unit cube produces the correct shape of triangle soup
     assert m.vertices[m.faces].shape == (12, 3, 3)
 
