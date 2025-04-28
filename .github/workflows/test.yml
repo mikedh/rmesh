@@ -18,6 +18,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-          cargo binstall cargo-tarpaulin
+          cargo binstall cargo-tarpaulin --force
           cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
           bash <(curl -s https://codecov.io/bash)
