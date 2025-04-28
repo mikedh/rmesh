@@ -15,9 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: |
-          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-          cargo binstall cargo-tarpaulin --force
-          cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
-          bash <(curl -s https://codecov.io/bash)
+      - name: Run Tests With Coverage In Docker
+        run: docker run --security-opt seccomp=unconfined -v "${PWD}:/volume" xd009642/tarpaulin:0.32.3 sh -c "apt-get update && apt-get install -y python3-dev && cargo tarpaulin --out xml"
+      - name: Upload Test Coverage
+        run: "bash <(curl -s https://codecov.io/bash)"
