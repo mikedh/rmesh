@@ -15,6 +15,10 @@ jobs:
           curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf -y | sh
           rustup update
           cargo install wasm-pack
+      - name: Test WASM
+        run: |
+          cd crates/rmesh_wasm
+          wasm-pack test --node
       - name: Build WASM
         run: |
           cd crates/rmesh_wasm

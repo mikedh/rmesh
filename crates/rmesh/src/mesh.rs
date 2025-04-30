@@ -46,6 +46,7 @@ impl Clone for Trimesh {
     }
 }
 
+
 impl Trimesh {
     /// Create a new trimesh from a vec of tuple values.
     pub fn new(
