@@ -499,8 +499,7 @@ impl Simplifier {
 
             if verbose && iteration % 5 == 0 {
                 println!(
-                    "Iteration {} - Triangles: {} Threshold: {:.1e}",
-                    iteration, current_triangle_count, threshold
+                    "Iteration {iteration} - Triangles: {current_triangle_count} Threshold: {threshold:.1e}"
                 );
             }
 
@@ -732,8 +731,8 @@ pub fn simplify_mesh(
         println!("Starting simplification:");
         println!("  Input vertices: {}", input_vertices.len());
         println!("  Input faces: {}", input_faces.len());
-        println!("  Target faces: {}", target_count);
-        println!("  Aggressiveness: {}", aggressiveness);
+        println!("  Target faces: {target_count}");
+        println!("  Aggressiveness: {aggressiveness}");
     }
 
     let mut simplifier = Simplifier::new(input_vertices, input_faces);

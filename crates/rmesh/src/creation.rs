@@ -65,6 +65,12 @@ pub struct Triangulator {
     earcut: Option<Earcut<f64>>,
 }
 
+impl Default for Triangulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Triangulator {
     pub fn new() -> Self {
         Triangulator { earcut: None }

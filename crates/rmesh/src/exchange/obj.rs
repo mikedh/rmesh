@@ -1,58 +1,10 @@
-use anyhow::{Result, anyhow};
-use itertools::Itertools;
-use nalgebra::{Point3, Vector3, Vector4, convert};
+use anyhow::Result;
+use nalgebra::{Point3, Vector3, Vector4};
 use rayon::prelude::*;
 
 use crate::attributes::Material;
 use crate::creation::{Triangulator, triangulate_fan};
 use crate::mesh::Trimesh;
-
-pub struct BinaryStl {
-    header: String,
-    triangles: Vec<BinaryStlTriangle>,
-}
-#[repr(C, packed)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct BinaryStlTriangle {
-    pub normal: [f32; 3],
-    pub vertices: [f32; 9],
-    pub attributes: u16,
-}
-
-impl BinaryStl {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 84 {
-            return Err(anyhow::anyhow!("STL file too short"));
-        }
-
-        let header = String::from_utf8_lossy(&bytes[0..80]).trim().to_string();
-        // let triangle_count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
-
-        let triangles: &[BinaryStlTriangle] = bytemuck::try_cast_slice(&bytes[84..])
-            .map_err(|_e| anyhow!("Could not interpret bytes as STL triangles!"))?;
-
-        Ok(Self {
-            header,
-            triangles: triangles.to_vec(),
-        })
-    }
-
-    pub fn to_mesh(&self) -> Result<Trimesh> {
-        // convert STL f32 vertices to f64
-        let vertices: Vec<f64> = self
-            .triangles
-            .par_iter()
-            .flat_map(|t| {
-                let vertices = t.vertices; // Copy the packed field to a local variable
-                vertices.iter().map(|&v| v as f64).collect::<Vec<_>>()
-            })
-            .collect();
-
-        let faces: Vec<usize> = (0..(vertices.len() / 3)).collect();
-
-        Trimesh::from_slice(&vertices, &faces)
-    }
-}
 
 /// The intermediate representation of a single line from an OBJ file,
 /// which can later be turned into a more useful structure.
@@ -89,7 +41,6 @@ impl ObjLine {
             .split('#')
             .next()
             .unwrap_or_default()
-            .trim()
             .split_whitespace()
             .collect();
 
@@ -157,7 +108,7 @@ impl ObjMesh {
         let lines: Vec<ObjLine> = data
             .lines()
             .collect::<Vec<_>>()
-            .iter() // TODO : check performance of par_iter ;)
+            .par_iter() // TODO : check performance of par_iter vs iter ;)
             .map(|line| ObjLine::from_line(line))
             .collect();
         Ok(Self {
@@ -193,7 +144,7 @@ impl ObjMesh {
         // directive until it's overridden by another directive
         // so we need to keep track of the current directive and apply it as we go.
         #[derive(Default, Clone)]
-        struct Faces {
+        struct ObjFaces {
             // the index of the current value
             pub material: usize,
             pub group: usize,
@@ -229,7 +180,7 @@ impl ObjMesh {
             }
         }
 
-        impl Faces {
+        impl ObjFaces {
             pub fn upsert_material(&mut self, name: &str) {
                 self.material = upsert(name, &mut self.materials);
             }
@@ -243,6 +194,7 @@ impl ObjMesh {
                 self.object = upsert(name, &mut self.objects);
             }
 
+            /// here's where we do the logic to add faces and keep track of attributes.
             pub fn extend(&mut self, faces: &[(usize, usize, usize)]) {
                 self.faces.extend(faces);
                 self.faces_material.extend(vec![self.material; faces.len()]);
@@ -251,7 +203,7 @@ impl ObjMesh {
 
         // todo : this one sucks
         let mut vertex = Vertices::default();
-        let mut faces = Faces::default();
+        let mut faces = ObjFaces::default();
 
         // we may have to triangulate 3D polygon faces as we go
         let mut triangulator = Triangulator::new();
@@ -334,39 +286,10 @@ fn str_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
     Some(color)
 }
 
-#[derive(Debug, Clone, PartialEq)]
-// An enum to represent the different mesh file formats.
-pub enum MeshFormat {
-    STL,
-    OBJ,
-    PLY,
-}
-
-impl MeshFormat {
-    /// Convert a string to a MeshFormat enum.
-    pub fn from_string(s: &str) -> Result<Self> {
-        // clean up to match 'stl', '.stl', ' .STL ', etc
-        let binding = s.to_ascii_lowercase();
-        let clean = binding.trim().trim_start_matches('.').trim();
-        match clean {
-            "stl" => Ok(MeshFormat::STL),
-            "obj" => Ok(MeshFormat::OBJ),
-            "ply" => Ok(MeshFormat::PLY),
-            _ => Err(anyhow::anyhow!("Unsupported file type: `{}`", clean)),
-        }
-    }
-}
-
-pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
-    match file_type {
-        MeshFormat::STL => BinaryStl::from_bytes(file_data)?.to_mesh(),
-        MeshFormat::OBJ => ObjMesh::from_string(std::str::from_utf8(file_data)?)?.to_mesh(),
-        MeshFormat::PLY => todo!(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+
+    use crate::exchange::{MeshFormat, load_mesh};
 
     use super::*;
 
@@ -388,40 +311,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mesh_stl() {
-        let stl_data = include_bytes!("../../../test/data/unit_cube.STL");
-
-        let mesh = load_mesh(stl_data, MeshFormat::STL).unwrap();
-
-        assert_eq!(mesh.vertices.len(), 36);
-        assert_eq!(mesh.faces.len(), 12);
-    }
-
-    #[test]
-    fn test_mesh_format_keys() {
-        // check our string cleanup logic
-        assert_eq!(MeshFormat::from_string("stl").unwrap(), MeshFormat::STL);
-        assert_eq!(MeshFormat::from_string("STL").unwrap(), MeshFormat::STL);
-        assert_eq!(MeshFormat::from_string(".stl").unwrap(), MeshFormat::STL);
-        assert_eq!(MeshFormat::from_string(".STL").unwrap(), MeshFormat::STL);
-        assert_eq!(MeshFormat::from_string("  .StL ").unwrap(), MeshFormat::STL);
-        assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
-        assert_eq!(MeshFormat::from_string("obj").unwrap(), MeshFormat::OBJ);
-        assert_eq!(MeshFormat::from_string("ply").unwrap(), MeshFormat::PLY);
-        assert_eq!(MeshFormat::from_string("PLY").unwrap(), MeshFormat::PLY);
-        assert_eq!(MeshFormat::from_string(".ply").unwrap(), MeshFormat::PLY);
-        assert_eq!(MeshFormat::from_string(".PLY").unwrap(), MeshFormat::PLY);
-        assert_eq!(MeshFormat::from_string("  .pLy ").unwrap(), MeshFormat::PLY);
-
-        assert!(MeshFormat::from_string("foo").is_err());
-    }
-
-    #[test]
     fn test_mesh_obj_tex() {
         // has many of the test cases we need
-        let data = include_str!("../../../test/data/fuze.obj");
+        let data = include_str!("../../../../test/data/fuze.obj");
         // make sure the OBJ file was loadable into a mesh
-        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
+        let mesh = load_mesh(data.as_bytes(), crate::exchange::MeshFormat::OBJ).unwrap();
 
         // should have loaded a vertex for every occurrence of 'v '
         assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
@@ -433,7 +327,7 @@ mod tests {
     #[test]
     fn test_mesh_obj() {
         // has many of the test cases we need
-        let data = include_str!("../../../test/data/basic.obj");
+        let data = include_str!("../../../../test/data/basic.obj");
 
         let parsed = ObjMesh::from_string(data).unwrap().lines;
 

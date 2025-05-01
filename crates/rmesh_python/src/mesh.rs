@@ -54,7 +54,7 @@ impl PyTrimesh {
         let arr = Array2::from_shape_vec(
             shape,
             vertices
-                .into_iter()
+                .iter()
                 .flat_map(|p| p.coords.iter().cloned().collect::<Vec<_>>())
                 .collect(),
         )
@@ -71,7 +71,7 @@ impl PyTrimesh {
         let arr = Array2::from_shape_vec(
             shape,
             faces
-                .into_iter()
+                .iter()
                 .flat_map(|&(a, b, c)| vec![a as i64, b as i64, c as i64])
                 .collect(),
         )

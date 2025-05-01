@@ -4,7 +4,10 @@ use ahash::AHashMap;
 
 use anyhow::Result;
 
-use crate::{attributes::Attribute, simplify::simplify_mesh};
+use crate::{
+    attributes::{Attribute, LoadSource},
+    simplify::simplify_mesh,
+};
 use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 use rmesh_macro::cache_access;
@@ -30,6 +33,9 @@ pub struct Trimesh {
     pub attributes_vertex: Vec<Attribute>,
     pub attributes_face: Vec<Attribute>,
 
+    // information about where the mesh came from
+    pub source: LoadSource,
+
     // the cached values computed for the mesh
     _cache: RwLock<InnerCache>,
 }
@@ -45,7 +51,6 @@ impl Clone for Trimesh {
         }
     }
 }
-
 
 impl Trimesh {
     /// Create a new trimesh from a vec of tuple values.
@@ -175,7 +180,7 @@ impl Trimesh {
             return Err(anyhow::anyhow!("Mesh has no vertices"));
         }
 
-        let (mut lower, mut upper) = (self.vertices[0].clone(), self.vertices[0].clone());
+        let (mut lower, mut upper) = (self.vertices[0], self.vertices[0]);
         for vertex in self.vertices.iter().skip(1) {
             // use componentwise min/max
             lower = lower.inf(vertex);

@@ -1,6 +1,8 @@
 use image::DynamicImage;
 use nalgebra::{Vector2, Vector3, Vector4};
 
+use crate::exchange::MeshFormat;
+
 #[derive(Debug, Clone, Default)]
 pub enum Attribute {
     #[default]
@@ -15,6 +17,15 @@ pub enum Attribute {
     Color(Vec<Vector4<u8>>),
     // A normal vector
     Normal(Vec<Vector3<f64>>),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LoadSource {
+    // what format was this mesh loaded from?
+    pub format: MeshFormat,
+
+    // many formats have a header which would otherwise be discarded
+    pub header: Option<String>,
 }
 
 pub struct Grouping {
