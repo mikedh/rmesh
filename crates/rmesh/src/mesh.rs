@@ -37,7 +37,7 @@ pub struct Trimesh {
     pub source: LoadSource,
 
     // the cached values computed for the mesh
-    _cache: RwLock<InnerCache>,
+    pub _cache: RwLock<InnerCache>,
 }
 
 impl Clone for Trimesh {
