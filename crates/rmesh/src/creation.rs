@@ -160,6 +160,7 @@ impl Triangulator {
     ) -> Result<Vec<(usize, usize, usize)>> {
         // find a plane for the vertices in our exterior as not every vertex may be referenced
         let fittable: Vec<Point3<f64>> = exterior.iter().map(|i| vertices[*i]).collect();
+        // use the cross product method to find a plane which works well for exactly planar points
         let plane = Plane::from_points(&fittable, true)?;
         // project the 3D vertices into the plane so we can triangulate them in 2D
         let on_plane = plane.to_2d(vertices);
@@ -169,7 +170,7 @@ impl Triangulator {
 }
 
 /// Triangulate a polygon using a triangle fan. This requires no knowledge
-/// of the position of the vertices, but may produce incorrect triangulations
+/// of the position of the vertices but may produce incorrect triangulations
 /// for non-convex polygons and does not support interiors.
 ///
 /// Parameters

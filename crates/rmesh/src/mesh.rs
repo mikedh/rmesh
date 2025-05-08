@@ -8,7 +8,7 @@ use crate::{
     attributes::{Attribute, LoadSource},
     simplify::simplify_mesh,
 };
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Point3, Vector2, Vector3};
 use rayon::prelude::*;
 use rmesh_macro::cache_access;
 
@@ -126,6 +126,18 @@ impl Trimesh {
             .par_iter()
             .flat_map(|face| vec![[face.0, face.1], [face.1, face.2], [face.2, face.0]])
             .collect()
+    }
+
+    /// A helper method to get the UV coordinate attributes
+    /// stored in `mesh.attributes_vertex`.
+    pub fn uv(&self) -> Option<&Vec<Vector2<f64>>> {
+        self.attributes_vertex.iter().find_map(|attr| {
+            if let Attribute::UV(uv) = attr {
+                Some(uv)
+            } else {
+                None
+            }
+        })
     }
 
     // What are the pairs of face indices that share an edge?
