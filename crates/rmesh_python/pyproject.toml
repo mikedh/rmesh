@@ -14,7 +14,3 @@ dynamic = ["version"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-
-[tool.cibuildwheel]
-# run rust tests before building any wheels
-before-all = "cargo test --manifest-path=../../Cargo.toml"

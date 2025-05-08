@@ -1,6 +1,7 @@
 import os
-import rmesh
+
 import numpy as np
+import rmesh
 
 # get data path relative to this file
 _cwd = os.path.abspath(os.path.expanduser(os.path.dirname(__file__)))

@@ -55,7 +55,7 @@ impl BinaryStl {
 
         let source = LoadSource {
             header,
-            format: super::MeshFormat::STL,
+            format: Some(super::MeshFormat::STL),
         };
 
         let mut result = Trimesh::from_slice(&vertices, &faces)?;
