@@ -1,5 +1,6 @@
 [build-system]
-requires = ["maturin>=1.8,<2.0"]
+requires = ["maturin>=1.8,<2.0",
+            "numpy>=2.0"]
 build-backend = "maturin"
 
 [project]
@@ -11,7 +12,6 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-
 dependencies = ["numpy>=2.0"]
 
 [tool.maturin]
