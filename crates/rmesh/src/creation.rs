@@ -19,42 +19,40 @@ use crate::mesh::Trimesh;
 pub fn create_box(extents: &[f64; 3]) -> Trimesh {
     let half_extents = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];
 
-    // Flattened vertices array
+    // Vertices as Vec<Point3<f64>>
     let vertices = vec![
-        -half_extents[0],
-        -half_extents[1],
-        -half_extents[2],
-        half_extents[0],
-        -half_extents[1],
-        -half_extents[2],
-        half_extents[0],
-        half_extents[1],
-        -half_extents[2],
-        -half_extents[0],
-        half_extents[1],
-        -half_extents[2],
-        -half_extents[0],
-        -half_extents[1],
-        half_extents[2],
-        half_extents[0],
-        -half_extents[1],
-        half_extents[2],
-        half_extents[0],
-        half_extents[1],
-        half_extents[2],
-        -half_extents[0],
-        half_extents[1],
-        half_extents[2],
+        Point3::new(-half_extents[0], -half_extents[1], -half_extents[2]),
+        Point3::new(half_extents[0], -half_extents[1], -half_extents[2]),
+        Point3::new(half_extents[0], half_extents[1], -half_extents[2]),
+        Point3::new(-half_extents[0], half_extents[1], -half_extents[2]),
+        Point3::new(-half_extents[0], -half_extents[1], half_extents[2]),
+        Point3::new(half_extents[0], -half_extents[1], half_extents[2]),
+        Point3::new(half_extents[0], half_extents[1], half_extents[2]),
+        Point3::new(-half_extents[0], half_extents[1], half_extents[2]),
     ];
 
-    // Flattened faces array
+    // Faces as Vec<(usize, usize, usize)>
     let faces = vec![
-        0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5,
-        3, 0, 4, 3, 4, 7,
+        (0, 1, 2),
+        (0, 2, 3),
+        (4, 5, 6),
+        (4, 6, 7),
+        (0, 1, 5),
+        (0, 5, 4),
+        (2, 3, 7),
+        (2, 7, 6),
+        (1, 2, 6),
+        (1, 6, 5),
+        (3, 0, 4),
+        (3, 4, 7),
     ];
 
-    // Create the mesh using Trimesh::from_slice
-    Trimesh::from_slice(&vertices, &faces).unwrap()
+    // Directly create the Trimesh struct
+    Trimesh {
+        vertices,
+        faces,
+        ..Default::default()
+    }
 }
 
 use earcut::Earcut;
@@ -160,6 +158,7 @@ impl Triangulator {
     ) -> Result<Vec<(usize, usize, usize)>> {
         // find a plane for the vertices in our exterior as not every vertex may be referenced
         let fittable: Vec<Point3<f64>> = exterior.iter().map(|i| vertices[*i]).collect();
+        // use the cross product method to find a plane which works well for exactly planar points
         let plane = Plane::from_points(&fittable, true)?;
         // project the 3D vertices into the plane so we can triangulate them in 2D
         let on_plane = plane.to_2d(vertices);
@@ -169,7 +168,7 @@ impl Triangulator {
 }
 
 /// Triangulate a polygon using a triangle fan. This requires no knowledge
-/// of the position of the vertices, but may produce incorrect triangulations
+/// of the position of the vertices but may produce incorrect triangulations
 /// for non-convex polygons and does not support interiors.
 ///
 /// Parameters

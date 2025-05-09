@@ -1,8 +1,8 @@
 use anyhow::Result;
-use nalgebra::{Point3, Vector3, Vector4};
+use nalgebra::{Point3, Vector2, Vector3, Vector4};
 use rayon::prelude::*;
 
-use crate::attributes::Material;
+use crate::attributes::{Attribute, Material};
 use crate::creation::{Triangulator, triangulate_fan};
 use crate::mesh::Trimesh;
 
@@ -15,7 +15,7 @@ enum ObjLine {
     // A vertex normal
     Vn(Vector3<f64>),
     // A vertex UV texture coordinate
-    Vt(Vector3<f64>),
+    Vt(Vector2<f64>),
     // An OBJ face
     F(Vec<Vec<Option<usize>>>),
     // A new-object command
@@ -62,7 +62,7 @@ impl ObjLine {
                 z.parse().unwrap(),
             )),
             ["vt", u, v, _garbage @ ..] => {
-                ObjLine::Vt(Vector3::new(u.parse().unwrap(), v.parse().unwrap(), 0.0))
+                ObjLine::Vt(Vector2::new(u.parse().unwrap(), v.parse().unwrap()))
             }
             ["o", name @ ..] => ObjLine::O(name.join(" ")),
             ["s", name @ ..] => ObjLine::S(name.join(" ")),
@@ -131,12 +131,45 @@ impl ObjMesh {
         struct Vertices {
             pub vertices: Vec<Point3<f64>>,
             pub normal: Vec<Vector3<f64>>,
-            pub uv: Vec<Vector3<f64>>,
+            pub uv: Vec<Vector2<f64>>,
             // collect colors as a vertex index and a color
             // so that if only one vertex has a color we can index it later
             // and in the majority of cases we can do nothing as there
             // are no vertex colors
             pub color: Vec<(usize, Vector4<u8>)>,
+        }
+
+        impl Vertices {
+            /// Convert the vertex data into a vector of attributes
+            /// for the Trimesh.
+            pub fn to_attributes(&self) -> Option<Vec<Attribute>> {
+                let mut attributes = vec![];
+
+                // add the vertex colors
+                if !self.color.is_empty() {
+                    let mut color = vec![Vector4::new(0, 0, 0, 255); self.vertices.len()];
+                    for (i, c) in self.color.iter() {
+                        color[*i] = *c;
+                    }
+                    attributes.push(Attribute::Color(color));
+                }
+
+                // add the normals
+                if !self.normal.is_empty() {
+                    attributes.push(Attribute::Normal(self.normal.clone()));
+                }
+
+                // add the UVs
+                if !self.uv.is_empty() {
+                    attributes.push(Attribute::UV(self.uv.clone()));
+                }
+
+                if attributes.is_empty() {
+                    None
+                } else {
+                    Some(attributes)
+                }
+            }
         }
 
         // in an OBJ file if there is a directive like "usemtl" or "g"
@@ -254,17 +287,21 @@ impl ObjMesh {
                 ObjLine::Ignore(_) => (),
             }
         }
-        Trimesh::new(vertex.vertices, faces.faces, None)
+
+        let vertex_attributes = vertex.to_attributes();
+
+        Trimesh::new(vertex.vertices, faces.faces, vertex_attributes)
     }
 }
 
 /// Convert a string slice containing 0.0 to 1.0 float colors
-/// to a Vector4<u8> color.
+/// to a vector color.
 ///
 /// Parameters
 /// -----------
 /// raw
 ///   A slice of string slices containing the color values.
+///
 /// Returns
 /// --------
 ///   An RGBA color or None if the input is invalid.
@@ -322,6 +359,13 @@ mod tests {
         // todo : implement faces
         // should have loaded a face for every occurrence of 'f '
         assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
+
+        assert!(mesh.uv().is_some());
+        let uv = mesh.uv().unwrap();
+        assert_eq!(uv.len(), data.matches("\nvt ").count());
+
+        // here's the big tricky TODO
+        // assert_eq!(uv.len(),mesh.vertices.len());
     }
 
     #[test]

@@ -8,14 +8,9 @@ use crate::mesh::Trimesh;
 use crate::exchange::obj::ObjMesh;
 use crate::exchange::stl::BinaryStl;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 // An enum to represent the different mesh file formats.
 pub enum MeshFormat {
-    // No file type specified, which this will be set to if a mesh is
-    // created from an array of vertices and faces or other non-exchange method.
-    #[default]
-    None,
-
     // the STL format is a binary or ASCII format with a pure triangle soup
     STL,
     // the OBJ format, an ASCII format with a lot of extra junk
@@ -44,7 +39,6 @@ pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
         MeshFormat::STL => BinaryStl::from_bytes(file_data)?.to_mesh(),
         MeshFormat::OBJ => ObjMesh::from_string(&String::from_utf8_lossy(file_data))?.to_mesh(),
         MeshFormat::PLY => todo!(),
-        MeshFormat::None => Err(anyhow::anyhow!("No file type specified")),
     }
 }
 
