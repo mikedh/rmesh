@@ -7,14 +7,19 @@ use crate::exchange::MeshFormat;
 pub enum Attribute {
     #[default]
     Unspecified,
+
     // UV coordinates, typically 0.0 - 1.0
     UV(Vec<Vector2<f64>>),
+
     // What material was this face or vertex assigned to?
     Material(Vec<usize>),
+
     // Was this vertex or face part of a group?
     Grouping(Vec<usize>),
+
     // RGB or RGBA color
     Color(Vec<Vector4<u8>>),
+
     // A normal vector
     Normal(Vec<Vector3<f64>>),
 }
@@ -22,7 +27,7 @@ pub enum Attribute {
 #[derive(Debug, Clone, Default)]
 pub struct LoadSource {
     // what format was this mesh loaded from?
-    pub format: MeshFormat,
+    pub format: Option<MeshFormat>,
 
     // many formats have a header which would otherwise be discarded
     pub header: Option<String>,

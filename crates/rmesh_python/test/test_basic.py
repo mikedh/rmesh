@@ -1,10 +1,14 @@
 import os
-import rmesh
-import numpy as np
 
-# get data path relative to this file
+import numpy as np
+import rmesh
+
+# current directory this test is in
 _cwd = os.path.abspath(os.path.expanduser(os.path.dirname(__file__)))
-_models = os.path.abspath(os.path.join(_cwd, "..", "data"))
+# project root directory
+_root = os.path.abspath(os.path.join(_cwd, "..", "..", ".."))
+# where test models are stored
+_models = os.path.abspath(os.path.join(_root, "test", "data"))
 
 
 def test_load_stl():

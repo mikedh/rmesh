@@ -1,3 +1,7 @@
+"""
+Generate a `.pyi` type stub from the rustdoc JSON output.
+"""
+
 import json
 import os
 from collections import defaultdict
@@ -22,7 +26,7 @@ def run_formatter():
 
 def get_typings():
     run_json_docgen()
-    json_path = os.path.join(target, "doc", "rmesh_python.json")
+    json_path = os.path.join(target, "doc", "rmesh.json")
     with open(json_path, encoding="utf8") as src:
         return json.load(src)["index"]
 
