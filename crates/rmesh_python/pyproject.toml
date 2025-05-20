@@ -1,4 +1,6 @@
 [build-system]
+# make sure we build on the same numpy version range
+# as our install numpy version range
 requires = ["maturin>=1.8,<2.0",
             "numpy>=2.0"]
 build-backend = "maturin"

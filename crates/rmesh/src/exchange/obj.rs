@@ -8,6 +8,8 @@ use crate::mesh::Trimesh;
 
 /// The intermediate representation of a single line from an OBJ file,
 /// which can later be turned into a more useful structure.
+///
+/// These can be evaluated in parallel as they are independent of each other.
 #[derive(Debug, PartialEq)]
 enum ObjLine {
     // A vertex position and optionally a vertex color in some OBJ exporters.
@@ -95,153 +97,151 @@ impl ObjLine {
     }
 }
 
+/// A helper function to upsert a value into a vector and return its index.
+///
+/// Parameters
+/// -----------
+/// name
+///   
+fn upsert(name: &str, values: &mut Vec<String>) -> usize {
+    if let Some(index) = values.iter().position(|m| m == name) {
+        index
+    } else {
+        values.push(name.to_string());
+        values.len() - 1
+    }
+}
+
+// keep a bunch of mutable arrays as we go
+#[derive(Default)]
+struct ObjVertices {
+    // the vertex positions from the `v` lines
+    pub vertices: Vec<Point3<f64>>,
+    // the non-corresponding normals from the `vn` lines
+    pub normal: Vec<Vector3<f64>>,
+    // the non-corresponding texture coordinates from the `vt` lines
+    pub uv: Vec<Vector2<f64>>,
+    // collect colors as a vertex index and a color
+    // so that if only one vertex has a color we can index it later
+    // and in the majority of cases we can do nothing as there
+    // are no vertex colors
+    pub color: Vec<(usize, Vector4<u8>)>,
+}
+
+impl ObjVertices {
+    /// Convert the vertex data into a vector of attributes
+    /// for the Trimesh.
+    pub fn to_attributes(&self) -> Option<Vec<Attribute>> {
+        let mut attributes = vec![];
+
+        // add the vertex colors
+        if !self.color.is_empty() {
+            let mut color = vec![Vector4::new(0, 0, 0, 255); self.vertices.len()];
+            for (i, c) in self.color.iter() {
+                color[*i] = *c;
+            }
+            attributes.push(Attribute::Color(color));
+        }
+
+        // add the normals
+        if !self.normal.is_empty() {
+            attributes.push(Attribute::Normal(self.normal.clone()));
+        }
+
+        // add the UVs
+        if !self.uv.is_empty() {
+            attributes.push(Attribute::UV(self.uv.clone()));
+        }
+
+        if attributes.is_empty() {
+            None
+        } else {
+            Some(attributes)
+        }
+    }
+}
+
+// in an OBJ file if there is a directive like "usemtl" or "g"
+// it means that the faces or vertices that follow it are part of that
+// directive until it's overridden by another directive
+// so we need to keep track of the current directive and apply it as we go.
+#[derive(Default, Clone)]
+struct ObjFaces {
+    // the index of the current value
+    pub material: usize,
+    pub group: usize,
+    pub smooth: usize,
+    pub object: usize,
+
+    // the faces we're collecting
+    pub faces: Vec<(usize, usize, usize)>,
+    pub faces_material: Vec<usize>,
+    pub faces_group: Vec<usize>,
+    pub faces_smooth: Vec<usize>,
+    pub faces_object: Vec<usize>,
+
+    // now the actual collected values
+    // the *name* of the material that we will use for the index `material`
+    pub materials: Vec<String>,
+    pub groups: Vec<String>,
+    pub smooths: Vec<String>,
+    pub objects: Vec<String>,
+
+    // the actual materials which may not match the order of `materials` name
+    // until we load them from the file and re-order them at the end.
+    pub materials_obj: Vec<Material>,
+}
+
+impl ObjFaces {
+    pub fn upsert_material(&mut self, name: &str) {
+        self.material = upsert(name, &mut self.materials);
+    }
+    pub fn upsert_group(&mut self, name: &str) {
+        self.group = upsert(name, &mut self.groups);
+    }
+    pub fn upsert_smooth(&mut self, name: &str) {
+        self.smooth = upsert(name, &mut self.smooths);
+    }
+    pub fn upsert_object(&mut self, name: &str) {
+        self.object = upsert(name, &mut self.objects);
+    }
+
+    /// here's where we do the logic to add faces and keep track of attributes.
+    pub fn extend(&mut self, faces: &[(usize, usize, usize)]) {
+        self.faces.extend(faces);
+        self.faces_material.extend(vec![self.material; faces.len()]);
+    }
+}
+
 pub struct ObjMesh {
     // each line of the OBJ file parsed into a native type
     // but not evaluated into a mesh
+    vertices: ObjVertices,
+    faces: ObjFaces,
     lines: Vec<ObjLine>,
-    materials: Vec<Material>,
 }
 
 impl ObjMesh {
-    /// Parse a loaded string into an ObjMesh.
+    /// Parse a string into an ObjMesh.
     pub fn from_string(data: &str) -> Result<Self> {
+        // parse the strings in parallel
         let lines: Vec<ObjLine> = data
             .lines()
             .collect::<Vec<_>>()
             .par_iter() // TODO : check performance of par_iter vs iter ;)
             .map(|line| ObjLine::from_line(line))
             .collect();
-        Ok(Self {
-            lines,
-            materials: vec![],
-        })
-    }
 
-    /// Convert the parsed OBJ file into a mesh.
-    ///
-    ///
-    /// Returns
-    /// ---------
-    /// mesh
-    ///   A Trimesh object containing the vertices and faces of the mesh
-    ///   and attributes for normals, colors, materials, and UVs.
-    pub fn to_mesh(&self) -> Result<Trimesh> {
-        // keep a bunch of mutable arrays as we go
-        #[derive(Default)]
-        struct Vertices {
-            pub vertices: Vec<Point3<f64>>,
-            pub normal: Vec<Vector3<f64>>,
-            pub uv: Vec<Vector2<f64>>,
-            // collect colors as a vertex index and a color
-            // so that if only one vertex has a color we can index it later
-            // and in the majority of cases we can do nothing as there
-            // are no vertex colors
-            pub color: Vec<(usize, Vector4<u8>)>,
-        }
-
-        impl Vertices {
-            /// Convert the vertex data into a vector of attributes
-            /// for the Trimesh.
-            pub fn to_attributes(&self) -> Option<Vec<Attribute>> {
-                let mut attributes = vec![];
-
-                // add the vertex colors
-                if !self.color.is_empty() {
-                    let mut color = vec![Vector4::new(0, 0, 0, 255); self.vertices.len()];
-                    for (i, c) in self.color.iter() {
-                        color[*i] = *c;
-                    }
-                    attributes.push(Attribute::Color(color));
-                }
-
-                // add the normals
-                if !self.normal.is_empty() {
-                    attributes.push(Attribute::Normal(self.normal.clone()));
-                }
-
-                // add the UVs
-                if !self.uv.is_empty() {
-                    attributes.push(Attribute::UV(self.uv.clone()));
-                }
-
-                if attributes.is_empty() {
-                    None
-                } else {
-                    Some(attributes)
-                }
-            }
-        }
-
-        // in an OBJ file if there is a directive like "usemtl" or "g"
-        // it means that the faces or vertices that follow it are part of that
-        // directive until it's overridden by another directive
-        // so we need to keep track of the current directive and apply it as we go.
-        #[derive(Default, Clone)]
-        struct ObjFaces {
-            // the index of the current value
-            pub material: usize,
-            pub group: usize,
-            pub smooth: usize,
-            pub object: usize,
-
-            // the faces we're collecting
-            pub faces: Vec<(usize, usize, usize)>,
-            pub faces_material: Vec<usize>,
-            pub faces_group: Vec<usize>,
-            pub faces_smooth: Vec<usize>,
-            pub faces_object: Vec<usize>,
-
-            // now the actual collected values
-            // the *name* of the material that we will use for the index `material`
-            pub materials: Vec<String>,
-            pub groups: Vec<String>,
-            pub smooths: Vec<String>,
-            pub objects: Vec<String>,
-
-            // the actual materials which may not match the order of `materials` name
-            // until we load them from the file and re-order them at the end.
-            pub materials_obj: Vec<Material>,
-        }
-
-        /// A helper function to upsert a value into a vector and return its index.
-        fn upsert(name: &str, values: &mut Vec<String>) -> usize {
-            if let Some(index) = values.iter().position(|m| m == name) {
-                index
-            } else {
-                values.push(name.to_string());
-                values.len() - 1
-            }
-        }
-
-        impl ObjFaces {
-            pub fn upsert_material(&mut self, name: &str) {
-                self.material = upsert(name, &mut self.materials);
-            }
-            pub fn upsert_group(&mut self, name: &str) {
-                self.group = upsert(name, &mut self.groups);
-            }
-            pub fn upsert_smooth(&mut self, name: &str) {
-                self.smooth = upsert(name, &mut self.smooths);
-            }
-            pub fn upsert_object(&mut self, name: &str) {
-                self.object = upsert(name, &mut self.objects);
-            }
-
-            /// here's where we do the logic to add faces and keep track of attributes.
-            pub fn extend(&mut self, faces: &[(usize, usize, usize)]) {
-                self.faces.extend(faces);
-                self.faces_material.extend(vec![self.material; faces.len()]);
-            }
-        }
-
-        // todo : this one sucks
-        let mut vertex = Vertices::default();
+        // the `vn``, `vt``, `v`` lines which are independent of each other
+        let mut vertex = ObjVertices::default();
+        // the `f` lines which may reference any of the `v`, `vn`, `vt` lines
         let mut faces = ObjFaces::default();
 
         // we may have to triangulate 3D polygon faces as we go
+        // OBJ supports arbitrary polygons but we need to convert them to triangles
         let mut triangulator = Triangulator::new();
 
-        for line in self.lines.iter() {
+        for line in lines.iter() {
             match line {
                 ObjLine::V(p, color) => {
                     vertex.vertices.push(*p);
@@ -268,8 +268,9 @@ impl ObjMesh {
                         if let Ok(tri) = triangulator.triangulate_3d(&f, &[], &vertex.vertices) {
                             faces.extend(&tri);
                         } else {
-                            // if our fancy triangulator fails we can
-                            // always fall back to a fan triangulation
+                            // if our fancy triangulator fails because the points were non-planar
+                            // or for some other reason we can always fall back to a fan triangulation
+                            // which may be wrong for non-convex polygons but is better than discarding
                             faces.extend(&triangulate_fan(&f));
                         }
                     }
@@ -288,9 +289,26 @@ impl ObjMesh {
             }
         }
 
-        let vertex_attributes = vertex.to_attributes();
+        Ok(ObjMesh {
+            vertices: vertex,
+            faces,
+            lines,
+        })
+    }
 
-        Trimesh::new(vertex.vertices, faces.faces, vertex_attributes)
+    pub fn to_mesh(self) -> Result<Trimesh> {
+        // destructure self to avoid partial move issues
+        let ObjMesh {
+            vertices, faces, ..
+        } = self;
+        let attributes_vertex = vertices.to_attributes().unwrap_or_default();
+
+        Ok(Trimesh {
+            vertices: vertices.vertices,
+            faces: faces.faces,
+            attributes_vertex,
+            ..Default::default()
+        })
     }
 }
 

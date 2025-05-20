@@ -47,7 +47,7 @@ pub fn create_box(extents: &[f64; 3]) -> Trimesh {
         (3, 4, 7),
     ];
 
-    // Directly create the Trimesh struct
+    // directly create the Trimesh
     Trimesh {
         vertices,
         faces,
@@ -286,7 +286,7 @@ impl Plane {
     /// -------------
     /// transform
     ///   The transformation matrix that moves from the XY plane to this plane.
-    pub fn to_plane(&self) -> Matrix4<f64> {
+    pub fn transform_to_2d(&self) -> Matrix4<f64> {
         // this transform aligns the vectors then offsets the origin
         align_vectors(self.normal, Vector3::z()).append_translation(&Vector3::new(
             -self.origin.x,
@@ -306,7 +306,7 @@ impl Plane {
     /// projected
     ///   The projected points in 2D space.
     pub fn to_2d(&self, points: &[Point3<f64>]) -> Vec<Point2<f64>> {
-        let transform = self.to_plane();
+        let transform = self.transform_to_2d();
         points
             .par_iter()
             .map(|p| {
@@ -316,8 +316,8 @@ impl Plane {
             .collect()
     }
 
-    /// Convert 2D points into 3D points by applying the inverse of the
-    /// transformation matrix defined by this object.
+    /// Convert 2D points into 3D points by applying the inverse
+    /// of the transformation matrix defined by this object.
     ///
     /// Parameters
     /// -------------
@@ -329,7 +329,7 @@ impl Plane {
     /// converted
     ///   The converted points in 3D space.
     pub fn to_3d(&self, points: &[Point2<f64>]) -> Vec<Point3<f64>> {
-        let transform = self.to_plane().try_inverse().unwrap();
+        let transform = self.transform_to_2d().try_inverse().unwrap();
         points
             .par_iter()
             .map(|p| {
@@ -382,28 +382,29 @@ pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Matrix4<f64> {
     Rotation3::from_axis_angle(&axis, angle).to_homogeneous()
 }
 
-/// Find an arbitrary vector that is perpendicular to the given
-/// 3D vector.
+/// Find an arbitrary vector that is perpendicular to a
+/// given 3D vector, or if the input vector is zero will
+/// return a zero vector.
 ///
 /// Parameters
 /// -------------
-/// v
+/// vec
 ///  The vector to find a perpendicular vector to.
 ///
 /// Returns
 /// -------------
 /// perpendicular
 ///   Any perpendicular vector to `v`.
-pub fn perpendicular(v: &Vector3<f64>) -> Vector3<f64> {
-    if v.norm() < f64::EPSILON {
+pub fn perpendicular(vec: &Vector3<f64>) -> Vector3<f64> {
+    if vec.norm() < f64::EPSILON {
         // a zero vector should return a zero vector
         Vector3::new(0.0, 0.0, 0.0)
-    } else if v.x.abs() > v.y.abs() {
+    } else if vec.x.abs() > vec.y.abs() {
         // if the x component is the largest, we can use the y and z components
-        Vector3::new(-v.z, 0.0, v.x).normalize()
+        Vector3::new(-vec.z, 0.0, vec.x).normalize()
     } else {
         // otherwise we can use the x and z components
-        Vector3::new(0.0, v.z, -v.y).normalize()
+        Vector3::new(0.0, vec.z, -vec.y).normalize()
     }
 }
 
