@@ -214,10 +214,12 @@ impl ObjFaces {
 }
 
 pub struct ObjMesh {
-    // each line of the OBJ file parsed into a native type
-    // but not evaluated into a mesh
+    // the original indexed vertices from the OBJ file
     vertices: ObjVertices,
+    // the indexed faces from the OBJ file
     faces: ObjFaces,
+
+    // the original lines from the OBJ file just parsed from strings
     lines: Vec<ObjLine>,
 }
 
