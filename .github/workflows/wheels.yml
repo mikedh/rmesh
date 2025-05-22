@@ -3,6 +3,11 @@
 #
 #    maturin generate-ci github --pytest --platform linux windows macos -m crates/rmesh_python/Cargo.toml
 #
+
+# Manual changes:
+# - removed `pip install pytest`, changed to `pip install rmesh[test]`
+# added architecture skips from armv7, s390x, ppc
+
 name: CI
 
 on:
@@ -60,8 +65,7 @@ jobs:
           set -e
           python3 -m venv .venv
           source .venv/bin/activate
-          pip install rmesh --find-links dist --force-reinstall
-          pip install pytest
+          pip install rmesh[test] --find-links dist --force-reinstall
           cd crates/rmesh_python && pytest
       - name: pytest
         if: ${{ !startsWith(matrix.platform.target, 'x86') && matrix.platform.target != 'ppc64' && matrix.platform.target != 'armv7' && matrix.platform.target != 's390x' && matrix.platform.target != 'ppc64le' }}
@@ -112,8 +116,7 @@ jobs:
           set -e
           python3 -m venv .venv
           source .venv/Scripts/activate
-          pip install rmesh --find-links dist --force-reinstall
-          pip install pytest
+          pip install rmesh[test] --find-links dist --force-reinstall
           cd crates/rmesh_python && pytest
 
   macos:
@@ -146,8 +149,7 @@ jobs:
           set -e
           python3 -m venv .venv
           source .venv/bin/activate
-          pip install rmesh --find-links dist --force-reinstall
-          pip install pytest
+          pip install rmesh[test] --find-links dist --force-reinstall
           cd crates/rmesh_python && pytest
 
   sdist:

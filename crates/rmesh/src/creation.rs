@@ -1,7 +1,8 @@
 use anyhow::Result;
 use approx::relative_eq;
-use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, SVD, Transform3, Unit, Vector3};
+use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, Transform3, Unit, Vector3};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::prelude::*;
 
 use crate::mesh::Trimesh;
 
@@ -47,7 +48,7 @@ pub fn create_box(extents: &[f64; 3]) -> Trimesh {
         (3, 4, 7),
     ];
 
-    // Directly create the Trimesh struct
+    // directly create the Trimesh
     Trimesh {
         vertices,
         faces,
@@ -210,7 +211,8 @@ impl Plane {
 
     /// Fit a plane to a point cloud using either lazy minimal cross products
     /// for points that we know should lie exactly on a plane (i.e. polygon face
-    /// on a mesh), or using the SVD method for points that may be noisy like a laser scan.
+    /// on a mesh), or using a least squares method for points that may not be
+    /// exactly planar.
     ///
     /// Parameters
     /// -------------
@@ -260,21 +262,24 @@ impl Plane {
             }
         }
 
-        // todo : this should probably be least squares?
-        // Use the SVD method
+        // get the centroid of the points
         let centroid = points
             .iter()
             .fold(Vector3::zeros(), |acc, p| acc + p.coords)
             / points.len() as f64;
 
-        let mut covariance = Matrix3::zeros();
-        for p in points {
-            let centered = p.coords - centroid;
-            covariance += centered * centered.transpose();
-        }
+        // calculate the covariance matrix with parallelism
+        let covariance = points
+            .par_iter()
+            .map(|p| {
+                let centered = p.coords - centroid;
+                centered * centered.transpose()
+            })
+            .reduce(Matrix3::zeros, |a, b| a + b);
 
-        let svd = SVD::new(covariance, true, true);
-        let normal = svd.v_t.unwrap().row(2).transpose().normalize();
+        // eigen decomposition for least squares plane fit
+        let eig = covariance.symmetric_eigen();
+        let normal = eig.eigenvectors.column(0).normalize();
 
         Ok(Plane::new(normal, Point3::from(centroid)))
     }
@@ -286,7 +291,7 @@ impl Plane {
     /// -------------
     /// transform
     ///   The transformation matrix that moves from the XY plane to this plane.
-    pub fn to_plane(&self) -> Matrix4<f64> {
+    pub fn transform_to_2d(&self) -> Matrix4<f64> {
         // this transform aligns the vectors then offsets the origin
         align_vectors(self.normal, Vector3::z()).append_translation(&Vector3::new(
             -self.origin.x,
@@ -306,7 +311,7 @@ impl Plane {
     /// projected
     ///   The projected points in 2D space.
     pub fn to_2d(&self, points: &[Point3<f64>]) -> Vec<Point2<f64>> {
-        let transform = self.to_plane();
+        let transform = self.transform_to_2d();
         points
             .par_iter()
             .map(|p| {
@@ -316,8 +321,8 @@ impl Plane {
             .collect()
     }
 
-    /// Convert 2D points into 3D points by applying the inverse of the
-    /// transformation matrix defined by this object.
+    /// Convert 2D points into 3D points by applying the inverse
+    /// of the transformation matrix defined by this object.
     ///
     /// Parameters
     /// -------------
@@ -329,7 +334,7 @@ impl Plane {
     /// converted
     ///   The converted points in 3D space.
     pub fn to_3d(&self, points: &[Point2<f64>]) -> Vec<Point3<f64>> {
-        let transform = self.to_plane().try_inverse().unwrap();
+        let transform = self.transform_to_2d().try_inverse().unwrap();
         points
             .par_iter()
             .map(|p| {
@@ -382,28 +387,29 @@ pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Matrix4<f64> {
     Rotation3::from_axis_angle(&axis, angle).to_homogeneous()
 }
 
-/// Find an arbitrary vector that is perpendicular to the given
-/// 3D vector.
+/// Find an arbitrary vector that is perpendicular to a
+/// given 3D vector, or if the input vector is zero will
+/// return a zero vector.
 ///
 /// Parameters
 /// -------------
-/// v
+/// vec
 ///  The vector to find a perpendicular vector to.
 ///
 /// Returns
 /// -------------
 /// perpendicular
 ///   Any perpendicular vector to `v`.
-pub fn perpendicular(v: &Vector3<f64>) -> Vector3<f64> {
-    if v.norm() < f64::EPSILON {
+pub fn perpendicular(vec: &Vector3<f64>) -> Vector3<f64> {
+    if vec.norm() < f64::EPSILON {
         // a zero vector should return a zero vector
         Vector3::new(0.0, 0.0, 0.0)
-    } else if v.x.abs() > v.y.abs() {
+    } else if vec.x.abs() > vec.y.abs() {
         // if the x component is the largest, we can use the y and z components
-        Vector3::new(-v.z, 0.0, v.x).normalize()
+        Vector3::new(-vec.z, 0.0, vec.x).normalize()
     } else {
         // otherwise we can use the x and z components
-        Vector3::new(0.0, v.z, -v.y).normalize()
+        Vector3::new(0.0, vec.z, -vec.y).normalize()
     }
 }
 
