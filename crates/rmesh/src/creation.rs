@@ -262,12 +262,13 @@ impl Plane {
             }
         }
 
-        // todo : this should probably be least squares?
+        // get the centroid of the points
         let centroid = points
             .iter()
             .fold(Vector3::zeros(), |acc, p| acc + p.coords)
             / points.len() as f64;
 
+        // calculate the covariance matrix with parallelism
         let covariance = points
             .par_iter()
             .map(|p| {
@@ -276,7 +277,7 @@ impl Plane {
             })
             .reduce(Matrix3::zeros, |a, b| a + b);
 
-        // Eigen decomposition for least squares plane fit
+        // eigen decomposition for least squares plane fit
         let eig = covariance.symmetric_eigen();
         let normal = eig.eigenvectors.column(0).normalize();
 
