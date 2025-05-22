@@ -240,7 +240,7 @@ impl ObjMesh {
         let mut faces = ObjFaces::default();
 
         // we may have to triangulate 3D polygon faces as we go
-        // OBJ supports arbitrary polygons but we need to convert them to triangles
+        // OBJ supports arbitrary polygons but we need triangles
         let mut triangulator = Triangulator::new();
 
         for line in lines.iter() {

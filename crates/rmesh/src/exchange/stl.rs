@@ -1,4 +1,4 @@
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Result, anyhow};
 use rayon::prelude::*;
 
 use crate::{attributes::LoadSource, mesh::Trimesh};

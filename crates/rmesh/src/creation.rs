@@ -1,7 +1,8 @@
 use anyhow::Result;
 use approx::relative_eq;
-use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, SVD, Transform3, Unit, Vector3};
+use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, Transform3, Unit, Vector3};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::prelude::*;
 
 use crate::mesh::Trimesh;
 
@@ -210,7 +211,8 @@ impl Plane {
 
     /// Fit a plane to a point cloud using either lazy minimal cross products
     /// for points that we know should lie exactly on a plane (i.e. polygon face
-    /// on a mesh), or using the SVD method for points that may be noisy like a laser scan.
+    /// on a mesh), or using a least squares method for points that may not be
+    /// exactly planar.
     ///
     /// Parameters
     /// -------------
@@ -261,20 +263,22 @@ impl Plane {
         }
 
         // todo : this should probably be least squares?
-        // Use the SVD method
         let centroid = points
             .iter()
             .fold(Vector3::zeros(), |acc, p| acc + p.coords)
             / points.len() as f64;
 
-        let mut covariance = Matrix3::zeros();
-        for p in points {
-            let centered = p.coords - centroid;
-            covariance += centered * centered.transpose();
-        }
+        let covariance = points
+            .par_iter()
+            .map(|p| {
+                let centered = p.coords - centroid;
+                centered * centered.transpose()
+            })
+            .reduce(Matrix3::zeros, |a, b| a + b);
 
-        let svd = SVD::new(covariance, true, true);
-        let normal = svd.v_t.unwrap().row(2).transpose().normalize();
+        // Eigen decomposition for least squares plane fit
+        let eig = covariance.symmetric_eigen();
+        let normal = eig.eigenvectors.column(0).normalize();
 
         Ok(Plane::new(normal, Point3::from(centroid)))
     }

@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
-use quote::{quote, format_ident};
-use syn::{parse_macro_input, Attribute, ItemFn, ReturnType, Type};
+use quote::{format_ident, quote};
+use syn::{Attribute, ItemFn, ReturnType, Type, parse_macro_input};
 
 #[proc_macro_attribute]
 pub fn cache_access(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -34,11 +34,6 @@ pub fn cache_access(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
-
-
-
-
-
 
 #[proc_macro]
 pub fn generate_inner_cache(_input: TokenStream) -> TokenStream {
