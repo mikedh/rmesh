@@ -16,5 +16,8 @@ classifiers = [
 dynamic = ["version"]
 dependencies = ["numpy>=2.0"]
 
+[project.optional-dependencies]
+test = ["pytest", "trimesh"]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
