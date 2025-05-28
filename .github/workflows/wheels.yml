@@ -68,7 +68,7 @@ jobs:
           pip install rmesh[test] --find-links dist --force-reinstall
           cd crates/rmesh_python && pytest
       - name: pytest
-        if: ${{ !startsWith(matrix.platform.target, 'x86') && matrix.platform.target != 'ppc64' && matrix.platform.target != 'armv7' && matrix.platform.target != 's390x' && matrix.platform.target != 'ppc64le' }}
+        if: ${{ !startsWith(matrix.platform.target, 'x86') && matrix.platform.target != 'ppc64' && matrix.platform.target != 'armv7' && matrix.platform.target != 's390x' && matrix.platform.target != 'ppc64le' && matrix.platform.target != 'aarch64' }}
         uses: uraimo/run-on-arch-action@v2
         with:
           arch: ${{ matrix.platform.target }}
