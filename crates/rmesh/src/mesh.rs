@@ -17,7 +17,7 @@ use rmesh_macro::cache_access;
 /// so we can add new fields to the cache with having to
 /// change the code here.
 #[derive(Default, Debug, Clone)]
-struct InnerCache {
+pub struct InnerCache {
     face_adjacency: Option<Vec<(usize, usize)>>,
     face_normals: Option<Vec<Vector3<f64>>>, // cache for face normals
 }
@@ -108,15 +108,9 @@ impl Trimesh {
     /// Calculate the normals for each face of the mesh.
     #[cache_access]
     pub fn face_normals(&self) -> Vec<Vector3<f64>> {
-        let vertices = &self.vertices;
-        self.faces
+        self.faces_cross()
             .par_iter()
-            .map(|face| {
-                let v0 = vertices[face.0];
-                let v1 = vertices[face.1];
-                let v2 = vertices[face.2];
-                ((v1 - v0).cross(&(v2 - v0))).normalize()
-            })
+            .map(|cross| cross.normalize())
             .collect()
     }
 
@@ -126,6 +120,32 @@ impl Trimesh {
             .par_iter()
             .flat_map(|face| vec![[face.0, face.1], [face.1, face.2], [face.2, face.0]])
             .collect()
+    }
+
+    /// The non-normalized cross product of every face.
+    pub fn faces_cross(&self) -> Vec<Vector3<f64>> {
+        self.faces
+            .par_iter()
+            .map(|face| {
+                let v0 = self.vertices[face.0];
+                let v1 = self.vertices[face.1];
+                let v2 = self.vertices[face.2];
+                (v1 - v0).cross(&(v2 - v0))
+            })
+            .collect()
+    }
+
+    /// The area for each triangle in the mesh.
+    pub fn faces_area(&self) -> Vec<f64> {
+        self.faces_cross()
+            .par_iter()
+            .map(|cross| cross.norm() / 2.0)
+            .collect()
+    }
+
+    /// The summed area of every triangle in the mesh.
+    pub fn area(&self) -> f64 {
+        self.faces_area().iter().sum()
     }
 
     /// A helper method to get the UV coordinate attributes
@@ -184,9 +204,13 @@ impl Trimesh {
         let adjacency = self.face_adjacency();
     }
 
-    /// Calculate an axis-aligned bounding box (AABB) for the mesh.
+    /// Calculate an axis-aligned bounding box (AABB) for the mesh,
+    /// or an error if the mesh is empty.
     ///
-    /// If the mesh has no vertices an error is returned.
+    /// Returns
+    /// ------------
+    /// bounds
+    ///   The axis-aligned bounding box of the mesh.
     pub fn bounds(&self) -> Result<(Point3<f64>, Point3<f64>)> {
         if self.vertices.is_empty() {
             return Err(anyhow::anyhow!("Mesh has no vertices"));
