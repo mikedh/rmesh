@@ -14,8 +14,12 @@ struct StlTriangle {
     pub vertices: [f32; 9],
     pub attributes: u16,
 }
-// The size of each triangle in bytes
-const STL_TRIANGLE_SIZE: usize = std::mem::size_of::<StlTriangle>();
+
+// A few constants for the locations of data in a binary STL file
+const STL_TRIANGLE_SIZE: usize = std::mem::size_of::<StlTriangle>(); // the size of a triangle in bytes
+const STL_HEADER_SIZE: usize = 80; // The size of the header in bytes
+const STL_COUNT_SIZE: usize = 4; // The size of the triangle count in bytes
+const STL_DATA_START: usize = STL_HEADER_SIZE + STL_COUNT_SIZE; // the size of the header plus the triangle count
 
 impl BinaryStl {
     /// Parse a binary or ASCII STL file from the raw bytes. Note that binary STL files
@@ -32,24 +36,31 @@ impl BinaryStl {
     /// Result<Self>
     ///   A Result containing the parsed STL file or an error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 84 {
+        if bytes.len() < STL_DATA_START {
             return Err(anyhow::anyhow!("STL file too short"));
         }
 
-        let header = String::from_utf8_lossy(&bytes[0..80]).trim().to_string();
+        let header = String::from_utf8_lossy(&bytes[0..STL_HEADER_SIZE])
+            .trim()
+            .to_string();
         // the number of triangles is stored as a little-endian u32 at bytes 80-84
-        let triangle_count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
+        let triangle_count = u32::from_le_bytes(
+            bytes[STL_HEADER_SIZE..STL_DATA_START]
+                .try_into()
+                .unwrap(),
+        );
 
         // if our passed bytes are not a
-        if bytes.len() != 84 + (triangle_count as usize) * STL_TRIANGLE_SIZE {
+        if bytes.len() != STL_DATA_START + (triangle_count as usize) * STL_TRIANGLE_SIZE {
             // this may be an ASCII STL file
             return Self::parse_ascii_stl(bytes);
             // return Err(anyhow::anyhow!("STL file size does not match header"));
         }
         // we are
 
-        let triangles: &[StlTriangle] = bytemuck::try_cast_slice(&bytes[84..])
-            .map_err(|_e| anyhow!("Could not interpret bytes as STL triangles!"))?;
+        let triangles: &[StlTriangle] =
+            bytemuck::try_cast_slice(&bytes[STL_DATA_START..])
+                .map_err(|_e| anyhow!("Could not interpret bytes as STL triangles!"))?;
 
         Ok(Self {
             header,
