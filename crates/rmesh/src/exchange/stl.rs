@@ -44,11 +44,8 @@ impl BinaryStl {
             .trim()
             .to_string();
         // the number of triangles is stored as a little-endian u32 at bytes 80-84
-        let triangle_count = u32::from_le_bytes(
-            bytes[STL_HEADER_SIZE..STL_DATA_START]
-                .try_into()
-                .unwrap(),
-        );
+        let triangle_count =
+            u32::from_le_bytes(bytes[STL_HEADER_SIZE..STL_DATA_START].try_into().unwrap());
 
         // if our passed bytes are not a
         if bytes.len() != STL_DATA_START + (triangle_count as usize) * STL_TRIANGLE_SIZE {
@@ -58,9 +55,8 @@ impl BinaryStl {
         }
         // we are
 
-        let triangles: &[StlTriangle] =
-            bytemuck::try_cast_slice(&bytes[STL_DATA_START..])
-                .map_err(|_e| anyhow!("Could not interpret bytes as STL triangles!"))?;
+        let triangles: &[StlTriangle] = bytemuck::try_cast_slice(&bytes[STL_DATA_START..])
+            .map_err(|_e| anyhow!("Could not interpret bytes as STL triangles!"))?;
 
         Ok(Self {
             header,

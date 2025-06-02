@@ -162,7 +162,7 @@ impl Trimesh {
     /// A helper method to get the UV coordinate attributes
     /// stored in `mesh.attributes_vertex`.
     pub fn uv(&self) -> Option<&Vec<Vector2<f64>>> {
-        self.attributes_vertex.uv.get(0)
+        self.attributes_vertex.uv.first()
     }
 
     // What are the pairs of face indices that share an edge?

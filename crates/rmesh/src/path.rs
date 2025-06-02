@@ -1,11 +1,6 @@
-use anyhow::Result;
-use approx::relative_eq;
-use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, Transform3, Unit, Vector3};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use nalgebra::{Point3, Vector3};
+use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
-
-use crate::mesh::Trimesh;
-
 
 
 pub enum Curve {
@@ -18,8 +13,8 @@ pub enum Curve {
         // or any point on the full circle
         start: usize,
 
-        // The end point of the circular are or any point 
-        // on the full circle that isn't colinear with the 
+        // The end point of the circular are or any point
+        // on the full circle that isn't colinear with the
         // center and start points as we need to know the
         // direction of the normal this cicle is in
         end: usize,
@@ -34,12 +29,10 @@ pub enum Curve {
     Bezier {
         // indexes of control points for the bezier curve
         points: Vec<usize>,
-    }
+    },
 }
 
-
 impl Curve {
-
     pub fn length(&self, vertices: &[Point3<f64>]) -> f64 {
         match self {
             Curve::Line { points } => {
@@ -50,8 +43,12 @@ impl Curve {
                 let end = vertices[points[1]];
                 (end - start).norm()
             }
-            Curve::Circle { start, end, center, closed } => {
-
+            Curve::Circle {
+                start,
+                end,
+                center,
+                closed,
+            } => {
                 // get the actual points from the indexes
                 let center_point = vertices[*center];
                 let start_point = vertices[*start];
@@ -81,7 +78,6 @@ impl Curve {
             }
             Curve::Bezier { points } => {
                 todo!("Bezier curve length calculation is not implemented yet");
-                
             }
         }
     }
@@ -100,7 +96,12 @@ impl Curve {
                     .map(|i| start + direction * (i as f64 * step))
                     .collect()
             }
-            Curve::Circle { start, end, center, closed } => {
+            Curve::Circle {
+                start,
+                end,
+                center,
+                closed,
+            } => {
                 let center_point = vertices[*center];
                 let start_point = vertices[*start];
                 let end_point = vertices[*end];
@@ -122,7 +123,10 @@ impl Curve {
                 // Generate points along the circle
                 (0..resolution)
                     .map(|i| {
-                        let t = angle_start + direction * (i as f64 / resolution as f64) * (angle_end - angle_start);
+                        let t = angle_start
+                            + direction
+                                * (i as f64 / resolution as f64)
+                                * (angle_end - angle_start);
                         center_point + Vector3::new(radius * t.cos(), radius * t.sin(), 0.0)
                     })
                     .collect()
@@ -138,7 +142,11 @@ impl Curve {
                 // Precompute binomial coefficients
                 fn binomial(n: usize, k: usize) -> f64 {
                     (0..=n).fold(1.0, |acc, i| {
-                        if i == k { acc } else { acc * (n - i) as f64 / (i + 1) as f64 }
+                        if i == k {
+                            acc
+                        } else {
+                            acc * (n - i) as f64 / (i + 1) as f64
+                        }
                     }) * if k == 0 || k == n { 1.0 } else { 1.0 }
                 }
                 let binoms: Vec<f64> = (0..=n).map(|k| binomial(n, k)).collect();
@@ -150,9 +158,8 @@ impl Curve {
                         let one_minus_t = 1.0 - t;
                         let mut pt = Point3::origin();
                         for (i, p) in control.iter().enumerate() {
-                            let coeff = binoms[i]
-                                * one_minus_t.powi((n - i) as i32)
-                                * t.powi(i as i32);
+                            let coeff =
+                                binoms[i] * one_minus_t.powi((n - i) as i32) * t.powi(i as i32);
                             pt += p.coords * coeff;
                         }
                         Point3::from(pt)
@@ -162,7 +169,6 @@ impl Curve {
         }
     }
 }
-
 
 pub struct Path {
     pub entities: Vec<Curve>,
@@ -174,44 +180,35 @@ impl Path {
     pub fn new(vertices: Vec<Point3<f64>>, entities: Vec<Curve>) -> Self {
         Self { vertices, entities }
     }
-
-
-
-
 }
 
-
-
-    /// Create a rectangle path (no rounded corners).
+/// Create a rectangle path (no rounded corners).
 pub fn rectangle(width: f64, height: f64) -> Path {
-        let w = width / 2.0;
-        let h = height / 2.0;
+    let w = width / 2.0;
+    let h = height / 2.0;
 
-        let vertices = vec![
-            Point3::new(-w, -h, 0.0),
-            Point3::new(w, -h, 0.0),
-            Point3::new(w, h, 0.0),
-            Point3::new(-w, h, 0.0),
-        ];
+    let vertices = vec![
+        Point3::new(-w, -h, 0.0),
+        Point3::new(w, -h, 0.0),
+        Point3::new(w, h, 0.0),
+        Point3::new(-w, h, 0.0),
+    ];
 
-        let entities = vec![
-            Curve::Line { points: vec![0, 1] },
-            Curve::Line { points: vec![1, 2] },
-            Curve::Line { points: vec![2, 3] },
-            Curve::Line { points: vec![3, 0] },
-        ];
+    let entities = vec![
+        Curve::Line { points: vec![0, 1] },
+        Curve::Line { points: vec![1, 2] },
+        Curve::Line { points: vec![2, 3] },
+        Curve::Line { points: vec![3, 0] },
+    ];
 
-        Path::new(vertices, entities)
-    }
-
-
+    Path::new(vertices, entities)
+}
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
     use approx::assert_relative_eq;
-    use nalgebra::Vector3;
 
     #[test]
     fn test_rectangle() {
@@ -232,5 +229,4 @@ mod tests {
             panic!("Expected Line curve");
         }
     }
-
 }
