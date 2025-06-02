@@ -2,7 +2,7 @@ use anyhow::Result;
 use nalgebra::{Point3, Vector2, Vector3, Vector4};
 use rayon::prelude::*;
 
-use crate::attributes::{Attribute, Material};
+use crate::attributes::{Attributes, DEFAULT_COLOR, Material};
 use crate::creation::{Triangulator, triangulate_fan};
 use crate::mesh::Trimesh;
 
@@ -131,29 +131,38 @@ struct ObjVertices {
 impl ObjVertices {
     /// Convert the vertex data into a vector of attributes
     /// for the Trimesh.
-    pub fn to_attributes(&self) -> Option<Vec<Attribute>> {
-        let mut attributes = vec![];
+    pub fn to_attributes(&self) -> Option<Attributes> {
+        let mut attributes = Attributes::default();
 
-        // add the vertex colors
+        // Add vertex colors only if they exist
         if !self.color.is_empty() {
-            let mut color = vec![Vector4::new(0, 0, 0, 255); self.vertices.len()];
+            // the colors are a tuple of (vertex index, color) pairs
+            // since they may be  sparse and not all vertices have a color.
+            // thus, start with a fully populated vector of the default color
+            let mut color = vec![DEFAULT_COLOR; self.vertices.len()];
             for (i, c) in self.color.iter() {
+                // replace just the color at the index
                 color[*i] = *c;
             }
-            attributes.push(Attribute::Color(color));
+            // push our vertex-matching colors into the attributes
+            attributes.colors.push(color);
         }
 
-        // add the normals
+        // Add normals if any were populated.
         if !self.normal.is_empty() {
-            attributes.push(Attribute::Normal(self.normal.clone()));
+            attributes.normals.push(self.normal.clone());
         }
 
-        // add the UVs
+        // Add UVs
         if !self.uv.is_empty() {
-            attributes.push(Attribute::UV(self.uv.clone()));
+            attributes.uv.push(self.uv.clone());
         }
 
-        if attributes.is_empty() {
+        if attributes.colors.is_empty()
+            && attributes.normals.is_empty()
+            && attributes.uv.is_empty()
+            && attributes.groupings.is_empty()
+        {
             None
         } else {
             Some(attributes)
