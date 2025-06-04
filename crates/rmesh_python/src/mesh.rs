@@ -80,6 +80,17 @@ impl PyTrimesh {
         PyArray2::from_array(py, &arr).to_owned().into()
     }
 
+    #[getter]
+    pub fn get_uv<'py>(&self, py: Python<'py>) -> Option<Py<PyArray2<f64>>> {
+        self.data.uv().as_ref().map(|uvs| {
+            let shape = (uvs.len(), 2);
+            let arr =
+                Array2::from_shape_vec(shape, uvs.iter().flat_map(|p| vec![p.x, p.y]).collect())
+                    .unwrap();
+            PyArray2::from_array(py, &arr).to_owned().into()
+        })
+    }
+
     pub fn py_check(&self) -> usize {
         10
     }

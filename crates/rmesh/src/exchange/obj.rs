@@ -1,3 +1,10 @@
+/// obj.rs
+/// -----------
+/// Parse OBJ files into a direct representation of their structure with separately indexed
+/// vertices, normals, texture coordinates, and faces which can be used by users with specific
+/// needs of the exact mapping. Or in most cases it is converted into a Trimesh with corresponding
+/// attributes (i.e. `mesh.vertices[n]` corresponds to `mesh.attributes_vertex.color[n]`
+use ahash::AHashMap;
 use anyhow::Result;
 use nalgebra::{Point3, Vector2, Vector3, Vector4};
 use rayon::prelude::*;
@@ -113,14 +120,17 @@ fn upsert(name: &str, values: &mut Vec<String>) -> usize {
 }
 
 // keep a bunch of mutable arrays as we go
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ObjVertices {
     // the vertex positions from the `v` lines
     pub vertices: Vec<Point3<f64>>,
+
     // the non-corresponding normals from the `vn` lines
     pub normal: Vec<Vector3<f64>>,
+
     // the non-corresponding texture coordinates from the `vt` lines
     pub uv: Vec<Vector2<f64>>,
+
     // collect colors as a vertex index and a color
     // so that if only one vertex has a color we can index it later
     // and in the majority of cases we can do nothing as there
@@ -176,14 +186,19 @@ impl ObjVertices {
 // so we need to keep track of the current directive and apply it as we go.
 #[derive(Default, Clone)]
 struct ObjFaces {
-    // the index of the current value
+    // the index of the current material set by `self.materials`
     pub material: usize,
+    // the index of the current group set by `self.groups`
     pub group: usize,
+    // the index of the current smoothing group set by `self.smooths`
     pub smooth: usize,
+    // the index of the current object set by `self.objects`
     pub object: usize,
 
-    // the faces we're collecting
+    // the indexes of `vertices.vertices`
     pub faces: Vec<(usize, usize, usize)>,
+    pub faces_tex: Vec<Option<(usize, usize, usize)>>,
+    pub face_normal: Vec<Option<(usize, usize, usize)>>,
     pub faces_material: Vec<usize>,
     pub faces_group: Vec<usize>,
     pub faces_smooth: Vec<usize>,
@@ -202,6 +217,7 @@ struct ObjFaces {
 }
 
 impl ObjFaces {
+    ///
     pub fn upsert_material(&mut self, name: &str) {
         self.material = upsert(name, &mut self.materials);
     }
@@ -215,32 +231,65 @@ impl ObjFaces {
         self.object = upsert(name, &mut self.objects);
     }
 
-    /// here's where we do the logic to add faces and keep track of attributes.
-    pub fn extend(&mut self, faces: &[(usize, usize, usize)]) {
-        self.faces.extend(faces);
-        self.faces_material.extend(vec![self.material; faces.len()]);
+    /// Implement the logic to triangulate raw face data which can contain any number
+    /// of data points representing arbitrary polygons:
+    ///   -- just vertex indices
+    ///   -- vertex indices and texture coordinates
+    ///   -- vertex indices, texture coordinates and normals
+    ///   -- vertex indices and normals.
+    pub fn extend(
+        &mut self,
+        raw: &[Vec<Option<usize>>],
+        vertices: &[Point3<f64>],
+        triangulator: &mut Triangulator,
+        flatten: bool,
+    ) {
+        // take just the vertex points from the raw data
+        let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
+
+        // get the triangles as indexes in our current face
+        let tri = {
+            // if we have a triangle this is easy
+            if f.len() == 3 {
+                vec![(f[0], f[1], f[2])]
+            } else if f.len() == 4 {
+                // if we have a quad split it into two triangles
+                vec![(f[0], f[1], f[2]), (f[0], f[2], f[3])]
+            } else if f.len() > 4 {
+                // if we have a polygon triangulate it
+                // TODO : do we have to do this in a second pass to avoid
+                // referencing vertices that haven't been added yet?
+                triangulator
+                    .triangulate_3d(&f, &[], vertices)
+                    .unwrap_or_else(|_| triangulate_fan(&f))
+            } else {
+                vec![]
+            }
+        };
     }
 }
 
 pub struct ObjMesh {
     // the original indexed vertices from the OBJ file
     vertices: ObjVertices,
+
     // the indexed faces from the OBJ file
     faces: ObjFaces,
 
-    // the original lines from the OBJ file just parsed from strings
-    lines: Vec<ObjLine>,
+    // was this loaded in a "flattened" manner, which triangulated
+    // every face and ensured that every vertex is unique?
+    flattened: bool,
 }
 
 impl ObjMesh {
     /// Parse a string into an ObjMesh.
-    pub fn from_string(data: &str) -> Result<Self> {
+    pub fn from_string(data: &str, flatten: bool) -> Result<Self> {
         // parse the strings in parallel
         let lines: Vec<ObjLine> = data
             .lines()
             .collect::<Vec<_>>()
-            .par_iter() // TODO : check performance of par_iter vs iter ;)
-            .map(|line| ObjLine::from_line(line))
+            .into_par_iter() // TODO : check performance of par_iter vs iter ;)
+            .map(ObjLine::from_line)
             .collect();
 
         // the `vn``, `vt``, `v`` lines which are independent of each other
@@ -263,28 +312,7 @@ impl ObjMesh {
                 ObjLine::Vn(n) => vertex.normal.push(*n),
                 ObjLine::Vt(t) => vertex.uv.push(*t),
                 ObjLine::F(raw) => {
-                    // just take the vertex index for now
-                    let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
-
-                    if f.len() == 3 {
-                        // if we have a triangle this is easy
-                        faces.extend(&[(f[0], f[1], f[2])]);
-                    } else if f.len() == 4 {
-                        // if we have a quad split it into two triangles
-                        faces.extend(&[(f[0], f[1], f[2]), (f[0], f[2], f[3])]);
-                    } else if f.len() > 4 {
-                        // if we have a polygon triangulate it
-                        // TODO : do we have to do this in a second pass to avoid
-                        // referencing vertices that haven't been added yet?
-                        if let Ok(tri) = triangulator.triangulate_3d(&f, &[], &vertex.vertices) {
-                            faces.extend(&tri);
-                        } else {
-                            // if our fancy triangulator fails because the points were non-planar
-                            // or for some other reason we can always fall back to a fan triangulation
-                            // which may be wrong for non-convex polygons but is better than discarding
-                            faces.extend(&triangulate_fan(&f));
-                        }
-                    }
+                    faces.extend(raw, &vertex.vertices, &mut triangulator, flatten);
                 }
                 ObjLine::O(name) => faces.upsert_object(name),
                 ObjLine::G(name) => faces.upsert_group(name),
@@ -303,20 +331,17 @@ impl ObjMesh {
         Ok(ObjMesh {
             vertices: vertex,
             faces,
-            lines,
+            flattened: flatten,
         })
     }
 
     pub fn to_mesh(self) -> Result<Trimesh> {
-        // destructure self to avoid partial move issues
-        let ObjMesh {
-            vertices, faces, ..
-        } = self;
-        let attributes_vertex = vertices.to_attributes().unwrap_or_default();
+        // "flatten" the mesh to ensure each vertex matches
+        let attributes_vertex = self.vertices.to_attributes().unwrap_or_default();
 
         Ok(Trimesh {
-            vertices: vertices.vertices,
-            faces: faces.faces,
+            vertices: self.vertices.vertices,
+            faces: self.faces.faces,
             attributes_vertex,
             ..Default::default()
         })
@@ -401,8 +426,13 @@ mod tests {
     fn test_mesh_obj() {
         // has many of the test cases we need
         let data = include_str!("../../../../test/data/basic.obj");
-
-        let parsed = ObjMesh::from_string(data).unwrap().lines;
+        // parse the strings in parallel
+        let parsed: Vec<ObjLine> = data
+            .lines()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(ObjLine::from_line)
+            .collect();
 
         // check a few parse results of more difficult lines
         let required: Vec<ObjLine> = vec![ObjLine::O("cube for life!!!".to_string())];

@@ -2,7 +2,6 @@ use nalgebra::{Point3, Vector3};
 use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
 
-
 pub enum Curve {
     Line {
         // indexes of points on a line.
@@ -25,6 +24,8 @@ pub enum Curve {
         // we need to know if the circle is closed as start and end
         // need to be different points in every case, even for a full circle
         closed: bool,
+
+        is_ccw: bool, // is the circle counter-clockwise?
     },
     Bezier {
         // indexes of control points for the bezier curve
@@ -39,15 +40,21 @@ impl Curve {
                 if points.len() < 2 {
                     return 0.0;
                 }
-                let start = vertices[points[0]];
-                let end = vertices[points[1]];
-                (end - start).norm()
+                points
+                    .windows(2)
+                    .map(|w| {
+                        let a = vertices[w[0]];
+                        let b = vertices[w[1]];
+                        (b - a).norm()
+                    })
+                    .sum()
             }
             Curve::Circle {
                 start,
                 end,
                 center,
                 closed,
+                is_ccw,
             } => {
                 // get the actual points from the indexes
                 let center_point = vertices[*center];
@@ -67,11 +74,7 @@ impl Curve {
                 let angle_end = (end_point - center_point).angle(&Vector3::x_axis());
 
                 // Determine the direction of the circle
-                let direction = if *closed || angle_end > angle_start {
-                    1.0
-                } else {
-                    -1.0
-                };
+                let direction = if *is_ccw { 1.0 } else { -1.0 };
 
                 // Calculate the arc length
                 radius * direction * (angle_end - angle_start).abs()
@@ -85,23 +88,17 @@ impl Curve {
     pub fn discrete(&self, vertices: &[Point3<f64>], resolution: usize) -> Vec<Point3<f64>> {
         match self {
             Curve::Line { points } => {
-                if points.len() < 2 {
-                    return vec![];
-                }
-                let start = vertices[points[0]];
-                let end = vertices[points[1]];
-                let direction = (end - start).normalize();
-                let step = (end - start).norm() / (resolution as f64);
-                (0..resolution)
-                    .map(|i| start + direction * (i as f64 * step))
-                    .collect()
+                // a discrete line is just the vertices indexed by the points
+                points.iter().map(|&i| vertices[i]).collect()
             }
             Curve::Circle {
                 start,
                 end,
                 center,
                 closed,
+                is_ccw,
             } => {
+                // the actual points from the indexes
                 let center_point = vertices[*center];
                 let start_point = vertices[*start];
                 let end_point = vertices[*end];
@@ -114,11 +111,7 @@ impl Curve {
                 let angle_end = (end_point - center_point).angle(&Vector3::x_axis());
 
                 // Determine the direction of the circle
-                let direction = if *closed || angle_end > angle_start {
-                    1.0
-                } else {
-                    -1.0
-                };
+                let direction = if *is_ccw { 1.0 } else { -1.0 };
 
                 // Generate points along the circle
                 (0..resolution)
@@ -194,12 +187,9 @@ pub fn rectangle(width: f64, height: f64) -> Path {
         Point3::new(-w, h, 0.0),
     ];
 
-    let entities = vec![
-        Curve::Line { points: vec![0, 1] },
-        Curve::Line { points: vec![1, 2] },
-        Curve::Line { points: vec![2, 3] },
-        Curve::Line { points: vec![3, 0] },
-    ];
+    let entities = vec![Curve::Line {
+        points: vec![0, 1, 2, 3, 0],
+    }];
 
     Path::new(vertices, entities)
 }
@@ -214,7 +204,7 @@ mod tests {
     fn test_rectangle() {
         let path = rectangle(10.0, 5.0);
         assert_eq!(path.vertices.len(), 4);
-        assert_eq!(path.entities.len(), 4);
+        assert_eq!(path.entities.len(), 1);
 
         // Check vertices
         assert_relative_eq!(path.vertices[0], Point3::new(-5.0, -2.5, 0.0));
@@ -224,9 +214,12 @@ mod tests {
 
         // Check curves
         if let Curve::Line { points } = &path.entities[0] {
-            assert_eq!(*points, vec![0, 1]);
+            assert_eq!(*points, vec![0, 1, 2, 3, 0]);
         } else {
             panic!("Expected Line curve");
         }
+
+        assert_eq!(path.entities.len(), 1);
+        assert_relative_eq!(path.entities[0].length(&path.vertices), 30.0);
     }
 }
