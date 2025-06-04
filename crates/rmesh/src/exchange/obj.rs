@@ -266,6 +266,9 @@ impl ObjFaces {
                 vec![]
             }
         };
+
+        // add the actual triangles
+        self.faces.extend(tri);
     }
 }
 
