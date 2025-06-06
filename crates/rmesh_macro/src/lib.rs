@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{Attribute, ItemFn, ReturnType, Type, parse_macro_input};
+use quote::{format_ident, quote, ToTokens};
+use syn::{ItemFn, ReturnType, Type, parse_macro_input, parse_quote};
 
 #[proc_macro_attribute]
 pub fn cache_access(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -89,4 +89,39 @@ fn extract_return_type(func: &ItemFn) -> Option<Type> {
     } else {
         None
     }
+}
+
+/// Macro to generate WASM functions with standardized error handling
+/// Converts Rust Result types to WASM-compatible Result<T, String>
+#[proc_macro_attribute]
+pub fn wasm_result(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+    
+    let fn_name = &input.sig.ident;
+    let fn_vis = &input.vis;
+    let fn_inputs = &input.sig.inputs;
+    let fn_body = &input.block;
+    
+    // Extract the return type and modify it to be Result<T, String>
+    let return_type = match &input.sig.output {
+        ReturnType::Type(_, ty) => {
+            // If it's already a Result, keep it as is
+            if ty.to_token_stream().to_string().contains("Result") {
+                ty.clone()
+            } else {
+                // Wrap in Result<T, String>
+                parse_quote! { Result<#ty, String> }
+            }
+        }
+        ReturnType::Default => parse_quote! { Result<(), String> },
+    };
+    
+    let expanded = quote! {
+        #[wasm_bindgen]
+        #fn_vis fn #fn_name(#fn_inputs) -> #return_type {
+            (|| -> anyhow::Result<_> #fn_body)().map_err(|e| e.to_string())
+        }
+    };
+    
+    TokenStream::from(expanded)
 }

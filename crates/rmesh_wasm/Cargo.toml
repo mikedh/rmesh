@@ -16,6 +16,7 @@ anyhow = {workspace=true}
 bytemuck = {workspace=true}
 nalgebra = {workspace=true}
 rmesh = { path = "../rmesh" }
+rmesh_macro = { path = "../rmesh_macro" }
 
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
