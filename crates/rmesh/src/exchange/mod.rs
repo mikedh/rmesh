@@ -37,7 +37,9 @@ impl MeshFormat {
 pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
     match file_type {
         MeshFormat::STL => BinaryStl::from_bytes(file_data)?.to_mesh(),
-        MeshFormat::OBJ => ObjMesh::from_string(&String::from_utf8_lossy(file_data))?.to_mesh(),
+        MeshFormat::OBJ => {
+            ObjMesh::from_string(&String::from_utf8_lossy(file_data), true)?.to_mesh()
+        }
         MeshFormat::PLY => todo!(),
     }
 }

@@ -2,7 +2,6 @@ use anyhow::Result;
 use approx::relative_eq;
 use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, Transform3, Unit, Vector3};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use rayon::prelude::*;
 
 use crate::mesh::Trimesh;
 
@@ -18,18 +17,23 @@ use crate::mesh::Trimesh;
 /// -------------
 ///  A Trimesh representing the box.
 pub fn create_box(extents: &[f64; 3]) -> Trimesh {
-    let half_extents = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];
+    if extents.len() != 3 {
+        panic!("Extents must be a 3-element array representing the size in each dimension.");
+    }
+
+    // half extents for the box
+    let half = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];
 
     // Vertices as Vec<Point3<f64>>
     let vertices = vec![
-        Point3::new(-half_extents[0], -half_extents[1], -half_extents[2]),
-        Point3::new(half_extents[0], -half_extents[1], -half_extents[2]),
-        Point3::new(half_extents[0], half_extents[1], -half_extents[2]),
-        Point3::new(-half_extents[0], half_extents[1], -half_extents[2]),
-        Point3::new(-half_extents[0], -half_extents[1], half_extents[2]),
-        Point3::new(half_extents[0], -half_extents[1], half_extents[2]),
-        Point3::new(half_extents[0], half_extents[1], half_extents[2]),
-        Point3::new(-half_extents[0], half_extents[1], half_extents[2]),
+        Point3::new(-half[0], -half[1], -half[2]),
+        Point3::new(half[0], -half[1], -half[2]),
+        Point3::new(half[0], half[1], -half[2]),
+        Point3::new(-half[0], half[1], -half[2]),
+        Point3::new(-half[0], -half[1], half[2]),
+        Point3::new(half[0], -half[1], half[2]),
+        Point3::new(half[0], half[1], half[2]),
+        Point3::new(-half[0], half[1], half[2]),
     ];
 
     // Faces as Vec<(usize, usize, usize)>
@@ -238,12 +242,12 @@ impl Plane {
             let third = points.len() / 3;
 
             // if all the points are on the same plane we just
-            // need to find a 3-subset of them that aren't colinear
+            // need to find a subset of 3 of them that aren't colinear
             // this loops through the points offsetting by a third of the
             // array length, which if the points have "locality" should give
             // us a good change of finding a nicely distant non-colinear group
             for i in 0..third {
-                // pick 3 points
+                // pick 3 arbitrary points
                 let p0 = points[i];
                 let p1 = points[third + i];
                 let p2 = points[2 * third + i];
