@@ -3,25 +3,35 @@ use nalgebra::{Vector2, Vector3, Vector4};
 
 use crate::exchange::MeshFormat;
 
+pub type UV = Vec<Vector2<f64>>;
+pub type MaterialIndices = Vec<usize>;
+pub type GroupingIndices = Vec<usize>;
+pub type Color = Vec<Vector4<u8>>;
+pub type Normal = Vec<Vector3<f64>>;
+
 #[derive(Debug, Clone, Default)]
-pub enum Attribute {
+
+pub enum GroupingKind {
     #[default]
     Unspecified,
+    MaterialIndex,
+    GroupingIndex,
+    SmoothingIndex,
+}
 
-    // UV coordinates, typically 0.0 - 1.0
-    UV(Vec<Vector2<f64>>),
+#[derive(Debug, Clone, Default)]
+pub struct Grouping {
+    pub name: String,
+    pub kind: GroupingKind,
+    pub indices: Vec<usize>,
+}
 
-    // What material was this face or vertex assigned to?
-    Material(Vec<usize>),
-
-    // Was this vertex or face part of a group?
-    Grouping(Vec<usize>),
-
-    // RGB or RGBA color
-    Color(Vec<Vector4<u8>>),
-
-    // A normal vector
-    Normal(Vec<Vector3<f64>>),
+#[derive(Debug, Clone, Default)]
+pub struct Attributes {
+    pub uv: Vec<UV>,
+    pub normals: Vec<Normal>,
+    pub colors: Vec<Color>,
+    pub groupings: Vec<Grouping>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,10 +41,6 @@ pub struct LoadSource {
 
     // many formats have a header which would otherwise be discarded
     pub header: Option<String>,
-}
-
-pub struct Grouping {
-    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -59,3 +65,5 @@ pub enum Material {
     Simple(SimpleMaterial),
     PBR(PBRMaterial),
 }
+
+pub const DEFAULT_COLOR: Vector4<u8> = Vector4::new(100, 100, 100, 255);
