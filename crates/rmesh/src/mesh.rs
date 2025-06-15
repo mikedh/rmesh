@@ -17,7 +17,7 @@ use rmesh_macro::cache_access;
 #[derive(Default, Debug, Clone)]
 pub struct InnerCache {
     pub face_adjacency: Option<Vec<(usize, usize)>>,
-    pub face_normals: Option<Vec<Vector3<f64>>>, // cache for face normals
+    pub face_normals: Option<Vec<Vector3<f64>>>,
 
     pub edges: Option<Vec<[usize; 2]>>,
 
@@ -37,6 +37,11 @@ pub struct Trimesh {
     // which ones we want to use at runtime or at the application level
     pub attributes_vertex: Attributes,
     pub attributes_face: Attributes,
+
+    // These are attributes that don't correspond to a particular vertex or
+    // face and need to be indexed separately. The largest offender that puts
+    // attributes here is the OBJ format which indexes normals and UV's separately.
+    pub attributes_free: Attributes,
 
     // information about where the mesh came from
     pub source: LoadSource,

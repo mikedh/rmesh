@@ -242,33 +242,73 @@ impl ObjFaces {
         raw: &[Vec<Option<usize>>],
         vertices: &[Point3<f64>],
         triangulator: &mut Triangulator,
-        flatten: bool,
     ) {
-        // take just the vertex points from the raw data
+        // get just the indexes of the vertex positions, which we will use to triangulate
+        // and the subsequent positions of normals and texture coordinates depend on this triangulation
         let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
 
         // get the triangles as indexes in our current face
-        let tri = {
+        let (tri, index) = {
             // if we have a triangle this is easy
             if f.len() == 3 {
-                vec![(f[0], f[1], f[2])]
+                (vec![(f[0], f[1], f[2])], vec![(0, 1, 2)])
             } else if f.len() == 4 {
                 // if we have a quad split it into two triangles
-                vec![(f[0], f[1], f[2]), (f[0], f[2], f[3])]
+                (
+                    vec![(f[0], f[1], f[2]), (f[0], f[2], f[3])],
+                    // we know the index
+                    vec![(0, 1, 2), (0, 2, 3)],
+                )
             } else if f.len() > 4 {
                 // if we have a polygon triangulate it
                 // TODO : do we have to do this in a second pass to avoid
                 // referencing vertices that haven't been added yet?
-                triangulator
+                let triangles = triangulator
                     .triangulate_3d(&f, &[], vertices)
-                    .unwrap_or_else(|_| triangulate_fan(&f))
+                    .unwrap_or_else(|_| triangulate_fan(&f));
+
+                // we may have produced triangles in any order so we need to go from the full
+                // vertex index to the index in our local group of faces `f`
+                // this is a little indirect and could potentially be slow if you had a whole
+                // lot of non-triangulated faces, but in practice I've never seen that
+                // and if's a problem someone can refactor triangulate to use the original
+                // vertex indexes instead of the local `f` indexes.
+                let remap: AHashMap<usize, usize> =
+                    f.iter().enumerate().map(|(i, &v)| (v, i)).collect();
+
+                // map from triangles back into indexes of raw
+                let index = triangles
+                    .iter()
+                    .map(|&(a, b, c)| {
+                        (
+                            remap.get(&a).copied().unwrap_or_default(),
+                            remap.get(&b).copied().unwrap_or_default(),
+                            remap.get(&c).copied().unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+
+                (triangles, index)
             } else {
-                vec![]
+                // if we have less than 3 vertices we can't triangulate
+                (vec![], vec![])
             }
         };
 
-        // add the actual triangles
+        // add the triangles referencing vertex positions
         self.faces.extend(tri);
+
+        // add the triangles referencing texture coordinates if they exist
+        self.faces_tex.extend(index.iter().map(|&(a, b, c)| {
+            match (
+                raw[a].get(1).cloned().unwrap_or(None),
+                raw[b].get(1).cloned().unwrap_or(None),
+                raw[c].get(1).cloned().unwrap_or(None),
+            ) {
+                (Some(u0), Some(u1), Some(u2)) => Some((u0, u1, u2)),
+                _ => None,
+            }
+        }));
     }
 }
 
@@ -315,7 +355,7 @@ impl ObjMesh {
                 ObjLine::Vn(n) => vertex.normal.push(*n),
                 ObjLine::Vt(t) => vertex.uv.push(*t),
                 ObjLine::F(raw) => {
-                    faces.extend(raw, &vertex.vertices, &mut triangulator, flatten);
+                    faces.extend(raw, &vertex.vertices, &mut triangulator);
                 }
                 ObjLine::O(name) => faces.upsert_object(name),
                 ObjLine::G(name) => faces.upsert_group(name),
