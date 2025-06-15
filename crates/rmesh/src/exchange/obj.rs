@@ -318,10 +318,6 @@ pub struct ObjMesh {
 
     // the indexed faces from the OBJ file
     faces: ObjFaces,
-
-    // was this loaded in a "flattened" manner, which triangulated
-    // every face and ensured that every vertex is unique?
-    flattened: bool,
 }
 
 impl ObjMesh {
@@ -374,7 +370,6 @@ impl ObjMesh {
         Ok(ObjMesh {
             vertices: vertex,
             faces,
-            flattened: flatten,
         })
     }
 
