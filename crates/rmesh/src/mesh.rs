@@ -216,9 +216,9 @@ impl Trimesh {
     /// ------------
     /// bounds
     ///   The axis-aligned bounding box of the mesh.
-    pub fn bounds(&self) -> Result<(Point3<f64>, Point3<f64>)> {
+    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
         if self.vertices.is_empty() {
-            return Err(anyhow::anyhow!("Mesh has no vertices"));
+            return None
         }
 
         let (mut lower, mut upper) = (self.vertices[0], self.vertices[0]);
@@ -229,10 +229,10 @@ impl Trimesh {
         }
 
         if lower == upper {
-            return Err(anyhow::anyhow!("All vertices are the same"));
+            return None
         }
 
-        Ok((lower, upper))
+        Some((lower, upper))
     }
 }
 
