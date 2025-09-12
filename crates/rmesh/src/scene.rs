@@ -15,12 +15,11 @@ pub struct SceneNode {
     pub transform: Option<Matrix4<f64>>,
 
     // Indices into the Scene's geometry
-    pub geometry: Vec<usize>, 
+    pub geometry: Vec<usize>,
 }
 
 #[derive(Default)]
 pub struct SceneGraph {
-
     // The root node index in the nodes vector
     pub root: usize,
 
@@ -29,7 +28,6 @@ pub struct SceneGraph {
 }
 
 impl SceneGraph {
-
     pub fn new() -> Self {
         SceneGraph::default()
     }
@@ -39,23 +37,18 @@ impl SceneGraph {
         self.nodes.push(node);
         index
     }
-
 }
-
 
 #[derive(Default)]
 pub struct Scene {
-
     // geometry in the scene
     pub geometry: Vec<Geometry>,
 
     // Instances of the scene graph
     pub graph: SceneGraph,
-
 }
 
 impl Scene {
-    
     pub fn new() -> Self {
         Scene::default()
     }
@@ -67,22 +60,18 @@ impl Scene {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
 
     use super::*;
     use crate::creation;
 
-
     #[test]
     fn test_scene_basic() {
-
         let mut scene = Scene::new();
 
         let mesh = creation::create_box(&[1.0, 1.0, 1.0]);
-        let geom_index = scene.add_geometry(Geometry::Mesh(mesh));
+        let geom_index = scene.add_geometry(Geometry::Mesh(Box::new(mesh)));
 
         let root_node = SceneNode {
             name: "root".to_string(),
@@ -99,9 +88,5 @@ mod tests {
         assert_eq!(scene.graph.root, 0);
         assert_eq!(scene.graph.nodes[0].name, "root");
         assert_eq!(scene.graph.nodes[0].geometry.len(), 1);
-
-
     }
-
-
 }

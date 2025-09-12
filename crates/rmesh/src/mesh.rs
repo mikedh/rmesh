@@ -201,12 +201,12 @@ impl Trimesh {
     pub fn smooth_shaded(&self, threshold: f64) {
         // get the angles between adjacent faces
         let angles = self.face_adjacency_angles();
-        let index: Vec<usize> = (0..angles.len())
+        let _index: Vec<usize> = (0..angles.len())
             .into_par_iter()
             .filter(|i| angles[*i] < threshold)
             .collect();
 
-        let adjacency = self.face_adjacency();
+        let _adjacency = self.face_adjacency();
     }
 
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,
@@ -218,7 +218,7 @@ impl Trimesh {
     ///   The axis-aligned bounding box of the mesh.
     pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
         if self.vertices.is_empty() {
-            return None
+            return None;
         }
 
         let (mut lower, mut upper) = (self.vertices[0], self.vertices[0]);
@@ -229,7 +229,7 @@ impl Trimesh {
         }
 
         if lower == upper {
-            return None
+            return None;
         }
 
         Some((lower, upper))
@@ -253,6 +253,17 @@ mod tests {
         assert!(relative_eq!(
             normals[0],
             Vector3::new(0.0, 0.0, 1.0),
+            epsilon = 1e-6
+        ));
+    }
+
+    #[test]
+    fn test_bounds() {
+        let cube = create_box(&[1.0, 2.0, 3.0]);
+        let bounds = cube.bounds().unwrap();
+        assert!(relative_eq!(
+            bounds.0,
+            Point3::new(-0.5, -1.0, -1.5),
             epsilon = 1e-6
         ));
     }

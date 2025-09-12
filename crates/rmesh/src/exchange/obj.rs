@@ -86,7 +86,7 @@ impl ObjLine {
 
     fn load_materials(&self) -> Option<Vec<Material>> {
         match self {
-            ObjLine::MtlLib(name) => {
+            ObjLine::MtlLib(_name) => {
                 // TODO : load the materials from the file
                 // and return them as a vector of Materials
                 // for now just return an empty vector
@@ -178,6 +178,7 @@ impl ObjVertices {
 // directive until it's overridden by another directive
 // so we need to keep track of the current directive and apply it as we go.
 #[derive(Default, Clone)]
+#[allow(dead_code)]
 struct ObjFaces {
     // the index of the current material set by `self.materials`
     pub material: usize,
@@ -210,7 +211,7 @@ struct ObjFaces {
 }
 
 impl ObjFaces {
-    ///
+    /// Material operations for OBJ faces
     pub fn upsert_material(&mut self, name: &str) {
         self.material = upsert(name, &mut self.materials);
     }
@@ -235,7 +236,6 @@ impl ObjFaces {
         raw: &[Vec<Option<usize>>],
         vertices: &[Point3<f64>],
         triangulator: &mut Triangulator,
-        flatten: bool,
     ) {
         // take just the vertex points from the raw data
         let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
@@ -271,15 +271,11 @@ pub struct ObjMesh {
 
     // the indexed faces from the OBJ file
     faces: ObjFaces,
-
-    // was this loaded in a "flattened" manner, which triangulated
-    // every face and ensured that every vertex is unique?
-    flattened: bool,
 }
 
 impl ObjMesh {
     /// Parse a string into an ObjMesh.
-    pub fn from_string(data: &str, flatten: bool) -> Result<Self> {
+    pub fn from_string(data: &str) -> Result<Self> {
         // parse the strings in parallel
         let lines: Vec<ObjLine> = data
             .lines()
@@ -308,7 +304,7 @@ impl ObjMesh {
                 ObjLine::Vn(n) => vertex.normal.push(*n),
                 ObjLine::Vt(t) => vertex.uv.push(*t),
                 ObjLine::F(raw) => {
-                    faces.extend(raw, &vertex.vertices, &mut triangulator, flatten);
+                    faces.extend(raw, &vertex.vertices, &mut triangulator);
                 }
                 ObjLine::O(name) => faces.upsert_object(name),
                 ObjLine::G(name) => faces.upsert_group(name),
@@ -327,11 +323,10 @@ impl ObjMesh {
         Ok(ObjMesh {
             vertices: vertex,
             faces,
-            flattened: flatten,
         })
     }
 
-    pub fn to_mesh(self) -> Result<Trimesh> {
+    pub fn into_mesh(self) -> Result<Trimesh> {
         // "flatten" the mesh to ensure each vertex matches
         let attributes_vertex = self.vertices.to_attributes().unwrap_or_default();
 
@@ -438,7 +433,7 @@ mod tests {
 
         // we should
         for req in required.iter() {
-            assert!(parsed.contains(&req), "missing line: {:?}", req);
+            assert!(parsed.contains(req), "missing line: {req:?}");
         }
 
         // make sure the OBJ file was loadable into a mesh
@@ -450,6 +445,6 @@ mod tests {
         // should have loaded a face for every occurrence of 'f '
         assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
 
-        println!("mesh: {:?}", mesh);
+        println!("mesh: {mesh:?}");
     }
 }

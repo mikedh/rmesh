@@ -1,6 +1,4 @@
 use nalgebra::{Point3, Vector3};
-use rayon::iter::ParallelIterator;
-use rayon::prelude::*;
 
 pub enum Curve {
     Line {
@@ -79,7 +77,7 @@ impl Curve {
                 // Calculate the arc length
                 radius * direction * (angle_end - angle_start).abs()
             }
-            Curve::Bezier { points } => {
+            Curve::Bezier { points: _ } => {
                 todo!("Bezier curve length calculation is not implemented yet");
             }
         }
@@ -95,7 +93,7 @@ impl Curve {
                 start,
                 end,
                 center,
-                closed,
+                closed: _,
                 is_ccw,
             } => {
                 // the actual points from the indexes
@@ -140,7 +138,7 @@ impl Curve {
                         } else {
                             acc * (n - i) as f64 / (i + 1) as f64
                         }
-                    }) * if k == 0 || k == n { 1.0 } else { 1.0 }
+                    })
                 }
                 let binoms: Vec<f64> = (0..=n).map(|k| binomial(n, k)).collect();
 
