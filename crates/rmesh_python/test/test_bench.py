@@ -1,9 +1,9 @@
 import os
+from io import BytesIO
+from timeit import timeit
 
 import rmesh
 import trimesh
-from io import BytesIO
-from timeit import timeit
 
 # current working
 _cwd = os.path.abspath(os.path.expanduser(os.path.dirname(__file__)))
