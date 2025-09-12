@@ -1,10 +1,3 @@
-/// obj.rs
-/// -----------
-/// Parse OBJ files into a direct representation of their structure with separately indexed
-/// vertices, normals, texture coordinates, and faces which can be used by users with specific
-/// needs of the exact mapping. Or in most cases it is converted into a Trimesh with corresponding
-/// attributes (i.e. `mesh.vertices[n]` corresponds to `mesh.attributes_vertex.color[n]`
-use ahash::AHashMap;
 use anyhow::Result;
 use nalgebra::{Point3, Vector2, Vector3, Vector4};
 use rayon::prelude::*;
