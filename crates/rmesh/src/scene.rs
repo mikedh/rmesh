@@ -3,6 +3,21 @@ use nalgebra::Matrix4;
 use crate::geometry::Geometry;
 
 #[derive(Default)]
+pub struct Light {
+    // Add light properties as needed
+    pub name: String,
+}
+
+#[derive(Default)]
+pub enum SceneNodeKind {
+    #[default]
+    GEOMETRY = 1,
+    CAMERA = 2,
+    LIGHT = 3,
+    CUSTOM = 4,
+}
+
+#[derive(Default)]
 pub struct SceneNode {
     // A human readable name for the node
     pub name: String,
@@ -14,8 +29,12 @@ pub struct SceneNode {
     // or None if they are at the same position (i.e. identity)
     pub transform: Option<Matrix4<f64>>,
 
-    // Indices into the Scene's geometry
-    pub geometry: Vec<usize>,
+    // The type of this node.
+    pub kind: SceneNodeKind,
+
+    // Indices into the Scene's geometry, lights, camera, or custom
+    // user-tracked property depending on the value of `kind`
+    pub index: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -44,8 +63,13 @@ pub struct Scene {
     // geometry in the scene
     pub geometry: Vec<Geometry>,
 
+    pub lights: Vec<Light>,
+
     // Instances of the scene graph
     pub graph: SceneGraph,
+
+    // The node index of the camera.
+    pub camera: usize,
 }
 
 impl Scene {
@@ -77,7 +101,8 @@ mod tests {
             name: "root".to_string(),
             children: Vec::new(),
             transform: None,
-            geometry: vec![geom_index],
+            index: vec![geom_index],
+            kind: SceneNodeKind::GEOMETRY,
         };
 
         let root_index = scene.graph.add_node(root_node);
@@ -87,6 +112,6 @@ mod tests {
         assert_eq!(scene.graph.nodes.len(), 1);
         assert_eq!(scene.graph.root, 0);
         assert_eq!(scene.graph.nodes[0].name, "root");
-        assert_eq!(scene.graph.nodes[0].geometry.len(), 1);
+        assert_eq!(scene.graph.nodes[0].index.len(), 1);
     }
 }
