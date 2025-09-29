@@ -443,11 +443,8 @@ mod tests {
     fn test_align_vectors() {
         for theta in linspace(0.0, 360.0, 10000) {
             let a = Vector3::new(1.0, 0.0, 0.0);
-            let b = Rotation3::from_axis_angle(
-                &Vector3::z_axis(),
-                ((theta as f64) / 10.0).to_radians(),
-            )
-            .transform_vector(&a);
+            let b = Rotation3::from_axis_angle(&Vector3::z_axis(), (theta / 10.0).to_radians())
+                .transform_vector(&a);
             let rotation = align_vectors(a, b);
 
             // Check if the rotation matrix rotates a to b
@@ -458,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plane_2D() {
+    fn test_plane_2d() {
         let points = vec![
             Point3::new(0.0, 0.0, 0.0),
             Point3::new(1.0, 0.0, 0.0),
@@ -490,7 +487,7 @@ mod tests {
         for x in linspace(-1.0, 1.0, 20) {
             for y in linspace(-1.0, 1.0, 20) {
                 for z in linspace(-1.0, 1.0, 20) {
-                    let v = Vector3::new(x as f64, y as f64, z as f64);
+                    let v = Vector3::new(x, y, z);
                     if v.norm() > 0.0 {
                         let perp = perpendicular(&v);
                         // should never include NaN or Inf
@@ -504,7 +501,7 @@ mod tests {
                         // the dot product of the two vectors should always be zero
                         let dot = v.dot(&perp);
                         assert!(dot.is_finite());
-                        assert!(dot.abs() < 1e-10, "v: {:?}, perp: {:?}", v, perp);
+                        assert!(dot.abs() < 1e-10, "v: {v:?}, perp: {perp:?}");
                     }
                 }
             }

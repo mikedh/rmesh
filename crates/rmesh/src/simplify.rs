@@ -6,6 +6,7 @@ use std::ops::{Add, AddAssign};
 // Type aliases for clarity
 type Point = Point3<f64>;
 type Vector = Vector3<f64>;
+type SimplifiedMesh = (Vec<Point3<f64>>, Vec<(usize, usize, usize)>);
 
 // --- Helper: Symmetric Matrix (Quadric) ---
 
@@ -44,6 +45,7 @@ impl SymmetricMatrix {
     }
 
     // Calculate determinant of the 3x3 submatrix relevant for vertex calculation
+    #[allow(clippy::too_many_arguments)]
     fn det(
         &self,
         a11: usize,
@@ -69,8 +71,8 @@ impl Add for SymmetricMatrix {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
         let mut result = self.m;
-        for i in 0..10 {
-            result[i] += rhs.m[i];
+        for (i, result_item) in result.iter_mut().enumerate() {
+            *result_item += rhs.m[i];
         }
         SymmetricMatrix { m: result }
     }
@@ -210,6 +212,7 @@ impl Simplifier {
 
     // Check if collapsing vertex i0 to position p causes topological inversion (flip)
     // for triangles attached to i0 but not containing edge (i0, i1)
+    #[allow(clippy::needless_range_loop)]
     fn flipped(&self, p: Point, i0: usize, i1: usize, deleted_flags: &mut [bool]) -> bool {
         let v0 = &self.vertices[i0];
         for k in 0..v0.tcount {
@@ -249,9 +252,9 @@ impl Simplifier {
         false
     }
 
-    // Update triangles connected to vertex `v` (index `i0` will replace original vertex index)
-    // Appends new refs for updated triangles to the end of self.refs
-    // Returns the number of new refs appended
+    // Update triangles by deleting those marked in deleted_flags
+    // and updating references to i0
+    #[allow(clippy::needless_range_loop)]
     fn update_triangles(
         &mut self,
         i0: usize,    // The vertex ID that remains
@@ -325,7 +328,7 @@ impl Simplifier {
         }
 
         // Calculate tcount for each vertex
-        for (tid, t) in self.triangles.iter().enumerate() {
+        for t in self.triangles.iter() {
             if t.deleted {
                 continue;
             } // Should not happen if compacted, but safe check
@@ -368,7 +371,7 @@ impl Simplifier {
         // Initialize Quadrics (Q) and identify border vertices on first iteration
         if iteration == 0 {
             // --- Identify Border Vertices ---
-            let v_on_edge_count: Vec<Vec<usize>> = vec![Vec::new(); self.vertices.len()];
+            let _v_on_edge_count: Vec<Vec<usize>> = vec![Vec::new(); self.vertices.len()];
 
             // Count how many non-deleted triangles share each edge connected to a vertex
             for v_idx in 0..self.vertices.len() {
@@ -528,7 +531,7 @@ impl Simplifier {
                         }
 
                         // Calculate optimal collapse position and error
-                        let (error, p_result) = self.calculate_error(i0, i1);
+                        let (_error, p_result) = self.calculate_error(i0, i1);
 
                         // Resize temp vectors for flipped check based on actual tcounts
                         let tcount0 = self.vertices[i0].tcount;
@@ -612,7 +615,7 @@ impl Simplifier {
     // Remove deleted triangles and unused vertices, re-index faces
     fn compact_mesh(&mut self) {
         // 1. Filter out deleted triangles
-        let old_triangle_count = self.triangles.len();
+        let _old_triangle_count = self.triangles.len();
         self.triangles.retain(|t| !t.deleted);
         // println!("Compacted triangles: {} -> {}", old_triangle_count, self.triangles.len());
 
@@ -702,7 +705,7 @@ pub fn simplify_mesh(
     target_count: usize,
     aggressiveness: f64,
     verbose: bool, // Added verbose flag
-) -> (Vec<Point3<f64>>, Vec<(usize, usize, usize)>) {
+) -> SimplifiedMesh {
     // Basic checks
     if target_count >= input_faces.len() {
         if verbose {
@@ -786,7 +789,7 @@ mod tests {
         // Simplify the cube mesh
         let target_face_count = 6; // Target number of faces
         let aggressiveness = 7.0;
-        let verbose = true;
+        let _verbose = true;
 
         let (simplified_vertices, simplified_faces) =
             simplify_mesh(&vertices, &faces, target_face_count, aggressiveness, true);

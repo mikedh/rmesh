@@ -92,8 +92,8 @@ impl BinaryStl {
                     match parts.next() {
                         Some("normal") => {
                             // Handles: "facet normal x y z"
-                            for i in 0..3 {
-                                normal[i] = match parts.next().and_then(|v| v.parse().ok()) {
+                            for normal_elem in &mut normal {
+                                *normal_elem = match parts.next().and_then(|v| v.parse().ok()) {
                                     Some(val) => val,
                                     None => return None,
                                 };

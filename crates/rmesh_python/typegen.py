@@ -6,7 +6,7 @@ import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 # absolute location of current directory and PYI output
 
@@ -72,7 +72,7 @@ def clean_name(name: str) -> str:
     return name.replace("crate::", "")
 
 
-def format_type(info: TypeInfo, classname: Optional[str] = None) -> str:
+def format_type(info: TypeInfo, classname: str | None = None) -> str:
     if classname is not None:
         classname = clean_name(classname)
 
@@ -125,7 +125,7 @@ def format_type(info: TypeInfo, classname: Optional[str] = None) -> str:
         # raise ValueError(f"Unknown type: {info}")
 
 
-def format_arg(name: str, info: TypeInfo, classname: Optional[str] = None) -> str:
+def format_arg(name: str, info: TypeInfo, classname: str | None = None) -> str:
     if name == "self":
         return "self"
     return f"{name}: {format_type(info, classname)}"
@@ -142,10 +142,10 @@ def remove_prefix(s: str, prefix: str) -> str:
 class FuncInfo:
     name: str
     args: list[FuncArg]
-    ret: Optional[TypeInfo]
-    doc: Optional[str]
+    ret: TypeInfo | None
+    doc: str | None
 
-    def decl(self, classname: Optional[str] = None) -> list[str]:
+    def decl(self, classname: str | None = None) -> list[str]:
         ret = []
         arglist = ", ".join(format_arg(arg[0], arg[1], classname) for arg in self.args)
         fname = self.name
