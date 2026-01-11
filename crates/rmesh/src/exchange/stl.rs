@@ -141,7 +141,7 @@ impl BinaryStl {
             .par_iter()
             .flat_map(|t| {
                 let vertices = t.vertices; // Copy the packed field to a local variable
-                vertices.iter().map(|&v| v as f64).collect::<Vec<_>>()
+                vertices.iter().map(|&v| f64::from(v)).collect::<Vec<_>>()
             })
             .collect();
 

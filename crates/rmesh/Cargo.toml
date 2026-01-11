@@ -4,14 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = {workspace=true}
-bytemuck = {workspace=true}
-nalgebra = {workspace=true}
-rmesh_macro = { path = "../rmesh_macro" }
+anyhow = { workspace = true }
+bytemuck = { workspace = true }
+nalgebra = { workspace = true }
+serde = { workspace = true }
 
 ahash = "0.8.11"
 itertools = "0.14.0"
-rayon = "1.10.0"
-earcut = "0.4.4"
-approx = "0.5.1"
-image = "0.25.6"
+rayon = "1.11"
+earcut = "0.4"
+approx = "0.5"
+image = "0.25"
+
+[build-dependencies]
+quick-xml = "0.37"
+convert_case = "0.7"
+zstd = "0.13"
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

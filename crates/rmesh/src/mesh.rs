@@ -1,67 +1,113 @@
-use std::sync::RwLock;
-
-use ahash::AHashMap;
+use std::sync::OnceLock;
 
 use anyhow::Result;
 
 use crate::{
     attributes::{Attributes, LoadSource},
+    graph::adjacency,
     simplify::simplify_mesh,
+    triangles::inertia::{self, MassProperties},
 };
-use nalgebra::{Point3, Vector2, Vector3};
+use nalgebra::{Matrix3, Point3, Vector2, Vector3};
 use rayon::prelude::*;
-use rmesh_macro::cache_access;
 
-// The inner cache for the Trimesh struct. Any field that uses
-// the `#[cache_access]` macro will be stored here.
-#[derive(Default, Debug, Clone)]
-pub struct InnerCache {
-    pub face_adjacency: Option<Vec<(usize, usize)>>,
-    pub face_normals: Option<Vec<Vector3<f64>>>, // cache for face normals
-
-    pub edges: Option<Vec<[usize; 2]>>,
-
-    pub face_adjacency_angles: Option<Vec<f64>>,
-    pub faces_cross: Option<Vec<Vector3<f64>>>,
-    pub faces_area: Option<Vec<f64>>,
-    pub area: Option<f64>,
-}
-
-#[derive(Default, Debug)]
+/// A triangle mesh with vertices and face indices.
+///
+/// # Caching
+///
+/// Derived properties like `face_normals()`, `edges()`, etc. are lazily computed
+/// and cached on first access. The cache is thread-safe and uses `OnceLock` for
+/// lock-free reads after initialization.
+///
+/// ## Adding New Cached Properties
+///
+/// 1. Add a `cache_foo: OnceLock<T>` field to the struct
+/// 2. Initialize it in `Default` and `Clone` impls
+/// 3. Create accessor: `fn foo(&self) -> &T { self.cache_foo.get_or_init(|| ...) }`
+/// 4. **Important**: Expensive compute functions (e.g., `adjacency::check_topology`)
+///    should ONLY be called inside `get_or_init` closures, never directly.
+///
+/// # Mutation Warning
+///
+/// If you mutate `vertices` or `faces` after calling any cached method,
+/// the cached values will be stale. Create a new `Trimesh` instead of mutating.
+#[derive(Debug)]
 pub struct Trimesh {
+    /// Vertex positions
     pub vertices: Vec<Point3<f64>>,
-    pub faces: Vec<(usize, usize, usize)>,
+    /// Triangle face indices into the vertices array
+    pub faces: Vec<[usize; 3]>,
 
-    // A flat list of attributes so we can define things like
-    // multiple colors, normals, uv coordinates, etc and can pick
-    // which ones we want to use at runtime or at the application level
+    /// Vertex attributes (UV coordinates, colors, normals, etc.)
     pub attributes_vertex: Attributes,
+    /// Face attributes
     pub attributes_face: Attributes,
 
-    // information about where the mesh came from
+    /// Information about where the mesh came from
     pub source: LoadSource,
 
-    // the cached values computed for the mesh
-    pub _cache: RwLock<InnerCache>,
+    /// Optional density for mass property calculations (default 1.0)
+    pub density: Option<f64>,
+
+    // Cached derived values - computed lazily on first access
+    cache_faces_cross: OnceLock<Vec<Vector3<f64>>>,
+    cache_face_normals: OnceLock<Vec<Vector3<f64>>>,
+    cache_faces_area: OnceLock<Vec<f64>>,
+    cache_area: OnceLock<f64>,
+    cache_edges: OnceLock<Vec<[usize; 2]>>,
+    cache_face_adjacency: OnceLock<Vec<(usize, usize)>>,
+    cache_mass_properties: OnceLock<MassProperties>,
+    cache_topology: OnceLock<(bool, bool)>, // (is_watertight, is_winding_consistent)
+}
+
+impl Default for Trimesh {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            faces: Vec::new(),
+            attributes_vertex: Attributes::default(),
+            attributes_face: Attributes::default(),
+            source: LoadSource::default(),
+            density: None,
+            cache_faces_cross: OnceLock::new(),
+            cache_face_normals: OnceLock::new(),
+            cache_faces_area: OnceLock::new(),
+            cache_area: OnceLock::new(),
+            cache_edges: OnceLock::new(),
+            cache_face_adjacency: OnceLock::new(),
+            cache_mass_properties: OnceLock::new(),
+            cache_topology: OnceLock::new(),
+        }
+    }
 }
 
 impl Clone for Trimesh {
     fn clone(&self) -> Self {
-        let cache = self._cache.read().unwrap();
         Self {
             vertices: self.vertices.clone(),
             faces: self.faces.clone(),
-            _cache: RwLock::new(cache.clone()),
-            ..Default::default()
+            attributes_vertex: self.attributes_vertex.clone(),
+            attributes_face: self.attributes_face.clone(),
+            source: self.source.clone(),
+            density: self.density,
+            // Fresh cache - will recompute on demand
+            cache_faces_cross: OnceLock::new(),
+            cache_face_normals: OnceLock::new(),
+            cache_faces_area: OnceLock::new(),
+            cache_area: OnceLock::new(),
+            cache_edges: OnceLock::new(),
+            cache_face_adjacency: OnceLock::new(),
+            cache_mass_properties: OnceLock::new(),
+            cache_topology: OnceLock::new(),
         }
     }
 }
 
 impl Trimesh {
-    /// Create a new trimesh from a vec of tuple values.
+    /// Create a new trimesh from vertices and faces.
     pub fn new(
         vertices: Vec<Point3<f64>>,
-        faces: Vec<(usize, usize, usize)>,
+        faces: Vec<[usize; 3]>,
         attributes_vertex: Option<Attributes>,
         attributes_face: Option<Attributes>,
     ) -> Result<Self> {
@@ -70,7 +116,6 @@ impl Trimesh {
             faces,
             attributes_vertex: attributes_vertex.unwrap_or_default(),
             attributes_face: attributes_face.unwrap_or_default(),
-            _cache: RwLock::new(InnerCache::default()),
             ..Default::default()
         })
     }
@@ -82,19 +127,20 @@ impl Trimesh {
             .map(|chunk| Point3::new(chunk[0], chunk[1], chunk[2]))
             .collect();
 
-        let faces: Vec<(usize, usize, usize)> = faces
+        let faces: Vec<[usize; 3]> = faces
             .chunks_exact(3)
-            .map(|chunk| (chunk[0], chunk[1], chunk[2]))
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
             .collect();
 
         Ok(Self {
             vertices,
             faces,
-            _cache: RwLock::new(InnerCache::default()),
             ..Default::default()
         })
     }
 
+    /// Simplify the mesh to a target face count.
+    #[must_use]
     pub fn simplify(&self, target_count: usize, aggressiveness: f64) -> Self {
         let (vertices, faces) = simplify_mesh(
             &self.vertices,
@@ -107,56 +153,85 @@ impl Trimesh {
         Self {
             vertices,
             faces,
-            _cache: RwLock::new(InnerCache::default()),
             ..Default::default()
         }
     }
 
-    /// Calculate the normals for each face of the mesh.
-    #[cache_access]
-    pub fn face_normals(&self) -> Vec<Vector3<f64>> {
-        self.faces_cross()
-            .par_iter()
-            .map(|cross| cross.normalize())
-            .collect()
-    }
-
-    // Get the edges calculated from the faces
-    #[cache_access]
-    pub fn edges(&self) -> Vec<[usize; 2]> {
-        self.faces
-            .par_iter()
-            .flat_map(|face| vec![[face.0, face.1], [face.1, face.2], [face.2, face.0]])
-            .collect()
+    /// Subdivide the mesh by splitting each triangle into 4 triangles.
+    ///
+    /// Each edge is split at its midpoint. After N iterations,
+    /// the face count is multiplied by 4^N.
+    #[must_use]
+    pub fn subdivide(&self, iterations: usize) -> Self {
+        let (vertices, faces) = crate::subdivide::subdivide(&self.vertices, &self.faces, iterations);
+        Self {
+            vertices,
+            faces,
+            ..Default::default()
+        }
     }
 
     /// The non-normalized cross product of every face.
-    #[cache_access]
-    pub fn faces_cross(&self) -> Vec<Vector3<f64>> {
-        self.faces
-            .par_iter()
-            .map(|face| {
-                let v0 = self.vertices[face.0];
-                let v1 = self.vertices[face.1];
-                let v2 = self.vertices[face.2];
-                (v1 - v0).cross(&(v2 - v0))
-            })
-            .collect()
+    ///
+    /// Cached on first access.
+    pub fn faces_cross(&self) -> &[Vector3<f64>] {
+        self.cache_faces_cross.get_or_init(|| {
+            self.faces
+                .par_iter()
+                .map(|[i0, i1, i2]| {
+                    let v0 = self.vertices[*i0];
+                    let v1 = self.vertices[*i1];
+                    let v2 = self.vertices[*i2];
+                    (v1 - v0).cross(&(v2 - v0))
+                })
+                .collect()
+        })
+    }
+
+    /// Calculate the normals for each face of the mesh.
+    ///
+    /// Cached on first access.
+    pub fn face_normals(&self) -> &[Vector3<f64>] {
+        self.cache_face_normals.get_or_init(|| {
+            self.faces_cross()
+                .par_iter()
+                .map(|cross| cross.normalize())
+                .collect()
+        })
+    }
+
+    /// Get the edges calculated from the faces.
+    ///
+    /// Returns 3 edges per face (may contain duplicates).
+    /// Cached on first access.
+    pub fn edges(&self) -> &[[usize; 2]] {
+        self.cache_edges.get_or_init(|| {
+            self.faces
+                .par_iter()
+                .flat_map(|[i0, i1, i2]| [[*i0, *i1], [*i1, *i2], [*i2, *i0]])
+                .collect()
+        })
     }
 
     /// The area for each triangle in the mesh.
-    #[cache_access]
-    pub fn faces_area(&self) -> Vec<f64> {
-        self.faces_cross()
-            .par_iter()
-            .map(|cross| cross.norm() / 2.0)
-            .collect()
+    ///
+    /// Cached on first access.
+    pub fn faces_area(&self) -> &[f64] {
+        self.cache_faces_area.get_or_init(|| {
+            self.faces_cross()
+                .par_iter()
+                .map(|cross| cross.norm() / 2.0)
+                .collect()
+        })
     }
 
     /// The summed area of every triangle in the mesh.
-    #[cache_access]
+    ///
+    /// Cached on first access.
     pub fn area(&self) -> f64 {
-        self.faces_area().iter().sum()
+        *self
+            .cache_area
+            .get_or_init(|| self.faces_area().iter().sum())
     }
 
     /// A helper method to get the UV coordinate attributes
@@ -165,30 +240,15 @@ impl Trimesh {
         self.attributes_vertex.uv.first()
     }
 
-    // What are the pairs of face indices that share an edge?
-    #[cache_access]
-    pub fn face_adjacency(&self) -> Vec<(usize, usize)> {
-        let mut edge_map = AHashMap::new();
-        let mut adjacency = Vec::new();
-
-        for (i, edge) in self.edges().iter().enumerate() {
-            // there are 3 edges per triangle
-            let face_index = i / 3;
-            // sorted edge for querying
-            let edge = [edge[0].min(edge[1]), edge[0].max(edge[1])];
-            if let Some(other) = edge_map.get(&edge) {
-                // add the face index to the adjacency list
-                adjacency.push((*other, face_index));
-            } else {
-                // add the edge to the map for checking later
-                edge_map.insert(edge, face_index);
-            }
-        }
-
-        adjacency
+    /// What are the pairs of face indices that share an edge?
+    ///
+    /// Cached on first access. Uses sort-based algorithm for cache efficiency.
+    pub fn face_adjacency(&self) -> &[(usize, usize)] {
+        self.cache_face_adjacency
+            .get_or_init(|| adjacency::face_adjacency(&self.faces))
     }
 
-    // Calculate the angles between adjacent faces.
+    /// Calculate the angles between adjacent faces.
     pub fn face_adjacency_angles(&self) -> Vec<f64> {
         let adjacency = self.face_adjacency();
         let normals = self.face_normals();
@@ -198,35 +258,87 @@ impl Trimesh {
             .collect()
     }
 
-    pub fn smooth_shaded(&self, threshold: f64) {
-        // get the angles between adjacent faces
-        let angles = self.face_adjacency_angles();
-        let _index: Vec<usize> = (0..angles.len())
-            .into_par_iter()
-            .filter(|i| angles[*i] < threshold)
-            .collect();
+    /// Compute mass properties (volume, mass, center of mass, inertia tensor).
+    ///
+    /// Uses the polyhedral mass properties algorithm from:
+    /// http://www.geometrictools.com/Documentation/PolyhedralMassProperties.pdf
+    ///
+    /// Cached on first access.
+    pub fn mass_properties(&self) -> &MassProperties {
+        self.cache_mass_properties.get_or_init(|| {
+            inertia::mass_properties(
+                &self.vertices,
+                &self.faces,
+                self.density.unwrap_or(1.0),
+                false,
+            )
+        })
+    }
 
-        let _adjacency = self.face_adjacency();
+    /// Get the volume of the mesh (signed, based on face winding).
+    ///
+    /// For a closed mesh with outward-pointing normals, this is positive.
+    pub fn volume(&self) -> f64 {
+        self.mass_properties().volume
+    }
+
+    /// Get the mass of the mesh (volume * density).
+    pub fn mass(&self) -> f64 {
+        self.mass_properties().mass
+    }
+
+    /// Get the center of mass of the mesh.
+    pub fn center_mass(&self) -> Vector3<f64> {
+        self.mass_properties().center_mass
+    }
+
+    /// Get the 3x3 inertia tensor of the mesh.
+    ///
+    /// Returns None if mass properties calculation was skipped.
+    pub fn moment_inertia(&self) -> Option<&Matrix3<f64>> {
+        self.mass_properties().inertia.as_ref()
+    }
+
+    /// Get cached topology info: (is_watertight, is_winding_consistent).
+    fn topology(&self) -> (bool, bool) {
+        *self
+            .cache_topology
+            .get_or_init(|| adjacency::check_topology(&self.faces))
+    }
+
+    /// Check if the mesh is watertight (all edges shared by exactly 2 faces).
+    pub fn is_watertight(&self) -> bool {
+        self.topology().0
+    }
+
+    /// Check if face winding is consistent across the mesh.
+    ///
+    /// For consistent winding, adjacent faces must traverse their shared edge
+    /// in opposite directions. If face A has edge (v0→v1), face B must have (v1→v0).
+    pub fn is_winding_consistent(&self) -> bool {
+        self.topology().1
+    }
+
+    /// Check if the mesh represents a valid volume.
+    ///
+    /// A mesh is a volume if it is watertight, has consistent winding,
+    /// and has positive volume (outward-facing normals).
+    pub fn is_volume(&self) -> bool {
+        let (watertight, consistent) = self.topology();
+        watertight && consistent && self.volume() > 0.0
     }
 
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,
-    /// or an error if the mesh is empty.
-    ///
-    /// Returns
-    /// ------------
-    /// bounds
-    ///   The axis-aligned bounding box of the mesh.
+    /// or None if the mesh is empty or degenerate.
     pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
         if self.vertices.is_empty() {
             return None;
         }
 
-        let (mut lower, mut upper) = (self.vertices[0], self.vertices[0]);
-        for vertex in self.vertices.iter().skip(1) {
-            // use componentwise min/max
-            lower = lower.inf(vertex);
-            upper = upper.sup(vertex);
-        }
+        let (lower, upper) = self.vertices.par_iter().map(|v| (*v, *v)).reduce(
+            || (self.vertices[0], self.vertices[0]),
+            |(l1, u1), (l2, u2)| (l1.inf(&l2), u1.sup(&u2)),
+        );
 
         if lower == upper {
             return None;
@@ -304,5 +416,121 @@ mod tests {
                     | relative_eq!(*a, std::f64::consts::PI / 2.0, epsilon = 1e-10)
             );
         }
+    }
+
+    #[test]
+    fn test_mass_properties() {
+        let box_mesh = create_box(&[1.0, 1.0, 1.0]);
+
+        // Unit cube should have volume 1
+        assert!(relative_eq!(box_mesh.volume().abs(), 1.0, epsilon = 1e-10));
+
+        // Mass equals volume for default density of 1
+        assert!(relative_eq!(box_mesh.mass().abs(), 1.0, epsilon = 1e-10));
+
+        // Center of mass at origin (use larger epsilon for floating point)
+        let com = box_mesh.center_mass();
+        assert!(relative_eq!(com.x, 0.0, epsilon = 1e-6));
+        assert!(relative_eq!(com.y, 0.0, epsilon = 1e-6));
+        assert!(relative_eq!(com.z, 0.0, epsilon = 1e-6));
+
+        // Inertia tensor diagonal should be ~1/6 for unit cube
+        let inertia = box_mesh.moment_inertia().unwrap();
+        let expected = 1.0 / 6.0;
+        assert!(relative_eq!(
+            inertia[(0, 0)].abs(),
+            expected,
+            epsilon = 1e-3
+        ));
+        assert!(relative_eq!(
+            inertia[(1, 1)].abs(),
+            expected,
+            epsilon = 1e-3
+        ));
+        assert!(relative_eq!(
+            inertia[(2, 2)].abs(),
+            expected,
+            epsilon = 1e-3
+        ));
+    }
+
+    #[test]
+    fn test_is_watertight() {
+        let box_mesh = create_box(&[1.0, 1.0, 1.0]);
+        assert!(box_mesh.is_watertight());
+    }
+
+    #[test]
+    fn test_surface_area() {
+        let box_mesh = create_box(&[1.0, 1.0, 1.0]);
+        // Unit cube has surface area 6
+        assert!(relative_eq!(box_mesh.area(), 6.0, epsilon = 1e-10));
+    }
+
+    #[test]
+    fn test_cache_performance() {
+        use std::time::Instant;
+
+        // Create a synthetic mesh with 100K faces
+        const NUM_FACES: usize = 100_000;
+        const NUM_VERTICES: usize = 50_000;
+
+        // Simple LCG for deterministic pseudo-random numbers
+        let mut seed: u64 = 12345;
+        let mut next_random = || {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            seed
+        };
+
+        // Generate random vertices
+        let vertices: Vec<Point3<f64>> = (0..NUM_VERTICES)
+            .map(|_| {
+                Point3::new(
+                    (next_random() % 10000) as f64 / 100.0,
+                    (next_random() % 10000) as f64 / 100.0,
+                    (next_random() % 10000) as f64 / 100.0,
+                )
+            })
+            .collect();
+
+        // Generate random faces (indices into vertices)
+        let faces: Vec<[usize; 3]> = (0..NUM_FACES)
+            .map(|_| {
+                [
+                    next_random() as usize % NUM_VERTICES,
+                    next_random() as usize % NUM_VERTICES,
+                    next_random() as usize % NUM_VERTICES,
+                ]
+            })
+            .collect();
+
+        let mesh = Trimesh {
+            vertices,
+            faces,
+            ..Default::default()
+        };
+
+        // First call - should compute and cache
+        let start1 = Instant::now();
+        let normals1 = mesh.face_normals();
+        let duration1 = start1.elapsed();
+
+        // Second call - should return cached value instantly
+        let start2 = Instant::now();
+        let normals2 = mesh.face_normals();
+        let duration2 = start2.elapsed();
+
+        // Verify we got the same data (same pointer)
+        assert!(std::ptr::eq(normals1.as_ptr(), normals2.as_ptr()));
+        assert_eq!(normals1.len(), NUM_FACES);
+
+        // The cached call should be at least 100x faster
+        // First call typically takes milliseconds, cached call takes nanoseconds
+        assert!(
+            duration2 < duration1 / 100,
+            "Cache not effective: first call {:?}, second call {:?}",
+            duration1,
+            duration2
+        );
     }
 }

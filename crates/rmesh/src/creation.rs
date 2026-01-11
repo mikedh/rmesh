@@ -17,10 +17,6 @@ use crate::mesh::Trimesh;
 /// -------------
 ///  A Trimesh representing the box.
 pub fn create_box(extents: &[f64; 3]) -> Trimesh {
-    if extents.len() != 3 {
-        panic!("Extents must be a 3-element array representing the size in each dimension.");
-    }
-
     // half extents for the box
     let half = [extents[0] / 2.0, extents[1] / 2.0, extents[2] / 2.0];
 
@@ -36,28 +32,30 @@ pub fn create_box(extents: &[f64; 3]) -> Trimesh {
         Point3::new(-half[0], half[1], half[2]),
     ];
 
-    // Faces as Vec<(usize, usize, usize)>
+    // Faces as Vec<[usize; 3]> - CCW winding for outward normals
     let faces = vec![
-        (0, 1, 2),
-        (0, 2, 3),
-        (4, 5, 6),
-        (4, 6, 7),
-        (0, 1, 5),
-        (0, 5, 4),
-        (2, 3, 7),
-        (2, 7, 6),
-        (1, 2, 6),
-        (1, 6, 5),
-        (3, 0, 4),
-        (3, 4, 7),
+        // Bottom face (-Z) - viewed from below, vertices go CCW
+        [0, 2, 1],
+        [0, 3, 2],
+        // Top face (+Z) - viewed from above, vertices go CCW
+        [4, 5, 6],
+        [4, 6, 7],
+        // Front face (-Y)
+        [0, 1, 5],
+        [0, 5, 4],
+        // Back face (+Y)
+        [2, 3, 7],
+        [2, 7, 6],
+        // Right face (+X)
+        [1, 2, 6],
+        [1, 6, 5],
+        // Left face (-X)
+        [0, 4, 7],
+        [0, 7, 3],
     ];
 
-    // directly create the Trimesh
-    Trimesh {
-        vertices,
-        faces,
-        ..Default::default()
-    }
+    // use the constructor to properly initialize cache fields
+    Trimesh::new(vertices, faces, None, None).unwrap()
 }
 
 use earcut::Earcut;
@@ -100,12 +98,8 @@ impl Triangulator {
         exterior: &[usize],
         interiors: &[Vec<usize>],
         vertices: &[Point2<f64>],
-    ) -> Vec<(usize, usize, usize)> {
-        // lazily initialize the earcut triangulator
-        if self.earcut.is_none() {
-            self.earcut = Some(Earcut::new());
-        }
-        let earcut = self.earcut.as_mut().unwrap();
+    ) -> Vec<[usize; 3]> {
+        let earcut = self.earcut.get_or_insert_with(Earcut::new);
 
         // start with a flattening of the exterior
         let mut flat = exterior
@@ -133,7 +127,7 @@ impl Triangulator {
         // convert the flat result into a list of triangles
         result
             .chunks_exact(3)
-            .map(|chunk| (chunk[0], chunk[1], chunk[2]))
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
             .collect()
     }
 
@@ -160,7 +154,7 @@ impl Triangulator {
         exterior: &[usize],
         interiors: &[Vec<usize>],
         vertices: &[Point3<f64>],
-    ) -> Result<Vec<(usize, usize, usize)>> {
+    ) -> Result<Vec<[usize; 3]>> {
         // find a plane for the vertices in our exterior as not every vertex may be referenced
         let fittable: Vec<Point3<f64>> = exterior.iter().map(|i| vertices[*i]).collect();
         // use the cross product method to find a plane which works well for exactly planar points
@@ -185,9 +179,9 @@ impl Triangulator {
 /// ------------
 /// triangles
 ///  The triangles referencing vertex indexes.
-pub fn triangulate_fan(exterior: &[usize]) -> Vec<(usize, usize, usize)> {
+pub fn triangulate_fan(exterior: &[usize]) -> Vec<[usize; 3]> {
     (1..exterior.len() - 1)
-        .map(|i| (exterior[0], exterior[i], exterior[i + 1]))
+        .map(|i| [exterior[0], exterior[i], exterior[i + 1]])
         .collect()
 }
 pub struct Plane {

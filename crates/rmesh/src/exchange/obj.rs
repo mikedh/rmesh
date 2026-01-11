@@ -190,9 +190,9 @@ struct ObjFaces {
     pub object: usize,
 
     // the indexes of `vertices.vertices`
-    pub faces: Vec<(usize, usize, usize)>,
-    pub faces_tex: Vec<Option<(usize, usize, usize)>>,
-    pub face_normal: Vec<Option<(usize, usize, usize)>>,
+    pub faces: Vec<[usize; 3]>,
+    pub faces_tex: Vec<Option<[usize; 3]>>,
+    pub face_normal: Vec<Option<[usize; 3]>>,
     pub faces_material: Vec<usize>,
     pub faces_group: Vec<usize>,
     pub faces_smooth: Vec<usize>,
@@ -244,10 +244,10 @@ impl ObjFaces {
         let tri = {
             // if we have a triangle this is easy
             if f.len() == 3 {
-                vec![(f[0], f[1], f[2])]
+                vec![[f[0], f[1], f[2]]]
             } else if f.len() == 4 {
                 // if we have a quad split it into two triangles
-                vec![(f[0], f[1], f[2]), (f[0], f[2], f[3])]
+                vec![[f[0], f[1], f[2]], [f[0], f[2], f[3]]]
             } else if f.len() > 4 {
                 // if we have a polygon triangulate it
                 // TODO : do we have to do this in a second pass to avoid
@@ -275,7 +275,7 @@ pub struct ObjMesh {
 
 impl ObjMesh {
     /// Parse a string into an ObjMesh.
-    pub fn from_string(data: &str) -> Result<Self> {
+    pub fn from_string(data: &str) -> Self {
         // parse the strings in parallel
         let lines: Vec<ObjLine> = data
             .lines()
@@ -320,22 +320,22 @@ impl ObjMesh {
             }
         }
 
-        Ok(ObjMesh {
+        ObjMesh {
             vertices: vertex,
             faces,
-        })
+        }
     }
 
     pub fn into_mesh(self) -> Result<Trimesh> {
         // "flatten" the mesh to ensure each vertex matches
-        let attributes_vertex = self.vertices.to_attributes().unwrap_or_default();
+        let attributes_vertex = self.vertices.to_attributes();
 
-        Ok(Trimesh {
-            vertices: self.vertices.vertices,
-            faces: self.faces.faces,
+        Trimesh::new(
+            self.vertices.vertices,
+            self.faces.faces,
             attributes_vertex,
-            ..Default::default()
-        })
+            None,
+        )
     }
 }
 
@@ -358,7 +358,10 @@ fn str_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
     let mut color: Vector4<u8> = Vector4::new(0u8, 0u8, 0u8, 255u8);
     for (i, c) in raw.iter().take(4).enumerate() {
         if let Ok(value) = c.parse::<f64>() {
-            color[i] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
+            // Cast is safe: clamp guarantees 0.0..=255.0 which fits in u8
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let byte = (value * 255.0).round().clamp(0.0, 255.0) as u8;
+            color[i] = byte;
         } else {
             // if any of the values fail to parse return None
             return None;

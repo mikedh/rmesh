@@ -6,7 +6,7 @@ use std::ops::{Add, AddAssign};
 // Type aliases for clarity
 type Point = Point3<f64>;
 type Vector = Vector3<f64>;
-type SimplifiedMesh = (Vec<Point3<f64>>, Vec<(usize, usize, usize)>);
+type SimplifiedMesh = (Vec<Point3<f64>>, Vec<[usize; 3]>);
 
 // --- Helper: Symmetric Matrix (Quadric) ---
 
@@ -122,7 +122,7 @@ struct Simplifier {
 }
 
 impl Simplifier {
-    fn new(input_vertices: &[Point], input_faces: &[(usize, usize, usize)]) -> Self {
+    fn new(input_vertices: &[Point], input_faces: &[[usize; 3]]) -> Self {
         let vertices = input_vertices
             .iter()
             .map(|&p| Vertex {
@@ -136,7 +136,7 @@ impl Simplifier {
 
         let triangles = input_faces
             .iter()
-            .map(|&(v0, v1, v2)| Triangle {
+            .map(|&[v0, v1, v2]| Triangle {
                 v: [v0, v1, v2],
                 err: [0.0; 4],
                 deleted: false,
@@ -170,31 +170,29 @@ impl Simplifier {
                 1.0 / det * q.det(0, 2, 3, 1, 5, 6, 2, 7, 8),  // vy
                 -1.0 / det * q.det(0, 1, 3, 1, 4, 6, 2, 5, 8), // vz
             );
-            error = self.vertex_error(q, p_result);
+            error = Self::vertex_error(q, p_result);
         } else {
             // det is close to 0 or on border -> Use midpoint or endpoints
             let p1 = self.vertices[id_v1].p;
             let p2 = self.vertices[id_v2].p;
             let p3 = Point::from((p1.coords + p2.coords) / 2.0); // Midpoint
 
-            let error1 = self.vertex_error(q, p1);
-            let error2 = self.vertex_error(q, p2);
-            let error3 = self.vertex_error(q, p3);
-
-            error = error1.min(error2.min(error3));
-            if error == error1 {
-                p_result = p1;
-            } else if error == error2 {
-                p_result = p2;
-            } else {
-                p_result = p3;
-            }
+            // Find the point with minimum error
+            let candidates = [
+                (Self::vertex_error(q, p1), p1),
+                (Self::vertex_error(q, p2), p2),
+                (Self::vertex_error(q, p3), p3),
+            ];
+            (error, p_result) = candidates
+                .into_iter()
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap();
         }
         (error, p_result)
     }
 
     // Calculate error for a vertex position given a quadric matrix
-    fn vertex_error(&self, q: SymmetricMatrix, p: Point) -> f64 {
+    fn vertex_error(q: SymmetricMatrix, p: Point) -> f64 {
         let x = p.x;
         let y = p.y;
         let z = p.z;
@@ -437,29 +435,18 @@ impl Simplifier {
             }
 
             // --- Initialize Edge Errors ---
-            for t in self.triangles.iter_mut() {
-                if t.deleted {
+            for tid in 0..self.triangles.len() {
+                if self.triangles[tid].deleted {
                     continue;
                 }
-                for j in 0..3 {
-                    let v0 = t.v[j];
-                    let v1 = t.v[(j + 1) % 3];
-                    let err = {
-                        let vertices = &self.vertices;
-                        let q_v0 = vertices[v0].q;
-                        let q_v1 = vertices[v1].q;
-                        let border = vertices[v0].border && vertices[v1].border;
-                        let det = (q_v0 + q_v1).det(0, 1, 2, 1, 4, 5, 2, 5, 7);
-
-                        if det.abs() > 1e-15 && !border {
-                            0.0 // Replace with actual error calculation logic if needed
-                        } else {
-                            f64::MAX // Replace with fallback error logic if needed
-                        }
-                    };
-                    t.err[j] = err;
-                }
-                t.err[3] = t.err[0].min(t.err[1].min(t.err[2]));
+                let v = self.triangles[tid].v;
+                let (err0, _) = self.calculate_error(v[0], v[1]);
+                let (err1, _) = self.calculate_error(v[1], v[2]);
+                let (err2, _) = self.calculate_error(v[2], v[0]);
+                self.triangles[tid].err[0] = err0;
+                self.triangles[tid].err[1] = err1;
+                self.triangles[tid].err[2] = err2;
+                self.triangles[tid].err[3] = err0.min(err1.min(err2));
             }
         }
     }
@@ -498,7 +485,7 @@ impl Simplifier {
             }
 
             // Threshold calculation
-            let threshold = 0.000000001 * (iteration as f64 + 3.0).powf(aggressiveness);
+            let threshold = 0.000_000_001 * (f64::from(iteration) + 3.0).powf(aggressiveness);
 
             if verbose && iteration % 5 == 0 {
                 println!(
@@ -674,13 +661,9 @@ impl Simplifier {
     }
 
     // Extract final mesh data
-    fn get_result(&self) -> (Vec<Point>, Vec<(usize, usize, usize)>) {
+    fn get_result(&self) -> (Vec<Point>, Vec<[usize; 3]>) {
         let result_vertices = self.vertices.iter().map(|v| v.p).collect();
-        let result_faces = self
-            .triangles
-            .iter()
-            .map(|t| (t.v[0], t.v[1], t.v[2]))
-            .collect();
+        let result_faces = self.triangles.iter().map(|t| t.v).collect();
         (result_vertices, result_faces)
     }
 }
@@ -690,7 +673,7 @@ impl Simplifier {
 /// # Arguments
 ///
 /// * `input_vertices` - Slice of vertex positions.
-/// * `input_faces` - Slice of triangle faces, represented as tuples of vertex indices.
+/// * `input_faces` - Slice of triangle faces, represented as arrays of vertex indices.
 /// * `target_count` - The desired number of faces in the simplified mesh.
 /// * `aggressiveness` - Controls how aggressively to collapse edges. Higher values mean more aggressive simplification. Good values are typically between 5 and 8.
 /// * `verbose` - Print progress information during simplification.
@@ -701,7 +684,7 @@ impl Simplifier {
 /// Returns the original mesh if target_count is >= current face count or input is invalid.
 pub fn simplify_mesh(
     input_vertices: &[Point3<f64>],
-    input_faces: &[(usize, usize, usize)],
+    input_faces: &[[usize; 3]],
     target_count: usize,
     aggressiveness: f64,
     verbose: bool, // Added verbose flag
@@ -756,50 +739,233 @@ pub fn simplify_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::creation::create_box;
+    use crate::triangles::inertia::volume;
+    use approx::assert_relative_eq;
     use nalgebra::Point3;
 
     #[test]
-    fn test_simplify_mesh() {
-        // Define a simple cube mesh
+    fn test_simplify_cube() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let (simplified_vertices, simplified_faces) =
+            simplify_mesh(&cube.vertices, &cube.faces, 6, 7.0, false);
+
+        assert!(simplified_vertices.len() <= cube.vertices.len());
+        assert!(simplified_faces.len() <= 6);
+        // Should produce at least 4 faces (tetrahedron minimum for closed shape)
+        assert!(simplified_faces.len() >= 4);
+    }
+
+    #[test]
+    fn test_simplify_preserves_volume_approximately() {
+        // Create a unit cube and simplify it
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let original_volume = volume(&cube.vertices, &cube.faces).abs();
+
+        let (simplified_vertices, simplified_faces) =
+            simplify_mesh(&cube.vertices, &cube.faces, 8, 7.0, false);
+
+        let simplified_volume = volume(&simplified_vertices, &simplified_faces).abs();
+
+        // Volume should be preserved within 50% for aggressive simplification
+        // (quadric error minimization optimizes for surface distance, not volume)
+        assert!(
+            (simplified_volume - original_volume).abs() / original_volume < 0.5,
+            "Volume changed too much: {} -> {}",
+            original_volume,
+            simplified_volume
+        );
+    }
+
+    #[test]
+    fn test_simplify_plane_to_two_triangles() {
+        // A flat quad (2 triangles) should stay as 2 triangles when target is 2
         let vertices = vec![
             Point3::new(0.0, 0.0, 0.0),
             Point3::new(1.0, 0.0, 0.0),
             Point3::new(1.0, 1.0, 0.0),
             Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-            Point3::new(1.0, 0.0, 1.0),
-            Point3::new(1.0, 1.0, 1.0),
-            Point3::new(0.0, 1.0, 1.0),
         ];
-        let faces = vec![
-            (0, 1, 2),
-            (0, 2, 3), // Bottom
-            (4, 5, 6),
-            (4, 6, 7), // Top
-            (0, 1, 5),
-            (0, 5, 4), // Front
-            (1, 2, 6),
-            (1, 6, 5), // Right
-            (2, 3, 7),
-            (2, 7, 6), // Back
-            (3, 0, 4),
-            (3, 4, 7), // Left
-        ];
-
-        // Simplify the cube mesh
-        let target_face_count = 6; // Target number of faces
-        let aggressiveness = 7.0;
-        let _verbose = true;
+        let faces = vec![[0, 1, 2], [0, 2, 3]];
 
         let (simplified_vertices, simplified_faces) =
-            simplify_mesh(&vertices, &faces, target_face_count, aggressiveness, true);
+            simplify_mesh(&vertices, &faces, 2, 7.0, false);
 
-        // Assert the simplified mesh has the expected number of vertices and faces
-        assert!(simplified_vertices.len() <= vertices.len());
-        assert!(simplified_faces.len() <= target_face_count);
+        // Can't simplify a quad below 2 triangles
+        assert_eq!(simplified_faces.len(), 2);
+        assert!(simplified_vertices.len() >= 3);
+    }
 
-        // Optionally, print the results for debugging
-        println!("Simplified Vertices: {}", simplified_vertices.len());
-        println!("Simplified Faces: {}", simplified_faces.len());
+    #[test]
+    fn test_simplify_respects_target_count() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+
+        for target in [4, 6, 8, 10] {
+            let (_, simplified_faces) =
+                simplify_mesh(&cube.vertices, &cube.faces, target, 7.0, false);
+            assert!(
+                simplified_faces.len() <= target,
+                "Target {} but got {} faces",
+                target,
+                simplified_faces.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_simplify_no_degenerate_faces() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let (vertices, faces) = simplify_mesh(&cube.vertices, &cube.faces, 6, 7.0, false);
+
+        for (i, [v0, v1, v2]) in faces.iter().enumerate() {
+            // Check indices are valid
+            assert!(*v0 < vertices.len(), "Face {} has invalid v0", i);
+            assert!(*v1 < vertices.len(), "Face {} has invalid v1", i);
+            assert!(*v2 < vertices.len(), "Face {} has invalid v2", i);
+
+            // Check no duplicate vertices in face
+            assert!(v0 != v1 && v1 != v2 && v2 != v0, "Face {} is degenerate", i);
+
+            // Check triangle has non-zero area
+            let p0 = vertices[*v0];
+            let p1 = vertices[*v1];
+            let p2 = vertices[*v2];
+            let area = (p1 - p0).cross(&(p2 - p0)).norm() / 2.0;
+            assert!(area > 1e-10, "Face {} has zero area", i);
+        }
+    }
+
+    #[test]
+    fn test_vertex_error_formula() {
+        // For a plane z=0, the quadric should give error = z^2
+        let q = SymmetricMatrix::from_plane(0.0, 0.0, 1.0, 0.0); // plane z=0
+
+        // Point on plane should have zero error
+        let on_plane = Point3::new(1.0, 2.0, 0.0);
+        assert_relative_eq!(Simplifier::vertex_error(q, on_plane), 0.0, epsilon = 1e-10);
+
+        // Point at z=1 should have error 1
+        let off_plane = Point3::new(1.0, 2.0, 1.0);
+        assert_relative_eq!(Simplifier::vertex_error(q, off_plane), 1.0, epsilon = 1e-10);
+
+        // Point at z=3 should have error 9
+        let far_off = Point3::new(0.0, 0.0, 3.0);
+        assert_relative_eq!(Simplifier::vertex_error(q, far_off), 9.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_symmetric_matrix_add() {
+        let q1 = SymmetricMatrix::from_plane(1.0, 0.0, 0.0, 0.0); // x=0
+        let q2 = SymmetricMatrix::from_plane(0.0, 1.0, 0.0, 0.0); // y=0
+
+        let q_sum = q1 + q2;
+
+        // Error at origin should be 0 (on both planes)
+        let origin = Point3::origin();
+        assert_relative_eq!(Simplifier::vertex_error(q_sum, origin), 0.0, epsilon = 1e-10);
+
+        // Error at (1,1,0) should be 1+1=2
+        let p = Point3::new(1.0, 1.0, 0.0);
+        assert_relative_eq!(Simplifier::vertex_error(q_sum, p), 2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_simplify_empty_mesh() {
+        let vertices: Vec<Point3<f64>> = vec![];
+        let faces: Vec<[usize; 3]> = vec![];
+
+        let (result_v, result_f) = simplify_mesh(&vertices, &faces, 10, 7.0, false);
+        assert!(result_v.is_empty());
+        assert!(result_f.is_empty());
+    }
+
+    #[test]
+    fn test_simplify_target_zero() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let (result_v, result_f) = simplify_mesh(&cube.vertices, &cube.faces, 0, 7.0, false);
+        assert!(result_v.is_empty());
+        assert!(result_f.is_empty());
+    }
+
+    #[test]
+    fn test_simplify_target_exceeds_current() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let (result_v, result_f) = simplify_mesh(&cube.vertices, &cube.faces, 100, 7.0, false);
+        // Should return original mesh unchanged
+        assert_eq!(result_v.len(), cube.vertices.len());
+        assert_eq!(result_f.len(), cube.faces.len());
+    }
+
+    #[test]
+    fn test_simplify_subdivided_cube() {
+        use crate::subdivide::subdivide;
+
+        // Subdivide cube to create ~50K faces
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let (large_verts, large_faces) = subdivide(&cube.vertices, &cube.faces, 6);
+        // 12 * 4^6 = 49,152 faces
+        assert_eq!(large_faces.len(), 49152);
+
+        let original_volume = volume(&large_verts, &large_faces).abs();
+
+        // Simplify back down to ~1000 faces
+        let (simplified_verts, simplified_faces) =
+            simplify_mesh(&large_verts, &large_faces, 1000, 7.0, false);
+
+        // Should respect target
+        assert!(
+            simplified_faces.len() <= 1000,
+            "Got {} faces, expected <= 1000",
+            simplified_faces.len()
+        );
+
+        // Should have significantly fewer faces
+        assert!(simplified_faces.len() < large_faces.len() / 10);
+
+        // Volume should be approximately preserved (within 20% for this aggressive simplification)
+        let simplified_volume = volume(&simplified_verts, &simplified_faces).abs();
+        let volume_change = (simplified_volume - original_volume).abs() / original_volume;
+        assert!(
+            volume_change < 0.2,
+            "Volume changed by {:.1}%: {} -> {}",
+            volume_change * 100.0,
+            original_volume,
+            simplified_volume
+        );
+
+        // No degenerate faces
+        for [v0, v1, v2] in &simplified_faces {
+            assert!(v0 != v1 && v1 != v2 && v2 != v0);
+            assert!(*v0 < simplified_verts.len());
+            assert!(*v1 < simplified_verts.len());
+            assert!(*v2 < simplified_verts.len());
+        }
+    }
+
+    #[test]
+    fn test_simplify_100k_faces() {
+        use crate::subdivide::subdivide;
+        use std::time::Instant;
+
+        // Create ~200K face mesh
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let (large_verts, large_faces) = subdivide(&cube.vertices, &cube.faces, 7);
+        // 12 * 4^7 = 196,608 faces
+        assert_eq!(large_faces.len(), 196608);
+
+        let start = Instant::now();
+        let (simplified_verts, simplified_faces) =
+            simplify_mesh(&large_verts, &large_faces, 1000, 7.0, false);
+        let duration = start.elapsed();
+
+        println!(
+            "Simplified {}K -> {} faces in {:?}",
+            large_faces.len() / 1000,
+            simplified_faces.len(),
+            duration
+        );
+
+        assert!(simplified_faces.len() <= 1000);
+        assert!(!simplified_verts.is_empty());
     }
 }

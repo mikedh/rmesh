@@ -13,8 +13,8 @@ bytemuck = {workspace=true}
 nalgebra = {workspace=true}
 rmesh = { path = "../rmesh" }
 
-numpy = "0.24.0"
-pyo3 = { version = "0.24.0", features=["anyhow"] }
+numpy = "0.27"
+pyo3 = { version = "0.27", features=["anyhow"] }
 
 [dev-dependencies]
 approx = "0.5.1"

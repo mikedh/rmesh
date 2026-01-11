@@ -5,4 +5,57 @@ resolver = "2"
 [workspace.dependencies]
 anyhow = "1.0.98"
 bytemuck = { version = "1.22.0", features = ["derive", "extern_crate_alloc"] }
-nalgebra = { version = "0.33.2", features=["bytemuck"] }
+nalgebra = { version = "0.33.2", features = ["bytemuck"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[workspace.lints.rust]
+# Safety
+unsafe_code = "deny"
+# Missing docs can indicate incomplete APIs
+# missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Correctness - these are almost always bugs
+correctness = { level = "deny", priority = -1 }
+
+# Suspicious patterns that are likely bugs
+suspicious = { level = "warn", priority = -1 }
+
+# Pedantic - more opinionated but catches real issues
+pedantic = { level = "warn", priority = -1 }
+
+# Performance issues
+perf = { level = "warn", priority = -1 }
+
+# Specific high-value lints
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+float_cmp = "warn"
+panic = "warn"
+
+# Relax overly pedantic or noisy lints
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+doc_markdown = "allow"
+items_after_statements = "allow"
+redundant_closure_for_method_calls = "allow"
+# These are too noisy for geometry code with lots of array access
+indexing_slicing = "allow"
+# False positives in math formulas
+suspicious_operation_groupings = "allow"
+# Precision loss when converting usize to f64 is usually fine
+cast_precision_loss = "allow"
+# Integer division is often intentional
+integer_division = "allow"
+# Explicit iter() can be clearer
+explicit_iter_loop = "allow"
+# Format string style preference
+uninlined_format_args = "allow"
+# Struct field order isn't critical
+inconsistent_struct_constructor = "allow"

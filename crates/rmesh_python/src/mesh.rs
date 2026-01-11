@@ -31,11 +31,11 @@ impl PyTrimesh {
             .map(|x| Point3::new(x[0], x[1], x[2]))
             .collect::<Vec<_>>();
 
-        let faces: Vec<(usize, usize, usize)> = faces
+        let faces: Vec<[usize; 3]> = faces
             .as_array()
             .rows()
             .into_iter()
-            .map(|x| (x[0] as usize, x[1] as usize, x[2] as usize))
+            .map(|x| [x[0] as usize, x[1] as usize, x[2] as usize])
             .collect::<Vec<_>>();
 
         Ok(PyTrimesh {
@@ -72,7 +72,7 @@ impl PyTrimesh {
             shape,
             faces
                 .iter()
-                .flat_map(|&(a, b, c)| vec![a as i64, b as i64, c as i64])
+                .flat_map(|&[a, b, c]| vec![a as i64, b as i64, c as i64])
                 .collect(),
         )
         .unwrap();

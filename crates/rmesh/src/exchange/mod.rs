@@ -8,7 +8,7 @@ use crate::mesh::Trimesh;
 use crate::exchange::obj::ObjMesh;
 use crate::exchange::stl::BinaryStl;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // An enum to represent the different mesh file formats.
 pub enum MeshFormat {
     // the STL format is a binary or ASCII format with a pure triangle soup
@@ -37,7 +37,7 @@ impl MeshFormat {
 pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
     match file_type {
         MeshFormat::STL => BinaryStl::from_bytes(file_data)?.to_mesh(),
-        MeshFormat::OBJ => ObjMesh::from_string(&String::from_utf8_lossy(file_data))?.into_mesh(),
+        MeshFormat::OBJ => ObjMesh::from_string(&String::from_utf8_lossy(file_data)).into_mesh(),
         MeshFormat::PLY => todo!(),
     }
 }

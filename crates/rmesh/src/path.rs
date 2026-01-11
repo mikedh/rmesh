@@ -149,6 +149,8 @@ impl Curve {
                         let one_minus_t = 1.0 - t;
                         let mut pt = Point3::origin();
                         for (i, p) in control.iter().enumerate() {
+                            // Casts are safe: Bezier curves have small degree (typically <= 10)
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                             let coeff =
                                 binoms[i] * one_minus_t.powi((n - i) as i32) * t.powi(i as i32);
                             pt += p.coords * coeff;
