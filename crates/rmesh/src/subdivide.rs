@@ -1,7 +1,9 @@
 //! Mesh subdivision algorithms.
 
-use nalgebra::Point3;
+use nalgebra::{Point3, Vector4};
 use rayon::prelude::*;
+
+use crate::attributes::Attributes;
 
 /// Subdivide a mesh by splitting each triangle into 4 triangles.
 ///
@@ -33,6 +35,55 @@ pub fn subdivide(
     }
 
     (current_vertices, current_faces)
+}
+
+/// Subdivide a mesh with face attributes.
+///
+/// Each child face inherits its parent face's attributes (colors, etc.).
+///
+/// # Arguments
+/// * `vertices` - Original vertex positions
+/// * `faces` - Original triangle faces
+/// * `face_attributes` - Face attributes to propagate
+/// * `iterations` - Number of subdivision iterations
+///
+/// # Returns
+/// New vertices, faces, and face attributes after subdivision.
+pub fn subdivide_with_attributes(
+    vertices: &[Point3<f64>],
+    faces: &[[usize; 3]],
+    face_attributes: &Attributes,
+    iterations: usize,
+) -> (Vec<Point3<f64>>, Vec<[usize; 3]>, Attributes) {
+    if iterations == 0 || faces.is_empty() {
+        return (vertices.to_vec(), faces.to_vec(), face_attributes.clone());
+    }
+
+    let mut current_vertices = vertices.to_vec();
+    let mut current_faces = faces.to_vec();
+    let mut current_attrs = face_attributes.clone();
+
+    for _ in 0..iterations {
+        let (new_verts, new_faces) = subdivide_once(&current_vertices, &current_faces);
+
+        // Propagate face colors: each parent face becomes 4 child faces
+        // Child faces are in order: [top, right, left, center] for each parent
+        let mut new_attrs = Attributes::default();
+
+        for colors in &current_attrs.colors {
+            let new_colors: Vec<Vector4<u8>> = colors
+                .iter()
+                .flat_map(|&color| [color, color, color, color])
+                .collect();
+            new_attrs.colors.push(new_colors);
+        }
+
+        current_vertices = new_verts;
+        current_faces = new_faces;
+        current_attrs = new_attrs;
+    }
+
+    (current_vertices, current_faces, current_attrs)
 }
 
 /// Single iteration of mid-edge subdivision using sort-based unique edges.
@@ -116,7 +167,7 @@ fn subdivide_once(
         .enumerate()
         .flat_map_iter(|(face_idx, &[v0, v1, v2])| {
             let base = face_idx * 3;
-            let m0 = inverse[base];     // midpoint of v0-v1
+            let m0 = inverse[base]; // midpoint of v0-v1
             let m1 = inverse[base + 1]; // midpoint of v1-v2
             let m2 = inverse[base + 2]; // midpoint of v2-v0
 
@@ -175,7 +226,11 @@ mod tests {
 
         for iterations in 1..=3 {
             let (_, faces) = subdivide(&cube.vertices, &cube.faces, iterations);
-            assert!(is_watertight(&faces), "Lost watertight at iteration {}", iterations);
+            assert!(
+                is_watertight(&faces),
+                "Lost watertight at iteration {}",
+                iterations
+            );
         }
     }
 
@@ -210,5 +265,71 @@ mod tests {
         // Verify it's still valid
         let vol = volume(&verts, &faces).abs();
         assert_relative_eq!(vol, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_subdivide_propagates_face_colors() {
+        use super::subdivide_with_attributes;
+        use crate::attributes::Attributes;
+        use nalgebra::Vector4;
+
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        // Cube has 12 faces (2 triangles per side of the box)
+
+        // Create distinct colors for each face
+        // Colors grouped by cube side: faces 0-1 (side 0), 2-3 (side 1), etc.
+        let face_colors: Vec<Vector4<u8>> = (0..12)
+            .map(|i| {
+                let side = i / 2; // 0-5 for each side of cube
+                Vector4::new(
+                    (side * 40) as u8,       // R: 0, 40, 80, 120, 160, 200
+                    ((5 - side) * 40) as u8, // G: 200, 160, 120, 80, 40, 0
+                    100,                     // B: constant
+                    255,                     // A: opaque
+                )
+            })
+            .collect();
+
+        let mut face_attrs = Attributes::default();
+        face_attrs.colors.push(face_colors.clone());
+
+        // Subdivide once: 12 faces -> 48 faces
+        let (_, new_faces, new_attrs) =
+            subdivide_with_attributes(&cube.vertices, &cube.faces, &face_attrs, 1);
+
+        assert_eq!(new_faces.len(), 48);
+        assert_eq!(new_attrs.colors.len(), 1);
+        assert_eq!(new_attrs.colors[0].len(), 48);
+
+        // Each original face becomes 4 child faces with the same color
+        for (parent_idx, parent_color) in face_colors.iter().enumerate() {
+            for child_offset in 0..4 {
+                let child_idx = parent_idx * 4 + child_offset;
+                assert_eq!(
+                    new_attrs.colors[0][child_idx], *parent_color,
+                    "Child face {} should have same color as parent face {}",
+                    child_idx, parent_idx
+                );
+            }
+        }
+
+        // Subdivide twice: 12 faces -> 192 faces
+        let (_, new_faces2, new_attrs2) =
+            subdivide_with_attributes(&cube.vertices, &cube.faces, &face_attrs, 2);
+
+        assert_eq!(new_faces2.len(), 192);
+        assert_eq!(new_attrs2.colors[0].len(), 192);
+
+        // Each original face becomes 16 child faces (4^2)
+        for (parent_idx, parent_color) in face_colors.iter().enumerate() {
+            for child_offset in 0..16 {
+                let child_idx = parent_idx * 16 + child_offset;
+                assert_eq!(
+                    new_attrs2.colors[0][child_idx], *parent_color,
+                    "Child face {} should have same color as parent face {} after 2 iterations",
+                    child_idx, parent_idx
+                );
+            }
+        }
     }
 }

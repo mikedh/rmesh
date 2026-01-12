@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::{
     attributes::{Attributes, LoadSource},
     graph::adjacency,
-    simplify::simplify_mesh,
+    simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
     triangles::inertia::{self, MassProperties},
 };
 use nalgebra::{Matrix3, Point3, Vector2, Vector3};
@@ -140,33 +140,65 @@ impl Trimesh {
     }
 
     /// Simplify the mesh to a target face count.
+    ///
+    /// Preserves vertex attributes (normals, UVs, colors) through interpolation.
     #[must_use]
     pub fn simplify(&self, target_count: usize, aggressiveness: f64) -> Self {
-        let (vertices, faces) = simplify_mesh(
-            &self.vertices,
-            &self.faces,
+        let options = SimplifyOptions {
             target_count,
             aggressiveness,
-            false,
+            preserve_attributes: true,
+            ..Default::default()
+        };
+
+        let result = simplify_mesh(
+            &self.vertices,
+            &self.faces,
+            Some(&self.attributes_vertex),
+            Some(&self.attributes_face),
+            options,
         );
 
         Self {
-            vertices,
-            faces,
+            vertices: result.vertices,
+            faces: result.faces,
+            attributes_vertex: result.attributes_vertex,
+            attributes_face: result.attributes_face,
             ..Default::default()
         }
+    }
+
+    /// Simplify the mesh with full control over options.
+    ///
+    /// Returns the full SimplifyResult including quality metrics if requested.
+    #[must_use]
+    pub fn simplify_with_options(&self, options: SimplifyOptions) -> SimplifyResult {
+        simplify_mesh(
+            &self.vertices,
+            &self.faces,
+            Some(&self.attributes_vertex),
+            Some(&self.attributes_face),
+            options,
+        )
     }
 
     /// Subdivide the mesh by splitting each triangle into 4 triangles.
     ///
     /// Each edge is split at its midpoint. After N iterations,
     /// the face count is multiplied by 4^N.
+    /// Face attributes (colors) are propagated to child faces.
     #[must_use]
     pub fn subdivide(&self, iterations: usize) -> Self {
-        let (vertices, faces) = crate::subdivide::subdivide(&self.vertices, &self.faces, iterations);
+        let (vertices, faces, attributes_face) = crate::subdivide::subdivide_with_attributes(
+            &self.vertices,
+            &self.faces,
+            &self.attributes_face,
+            iterations,
+        );
         Self {
             vertices,
             faces,
+            attributes_face,
             ..Default::default()
         }
     }

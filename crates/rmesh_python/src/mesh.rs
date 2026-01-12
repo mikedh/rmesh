@@ -1,12 +1,15 @@
 use anyhow::Result;
-use nalgebra::Point3;
+use nalgebra::{Point3, Vector3, Vector4};
 use numpy::ndarray::Array2;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use numpy::{PyArray2, PyReadonlyArray2};
 
+use rmesh::attributes::Attributes;
 use rmesh::exchange::{MeshFormat, load_mesh};
 use rmesh::mesh::Trimesh;
+use rmesh::simplify::SimplifyOptions;
 
 //use crate::rmesh::mesh::{load_mesh, MeshFormat, Trimesh};
 
@@ -93,6 +96,193 @@ impl PyTrimesh {
 
     pub fn py_check(&self) -> usize {
         10
+    }
+
+    /// Get vertex normals if they exist.
+    #[getter]
+    pub fn get_vertex_normals<'py>(&self, py: Python<'py>) -> Option<Py<PyArray2<f64>>> {
+        self.data.attributes_vertex.normals.first().map(|normals| {
+            let shape = (normals.len(), 3);
+            let arr = Array2::from_shape_vec(
+                shape,
+                normals.iter().flat_map(|n| vec![n.x, n.y, n.z]).collect(),
+            )
+            .unwrap();
+            PyArray2::from_array(py, &arr).to_owned().into()
+        })
+    }
+
+    /// Get face colors if they exist.
+    /// Returns RGBA colors as uint8 array of shape (n_faces, 4).
+    #[getter]
+    pub fn get_face_colors<'py>(&self, py: Python<'py>) -> Option<Py<PyArray2<u8>>> {
+        self.data.attributes_face.colors.first().map(|colors| {
+            let shape = (colors.len(), 4);
+            let arr = Array2::from_shape_vec(
+                shape,
+                colors
+                    .iter()
+                    .flat_map(|c| vec![c.x, c.y, c.z, c.w])
+                    .collect(),
+            )
+            .unwrap();
+            PyArray2::from_array(py, &arr).to_owned().into()
+        })
+    }
+
+    /// Simplify the mesh to a target face count.
+    ///
+    /// Parameters
+    /// ----------
+    /// target_faces : int
+    ///     Target number of faces after simplification.
+    /// aggressiveness : float, optional
+    ///     Controls how aggressively to simplify. Default: 7.0.
+    ///     Higher values mean faster but potentially lower quality.
+    ///
+    /// Returns
+    /// -------
+    /// Trimesh
+    ///     Simplified mesh with preserved vertex attributes.
+    #[pyo3(signature = (target_faces, aggressiveness=None))]
+    pub fn simplify(&self, target_faces: usize, aggressiveness: Option<f64>) -> Self {
+        let simplified = self
+            .data
+            .simplify(target_faces, aggressiveness.unwrap_or(7.0));
+        PyTrimesh { data: simplified }
+    }
+
+    /// Simplify the mesh with quality metrics returned.
+    ///
+    /// Parameters
+    /// ----------
+    /// target_faces : int
+    ///     Target number of faces after simplification.
+    /// aggressiveness : float, optional
+    ///     Controls how aggressively to simplify. Default: 7.0.
+    ///
+    /// Returns
+    /// -------
+    /// tuple[Trimesh, dict]
+    ///     Tuple of (simplified mesh, quality metrics dict).
+    #[pyo3(signature = (target_faces, aggressiveness=None))]
+    pub fn simplify_with_quality<'py>(
+        &self,
+        py: Python<'py>,
+        target_faces: usize,
+        aggressiveness: Option<f64>,
+    ) -> (Self, Bound<'py, PyDict>) {
+        let options = SimplifyOptions {
+            target_count: target_faces,
+            aggressiveness: aggressiveness.unwrap_or(7.0),
+            preserve_attributes: true,
+            compute_quality: true,
+            ..Default::default()
+        };
+
+        let result = self.data.simplify_with_options(options);
+
+        let simplified = PyTrimesh {
+            data: Trimesh::new(
+                result.vertices,
+                result.faces,
+                Some(result.attributes_vertex),
+                Some(result.attributes_face),
+            )
+            .unwrap(),
+        };
+
+        let quality_dict = PyDict::new(py);
+        if let Some(q) = result.quality {
+            quality_dict
+                .set_item("volume_ratio", q.volume_ratio)
+                .unwrap();
+            quality_dict
+                .set_item("surface_area_ratio", q.surface_area_ratio)
+                .unwrap();
+            quality_dict
+                .set_item("face_count_ratio", q.face_count_ratio)
+                .unwrap();
+            quality_dict.set_item("min_angle", q.min_angle).unwrap();
+            quality_dict
+                .set_item("degenerate_count", q.degenerate_count)
+                .unwrap();
+            quality_dict
+                .set_item("flipped_count", q.flipped_count)
+                .unwrap();
+        }
+
+        (simplified, quality_dict)
+    }
+
+    /// Get the vertex map from the last simplification.
+    #[getter]
+    pub fn get_face_count(&self) -> usize {
+        self.data.faces.len()
+    }
+
+    /// Create a mesh from arrays including vertex normals and face colors.
+    ///
+    /// Parameters
+    /// ----------
+    /// vertices : ndarray (n, 3)
+    /// faces : ndarray (m, 3)
+    /// vertex_normals : ndarray (n, 3), optional
+    /// face_colors : ndarray (m, 4) uint8, optional
+    ///     RGBA colors per face
+    #[staticmethod]
+    #[pyo3(signature = (vertices, faces, vertex_normals=None, face_colors=None))]
+    pub fn from_arrays<'py>(
+        vertices: PyReadonlyArray2<'py, f64>,
+        faces: PyReadonlyArray2<'py, i64>,
+        vertex_normals: Option<PyReadonlyArray2<'py, f64>>,
+        face_colors: Option<PyReadonlyArray2<'py, u8>>,
+    ) -> Result<Self> {
+        let vertices: Vec<Point3<f64>> = vertices
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|x| Point3::new(x[0], x[1], x[2]))
+            .collect();
+
+        let faces: Vec<[usize; 3]> = faces
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|x| [x[0] as usize, x[1] as usize, x[2] as usize])
+            .collect();
+
+        let mut attributes_vertex = Attributes::default();
+        let mut attributes_face = Attributes::default();
+
+        if let Some(normals_arr) = vertex_normals {
+            let normals: Vec<Vector3<f64>> = normals_arr
+                .as_array()
+                .rows()
+                .into_iter()
+                .map(|x| Vector3::new(x[0], x[1], x[2]))
+                .collect();
+            attributes_vertex.normals.push(normals);
+        }
+
+        if let Some(colors_arr) = face_colors {
+            let colors: Vec<Vector4<u8>> = colors_arr
+                .as_array()
+                .rows()
+                .into_iter()
+                .map(|x| Vector4::new(x[0], x[1], x[2], x[3]))
+                .collect();
+            attributes_face.colors.push(colors);
+        }
+
+        Ok(PyTrimesh {
+            data: Trimesh::new(
+                vertices,
+                faces,
+                Some(attributes_vertex),
+                Some(attributes_face),
+            )?,
+        })
     }
 }
 

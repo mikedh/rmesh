@@ -72,10 +72,12 @@ pub fn check_topology(faces: &[[usize; 3]]) -> (bool, bool) {
     let mut edges: Vec<DirectedEdge> = faces
         .par_iter()
         .flat_map_iter(|&face| {
-            face_edges_directed(face).into_iter().map(|[a, b]| DirectedEdge {
-                edge: [a.min(b), a.max(b)],
-                forward: a < b,
-            })
+            face_edges_directed(face)
+                .into_iter()
+                .map(|[a, b]| DirectedEdge {
+                    edge: [a.min(b), a.max(b)],
+                    forward: a < b,
+                })
         })
         .collect();
 
