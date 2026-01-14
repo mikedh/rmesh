@@ -7,7 +7,7 @@ build-backend = "maturin"
 
 [project]
 name = "rmesh"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -20,4 +20,5 @@ dependencies = ["numpy>=2.0"]
 test = ["pytest", "trimesh"]
 
 [tool.maturin]
+manifest-path = "crates/rmesh_python/Cargo.toml"
 features = ["pyo3/extension-module"]

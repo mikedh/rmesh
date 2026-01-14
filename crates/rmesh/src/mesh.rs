@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use anyhow::Result;
 
 use crate::{
-    attributes::{Attributes, LoadSource},
+    attributes::{Attributes, LoadSource, Material},
     graph::adjacency,
     simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
     triangles::inertia::{self, MassProperties},
@@ -46,6 +46,9 @@ pub struct Trimesh {
     /// Information about where the mesh came from
     pub source: LoadSource,
 
+    /// Materials loaded from the mesh file (e.g., from OBJ's MTL reference)
+    pub materials: Vec<Material>,
+
     /// Optional density for mass property calculations (default 1.0)
     pub density: Option<f64>,
 
@@ -68,6 +71,7 @@ impl Default for Trimesh {
             attributes_vertex: Attributes::default(),
             attributes_face: Attributes::default(),
             source: LoadSource::default(),
+            materials: Vec::new(),
             density: None,
             cache_faces_cross: OnceLock::new(),
             cache_face_normals: OnceLock::new(),
@@ -89,6 +93,7 @@ impl Clone for Trimesh {
             attributes_vertex: self.attributes_vertex.clone(),
             attributes_face: self.attributes_face.clone(),
             source: self.source.clone(),
+            materials: self.materials.clone(),
             density: self.density,
             // Fresh cache - will recompute on demand
             cache_faces_cross: OnceLock::new(),

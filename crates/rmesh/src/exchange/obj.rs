@@ -2,9 +2,12 @@ use anyhow::Result;
 use nalgebra::{Point3, Vector2, Vector3, Vector4};
 use rayon::prelude::*;
 
-use crate::attributes::{Attributes, DEFAULT_COLOR, Material};
+use crate::attributes::{Attributes, DEFAULT_COLOR, Grouping, GroupingKind, Material};
 use crate::creation::{Triangulator, triangulate_fan};
 use crate::mesh::Trimesh;
+
+use super::mtl::parse_mtl;
+use super::Resolver;
 
 /// The intermediate representation of a single line from an OBJ file,
 /// which can later be turned into a more useful structure.
@@ -84,17 +87,6 @@ impl ObjLine {
         }
     }
 
-    fn load_materials(&self) -> Option<Vec<Material>> {
-        match self {
-            ObjLine::MtlLib(_name) => {
-                // TODO : load the materials from the file
-                // and return them as a vector of Materials
-                // for now just return an empty vector
-                Some(vec![])
-            }
-            _ => None,
-        }
-    }
 }
 
 /// A helper function to upsert a value into a vector and return its index.
@@ -173,41 +165,31 @@ impl ObjVertices {
     }
 }
 
-// in an OBJ file if there is a directive like "usemtl" or "g"
-// it means that the faces or vertices that follow it are part of that
-// directive until it's overridden by another directive
-// so we need to keep track of the current directive and apply it as we go.
+// In an OBJ file, directives like "usemtl", "g", "o", "s" apply to all
+// subsequent faces until overridden. We track the current state and
+// record per-face indices into the name lookup tables.
 #[derive(Default, Clone)]
-#[allow(dead_code)]
 struct ObjFaces {
-    // the index of the current material set by `self.materials`
+    // Current state indices (set by directives)
     pub material: usize,
-    // the index of the current group set by `self.groups`
     pub group: usize,
-    // the index of the current smoothing group set by `self.smooths`
     pub smooth: usize,
-    // the index of the current object set by `self.objects`
     pub object: usize,
 
-    // the indexes of `vertices.vertices`
+    // Face vertex indices
     pub faces: Vec<[usize; 3]>,
-    pub faces_tex: Vec<Option<[usize; 3]>>,
-    pub face_normal: Vec<Option<[usize; 3]>>,
-    pub faces_material: Vec<usize>,
-    pub faces_group: Vec<usize>,
-    pub faces_smooth: Vec<usize>,
-    pub faces_object: Vec<usize>,
 
-    // now the actual collected values
-    // the *name* of the material that we will use for the index `material`
+    // Per-face attribute indices (one entry per face)
+    pub face_material: Vec<usize>,
+    pub face_group: Vec<usize>,
+    pub face_smooth: Vec<usize>,
+    pub face_object: Vec<usize>,
+
+    // Name lookup tables
     pub materials: Vec<String>,
     pub groups: Vec<String>,
     pub smooths: Vec<String>,
     pub objects: Vec<String>,
-
-    // the actual materials which may not match the order of `materials` name
-    // until we load them from the file and re-order them at the end.
-    pub materials_obj: Vec<Material>,
 }
 
 impl ObjFaces {
@@ -225,43 +207,37 @@ impl ObjFaces {
         self.object = upsert(name, &mut self.objects);
     }
 
-    /// Implement the logic to triangulate raw face data which can contain any number
-    /// of data points representing arbitrary polygons:
-    ///   -- just vertex indices
-    ///   -- vertex indices and texture coordinates
-    ///   -- vertex indices, texture coordinates and normals
-    ///   -- vertex indices and normals.
+    /// Triangulate raw face data and record per-face attributes.
+    /// Raw faces can be arbitrary polygons with vertex/uv/normal indices.
     pub fn extend(
         &mut self,
         raw: &[Vec<Option<usize>>],
         vertices: &[Point3<f64>],
         triangulator: &mut Triangulator,
     ) {
-        // take just the vertex points from the raw data
+        // Extract just the vertex indices from the raw data
         let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
 
-        // get the triangles as indexes in our current face
-        let tri = {
-            // if we have a triangle this is easy
-            if f.len() == 3 {
-                vec![[f[0], f[1], f[2]]]
-            } else if f.len() == 4 {
-                // if we have a quad split it into two triangles
-                vec![[f[0], f[1], f[2]], [f[0], f[2], f[3]]]
-            } else if f.len() > 4 {
-                // if we have a polygon triangulate it
-                // TODO : do we have to do this in a second pass to avoid
-                // referencing vertices that haven't been added yet?
-                triangulator
-                    .triangulate_3d(&f, &[], vertices)
-                    .unwrap_or_else(|_| triangulate_fan(&f))
-            } else {
-                vec![]
-            }
+        // Triangulate the face
+        let tri: Vec<[usize; 3]> = if f.len() == 3 {
+            vec![[f[0], f[1], f[2]]]
+        } else if f.len() == 4 {
+            vec![[f[0], f[1], f[2]], [f[0], f[2], f[3]]]
+        } else if f.len() > 4 {
+            triangulator
+                .triangulate_3d(&f, &[], vertices)
+                .unwrap_or_else(|_| triangulate_fan(&f))
+        } else {
+            vec![]
         };
 
-        // add the actual triangles
+        // Record per-face attributes for each resulting triangle
+        let num_tris = tri.len();
         self.faces.extend(tri);
+        self.face_object.extend(std::iter::repeat(self.object).take(num_tris));
+        self.face_group.extend(std::iter::repeat(self.group).take(num_tris));
+        self.face_material.extend(std::iter::repeat(self.material).take(num_tris));
+        self.face_smooth.extend(std::iter::repeat(self.smooth).take(num_tris));
     }
 }
 
@@ -271,23 +247,28 @@ pub struct ObjMesh {
 
     // the indexed faces from the OBJ file
     faces: ObjFaces,
+
+    // materials loaded from MTL files
+    materials: Vec<Material>,
 }
 
 impl ObjMesh {
-    /// Parse a string into an ObjMesh.
-    pub fn from_string(data: &str) -> Self {
+    /// Parse a string into an ObjMesh, using the resolver for external references.
+    pub fn from_string_with_resolver<R: Resolver>(data: &str, resolver: &R) -> Self {
         // parse the strings in parallel
         let lines: Vec<ObjLine> = data
             .lines()
             .collect::<Vec<_>>()
-            .into_par_iter() // TODO : check performance of par_iter vs iter ;)
+            .into_par_iter()
             .map(ObjLine::from_line)
             .collect();
 
-        // the `vn``, `vt``, `v`` lines which are independent of each other
+        // the `vn`, `vt`, `v` lines which are independent of each other
         let mut vertex = ObjVertices::default();
         // the `f` lines which may reference any of the `v`, `vn`, `vt` lines
         let mut faces = ObjFaces::default();
+        // materials loaded from MTL files
+        let mut materials = Vec::new();
 
         // we may have to triangulate 3D polygon faces as we go
         // OBJ supports arbitrary polygons but we need triangles
@@ -310,10 +291,11 @@ impl ObjMesh {
                 ObjLine::G(name) => faces.upsert_group(name),
                 ObjLine::S(name) => faces.upsert_smooth(name),
                 ObjLine::UseMtl(name) => faces.upsert_material(name),
-                ObjLine::MtlLib(_) => {
-                    // try to load the materials from the `mtl` file specified
-                    if let Some(materials) = line.load_materials() {
-                        faces.materials_obj.extend(materials);
+                ObjLine::MtlLib(path) => {
+                    // Try to load the MTL file using the resolver
+                    if let Ok(mtl_bytes) = resolver.resolve(path) {
+                        let mtl_str = String::from_utf8_lossy(&mtl_bytes);
+                        materials.extend(parse_mtl(&mtl_str, resolver));
                     }
                 }
                 ObjLine::Ignore(_) => (),
@@ -323,19 +305,61 @@ impl ObjMesh {
         ObjMesh {
             vertices: vertex,
             faces,
+            materials,
         }
     }
 
     pub fn into_mesh(self) -> Result<Trimesh> {
-        // "flatten" the mesh to ensure each vertex matches
         let attributes_vertex = self.vertices.to_attributes();
 
-        Trimesh::new(
+        // Build face attributes with groupings
+        let mut attributes_face = Attributes::default();
+
+        if !self.faces.objects.is_empty() {
+            attributes_face.groupings.push(Grouping {
+                kind: GroupingKind::Object,
+                names: self.faces.objects,
+                indices: self.faces.face_object,
+            });
+        }
+        if !self.faces.groups.is_empty() {
+            attributes_face.groupings.push(Grouping {
+                kind: GroupingKind::Group,
+                names: self.faces.groups,
+                indices: self.faces.face_group,
+            });
+        }
+        if !self.faces.materials.is_empty() {
+            attributes_face.groupings.push(Grouping {
+                kind: GroupingKind::Material,
+                names: self.faces.materials,
+                indices: self.faces.face_material,
+            });
+        }
+        if !self.faces.smooths.is_empty() {
+            attributes_face.groupings.push(Grouping {
+                kind: GroupingKind::Smoothing,
+                names: self.faces.smooths,
+                indices: self.faces.face_smooth,
+            });
+        }
+
+        let attributes_face = if attributes_face.groupings.is_empty() {
+            None
+        } else {
+            Some(attributes_face)
+        };
+
+        let mut mesh = Trimesh::new(
             self.vertices.vertices,
             self.faces.faces,
             attributes_vertex,
-            None,
-        )
+            attributes_face,
+        )?;
+
+        mesh.materials = self.materials;
+
+        Ok(mesh)
     }
 }
 
@@ -449,5 +473,64 @@ mod tests {
         assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
 
         println!("mesh: {mesh:?}");
+    }
+
+    #[test]
+    fn test_obj_objects() {
+        let data = include_str!("../../../../test/data/basic.obj");
+        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
+
+        // Find the object grouping in face attributes
+        let objects = mesh
+            .attributes_face
+            .groupings
+            .iter()
+            .find(|g| matches!(g.kind, GroupingKind::Object))
+            .expect("should have object groupings");
+
+        // Verify 3 objects were found
+        assert_eq!(
+            objects.names,
+            vec!["Cone", "cube for life!!!", "tetra"]
+        );
+
+        // Verify per-face indices: 4 faces (Cone) + 12 faces (cube) + 4 faces (tetra) = 20
+        assert_eq!(objects.indices.len(), 20);
+
+        // First 4 faces belong to Cone (index 0)
+        assert_eq!(&objects.indices[0..4], &[0, 0, 0, 0]);
+        // Next 12 faces belong to cube (index 1)
+        assert_eq!(&objects.indices[4..16], &[1; 12]);
+        // Last 4 faces belong to tetra (index 2)
+        assert_eq!(&objects.indices[16..20], &[2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn test_obj_materials() {
+        use crate::attributes::Material;
+        use crate::exchange::{load_mesh_with_resolver, InMemoryResolver};
+
+        let obj_data = include_str!("../../../../test/data/fuze.obj");
+        let mtl_data = include_str!("../../../../test/data/fuze.obj.mtl");
+
+        // Create an in-memory resolver with the MTL file
+        let mut resolver = InMemoryResolver::new();
+        resolver.insert("./fuze.obj.mtl", mtl_data.as_bytes().to_vec());
+
+        let mesh = load_mesh_with_resolver(obj_data.as_bytes(), MeshFormat::OBJ, &resolver).unwrap();
+
+        // Should have loaded 1 material
+        assert_eq!(mesh.materials.len(), 1);
+
+        // Verify the material properties
+        match &mesh.materials[0] {
+            Material::Simple(mat) => {
+                assert_eq!(mat.name, "material_0");
+                assert!(mat.diffuse.is_some());
+                // Alpha from Tr 1.0 -> 1.0 - 1.0 = 0.0
+                assert_eq!(mat.alpha, Some(0.0));
+            }
+            _ => panic!("expected SimpleMaterial"),
+        }
     }
 }

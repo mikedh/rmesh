@@ -1,12 +1,76 @@
+mod mtl;
 mod obj;
 mod stl;
 
-use anyhow::Result;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 
 use crate::mesh::Trimesh;
 
 use crate::exchange::obj::ObjMesh;
 use crate::exchange::stl::BinaryStl;
+
+/// Trait for resolving external file references (e.g., MTL files, textures).
+pub trait Resolver {
+    fn resolve(&self, path: &str) -> Result<Vec<u8>>;
+}
+
+/// Resolver that always fails - used when no external files are expected.
+pub struct NoResolver;
+
+impl Resolver for NoResolver {
+    fn resolve(&self, path: &str) -> Result<Vec<u8>> {
+        anyhow::bail!("cannot resolve '{path}': no resolver provided")
+    }
+}
+
+/// Resolver that reads from the filesystem relative to a base path.
+pub struct FileResolver {
+    pub base_path: PathBuf,
+}
+
+impl FileResolver {
+    pub fn new(base_path: impl Into<PathBuf>) -> Self {
+        Self {
+            base_path: base_path.into(),
+        }
+    }
+}
+
+impl Resolver for FileResolver {
+    fn resolve(&self, path: &str) -> Result<Vec<u8>> {
+        let full_path = self.base_path.join(path);
+        std::fs::read(&full_path)
+            .with_context(|| format!("failed to read '{}'", full_path.display()))
+    }
+}
+
+/// Resolver that looks up files in a pre-loaded HashMap.
+#[derive(Default)]
+pub struct InMemoryResolver {
+    pub files: HashMap<String, Vec<u8>>,
+}
+
+impl InMemoryResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, path: impl Into<String>, data: Vec<u8>) {
+        self.files.insert(path.into(), data);
+    }
+}
+
+impl Resolver for InMemoryResolver {
+    fn resolve(&self, path: &str) -> Result<Vec<u8>> {
+        self.files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("file not found: '{path}'"))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // An enum to represent the different mesh file formats.
@@ -34,10 +98,26 @@ impl MeshFormat {
     }
 }
 
+/// Load a mesh from raw bytes without resolving external references.
+/// For formats like OBJ that may reference external files (MTL, textures),
+/// those references will be silently ignored. Use `load_mesh_with_resolver`
+/// to load external files.
 pub fn load_mesh(file_data: &[u8], file_type: MeshFormat) -> Result<Trimesh> {
+    load_mesh_with_resolver(file_data, file_type, &NoResolver)
+}
+
+/// Load a mesh from raw bytes, using the provided resolver for external references.
+pub fn load_mesh_with_resolver<R: Resolver>(
+    file_data: &[u8],
+    file_type: MeshFormat,
+    resolver: &R,
+) -> Result<Trimesh> {
     match file_type {
         MeshFormat::STL => BinaryStl::from_bytes(file_data)?.to_mesh(),
-        MeshFormat::OBJ => ObjMesh::from_string(&String::from_utf8_lossy(file_data)).into_mesh(),
+        MeshFormat::OBJ => {
+            let text = String::from_utf8_lossy(file_data);
+            ObjMesh::from_string_with_resolver(&text, resolver).into_mesh()
+        }
         MeshFormat::PLY => todo!(),
     }
 }

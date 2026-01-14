@@ -1,7 +1,7 @@
-use image::DynamicImage;
 use nalgebra::{Vector2, Vector3, Vector4};
 
 use crate::exchange::MeshFormat;
+use crate::image::LazyImage;
 
 pub type UV = Vec<Vector2<f64>>;
 pub type MaterialIndices = Vec<usize>;
@@ -10,19 +10,21 @@ pub type Color = Vec<Vector4<u8>>;
 pub type Normal = Vec<Vector3<f64>>;
 
 #[derive(Debug, Clone, Default)]
-
 pub enum GroupingKind {
     #[default]
     Unspecified,
-    MaterialIndex,
-    GroupingIndex,
-    SmoothingIndex,
+    Material,
+    Group,
+    Smoothing,
+    Object,
 }
 
+/// Per-face grouping attribute with a lookup table of names.
+/// Each face has an index into `names` stored in `indices`.
 #[derive(Debug, Clone, Default)]
 pub struct Grouping {
-    pub name: String,
     pub kind: GroupingKind,
+    pub names: Vec<String>,
     pub indices: Vec<usize>,
 }
 
@@ -43,14 +45,14 @@ pub struct LoadSource {
     pub header: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SimpleMaterial {
     pub name: String,
     pub diffuse: Option<Vector3<f64>>,
     pub specular: Option<Vector3<f64>>,
     pub shininess: Option<f64>,
     pub alpha: Option<f64>,
-    pub image: Option<DynamicImage>,
+    pub diffuse_texture: Option<LazyImage>,
 }
 
 #[derive(Debug, Clone)]

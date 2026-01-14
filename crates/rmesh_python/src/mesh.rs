@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 use numpy::{PyArray2, PyReadonlyArray2};
 
 use rmesh::attributes::Attributes;
-use rmesh::exchange::{MeshFormat, load_mesh};
+use rmesh::exchange::{InMemoryResolver, MeshFormat, NoResolver, Resolver, load_mesh_with_resolver};
 use rmesh::mesh::Trimesh;
 use rmesh::simplify::SimplifyOptions;
 
@@ -286,10 +286,104 @@ impl PyTrimesh {
     }
 }
 
+/// A Python callable that acts as a Resolver.
+struct PyCallableResolver<'py> {
+    callable: Bound<'py, PyAny>,
+}
+
+impl<'py> Resolver for PyCallableResolver<'py> {
+    fn resolve(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+        let result = self
+            .callable
+            .call1((path,))
+            .map_err(|e| anyhow::anyhow!("resolver error: {e}"))?;
+
+        result
+            .extract::<Vec<u8>>()
+            .map_err(|e| anyhow::anyhow!("resolver must return bytes: {e}"))
+    }
+}
+
 /// (pyfunc) Load a mesh from a file, doing no initial processing.
+///
+/// Parameters
+/// ----------
+/// file_data : bytes
+///     The raw file data.
+/// file_type : str
+///     The file type (e.g., "obj", "stl").
+/// resolver : dict or callable, optional
+///     For resolving external file references (e.g., MTL files for OBJ).
+///     - If a dict, keys are file paths and values are file bytes.
+///     - If a callable, it should take a path string and return bytes.
+///
+/// Returns
+/// -------
+/// Trimesh
+///     The loaded mesh.
+/// Load a mesh from bytes.
+///
+/// Parameters
+/// ----------
+/// file_data : bytes
+///     The raw file data.
+/// file_type : str
+///     The file type (e.g., "obj", "stl").
+/// resolver : dict or callable, optional
+///     For resolving external file references (e.g., MTL files for OBJ).
+///     - If a dict, keys are file paths and values are file bytes.
+///     - If a callable, it should take a path string and return bytes.
+///     - If None (default), external references are silently ignored.
+///
+/// Returns
+/// -------
+/// Trimesh
+///     The loaded mesh.
 #[pyfunction(name = "load_mesh")]
-pub fn py_load_mesh(file_data: &[u8], file_type: String) -> Result<PyTrimesh> {
-    let data = load_mesh(file_data, MeshFormat::from_string(&file_type)?)?;
+#[pyo3(signature = (file_data, file_type, *, resolver=None))]
+pub fn py_load_mesh(
+    file_data: &[u8],
+    file_type: String,
+    resolver: Option<Bound<'_, PyAny>>,
+) -> Result<PyTrimesh> {
+    let format = MeshFormat::from_string(&file_type)?;
+
+    let data = match resolver {
+        Some(res) => {
+            if res.is_instance_of::<PyDict>() {
+                // Dict resolver: {path: bytes}
+                #[allow(deprecated)]
+                let dict: &Bound<'_, PyDict> = res
+                    .downcast()
+                    .map_err(|e| anyhow::anyhow!("expected dict: {e}"))?;
+                let mut mem_resolver = InMemoryResolver::new();
+                for (key, value) in dict.iter() {
+                    let path: String = key
+                        .extract()
+                        .map_err(|e| anyhow::anyhow!("dict key must be str: {e}"))?;
+                    let bytes: Vec<u8> = value
+                        .extract()
+                        .map_err(|e| anyhow::anyhow!("dict value must be bytes: {e}"))?;
+                    mem_resolver.insert(path, bytes);
+                }
+                load_mesh_with_resolver(file_data, format, &mem_resolver)?
+            } else if res.is_callable() {
+                // Callable resolver: fn(path) -> bytes
+                let callable_resolver = PyCallableResolver { callable: res };
+                load_mesh_with_resolver(file_data, format, &callable_resolver)?
+            } else {
+                let type_name = res
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                return Err(anyhow::anyhow!(
+                    "resolver must be a dict or callable, got {type_name}"
+                ));
+            }
+        }
+        None => load_mesh_with_resolver(file_data, format, &NoResolver)?,
+    };
 
     Ok(PyTrimesh { data })
 }
