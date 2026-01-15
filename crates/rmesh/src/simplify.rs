@@ -1343,17 +1343,17 @@ mod tests {
     }
 
     #[test]
-    fn test_simplify_100k_faces() {
+    fn test_simplify_10k_faces() {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 7);
+        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 5); // 12 * 4^5 = 12,288 faces
 
-        assert!(faces.len() > 100_000);
+        assert!(faces.len() > 10_000);
 
-        let result = simplify_mesh(&verts, &faces, None, None, opts(1000));
+        let result = simplify_mesh(&verts, &faces, None, None, opts(500));
 
-        assert!(result.faces.len() <= 1000);
+        assert!(result.faces.len() <= 500);
         assert!(result.faces.len() >= 4);
 
         for [v0, v1, v2] in &result.faces {

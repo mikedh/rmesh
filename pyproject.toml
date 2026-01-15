@@ -22,3 +22,8 @@ test = ["pytest", "trimesh"]
 [tool.maturin]
 manifest-path = "crates/rmesh_python/Cargo.toml"
 features = ["pyo3/extension-module"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

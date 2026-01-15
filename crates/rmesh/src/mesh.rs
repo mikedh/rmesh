@@ -432,7 +432,8 @@ mod tests {
     fn test_mesh_stl() {
         let stl_data = include_bytes!("../../../test/data/unit_cube.STL");
 
-        let mesh = load_mesh(stl_data, MeshFormat::STL).unwrap();
+        // STL doesn't need a resolver, pass None
+        let mesh = load_mesh(stl_data, MeshFormat::STL, None).unwrap();
 
         assert_eq!(mesh.vertices.len(), 36);
         assert_eq!(mesh.faces.len(), 12);

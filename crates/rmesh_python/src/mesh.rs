@@ -1,367 +1,340 @@
+use std::path::Path;
+
 use anyhow::Result;
 use nalgebra::{Point3, Vector3, Vector4};
-use numpy::ndarray::Array2;
+use numpy::{PyArray2, PyReadonlyArray2, PyUntypedArrayMethods, ndarray::Array2, npyffi};
+use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use numpy::{PyArray2, PyReadonlyArray2};
-
-use rmesh::attributes::Attributes;
-use rmesh::exchange::{InMemoryResolver, MeshFormat, NoResolver, Resolver, load_mesh_with_resolver};
+use rmesh::attributes::{Attributes, Material};
+use rmesh::exchange::{FileResolver, InMemoryResolver, MeshFormat, load_mesh};
 use rmesh::mesh::Trimesh;
-use rmesh::simplify::SimplifyOptions;
+use rmesh::resolvers::Resolver;
 
-/// A Python callable that acts as a Resolver.
-struct PyCallableResolver {
-    callable: Py<PyAny>,
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Make a numpy array read-only by clearing the WRITEABLE flag.
+fn make_readonly<T: numpy::Element, D: numpy::ndarray::Dimension>(
+    arr: &Bound<'_, numpy::PyArray<T, D>>,
+) {
+    unsafe {
+        (*arr.as_array_ptr()).flags &= !npyffi::flags::NPY_ARRAY_WRITEABLE;
+    }
 }
+
+macro_rules! cached_array {
+    ($self:expr, $py:expr, $cache:ident, $data:expr, $cols:expr) => {{
+        $self
+            .$cache
+            .get_or_init(|| {
+                let flat: &[_] = bytemuck::cast_slice($data);
+                let nd = Array2::from_shape_vec(($data.len(), $cols), flat.to_vec()).unwrap();
+                let arr = PyArray2::from_array($py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref($py)
+    }};
+}
+
+macro_rules! cached_array_opt {
+    ($self:expr, $py:expr, $cache:ident, $data:expr, $cols:expr) => {{
+        $self
+            .$cache
+            .get_or_init(|| {
+                $data.as_ref().map(|d| {
+                    let flat: &[_] = bytemuck::cast_slice(d.as_slice());
+                    let nd = Array2::from_shape_vec((d.len(), $cols), flat.to_vec()).unwrap();
+                    let arr = PyArray2::from_array($py, &nd);
+                    make_readonly(&arr);
+                    arr.unbind()
+                })
+            })
+            .as_ref()
+            .map(|a| a.clone_ref($py))
+    }};
+}
+
+// ============================================================================
+// PyTrimesh
+// ============================================================================
+
+#[pyclass(name = "Trimesh")]
+pub struct PyTrimesh {
+    data: Trimesh,
+    vertices_cache: OnceCell<Py<PyArray2<f64>>>,
+    faces_cache: OnceCell<Py<PyArray2<i64>>>,
+    uv_cache: OnceCell<Option<Py<PyArray2<f64>>>>,
+    vertex_normals_cache: OnceCell<Option<Py<PyArray2<f64>>>>,
+    face_colors_cache: OnceCell<Option<Py<PyArray2<u8>>>>,
+}
+
+impl PyTrimesh {
+    fn new_from_trimesh(data: Trimesh) -> Self {
+        Self {
+            data,
+            vertices_cache: OnceCell::new(),
+            faces_cache: OnceCell::new(),
+            uv_cache: OnceCell::new(),
+            vertex_normals_cache: OnceCell::new(),
+            face_colors_cache: OnceCell::new(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyTrimesh {
+    #[new]
+    pub fn new(
+        vertices: PyReadonlyArray2<'_, f64>,
+        faces: PyReadonlyArray2<'_, i64>,
+    ) -> Result<Self> {
+        let vertices: Vec<Point3<f64>> = vertices
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|r| Point3::new(r[0], r[1], r[2]))
+            .collect();
+        let faces: Vec<[usize; 3]> = faces
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|r| [r[0] as usize, r[1] as usize, r[2] as usize])
+            .collect();
+        Ok(Self::new_from_trimesh(Trimesh::new(
+            vertices, faces, None, None,
+        )?))
+    }
+
+    #[getter]
+    fn vertices(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        cached_array!(self, py, vertices_cache, &self.data.vertices, 3)
+    }
+
+    #[getter]
+    fn faces(&self, py: Python<'_>) -> Py<PyArray2<i64>> {
+        // faces are [usize; 3], need to convert to i64 for numpy
+        self.faces_cache
+            .get_or_init(|| {
+                let flat: Vec<i64> = self
+                    .data
+                    .faces
+                    .iter()
+                    .flat_map(|f| [f[0] as i64, f[1] as i64, f[2] as i64])
+                    .collect();
+                let nd = Array2::from_shape_vec((self.data.faces.len(), 3), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    #[getter]
+    fn uv(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        cached_array_opt!(self, py, uv_cache, self.data.uv(), 2)
+    }
+
+    #[getter]
+    fn vertex_normals(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        cached_array_opt!(
+            self,
+            py,
+            vertex_normals_cache,
+            self.data.attributes_vertex.normals.first(),
+            3
+        )
+    }
+
+    #[getter]
+    fn face_colors(&self, py: Python<'_>) -> Option<Py<PyArray2<u8>>> {
+        cached_array_opt!(
+            self,
+            py,
+            face_colors_cache,
+            self.data.attributes_face.colors.first(),
+            4
+        )
+    }
+
+    #[getter]
+    fn face_count(&self) -> usize {
+        self.data.faces.len()
+    }
+
+    #[getter]
+    fn material_count(&self) -> usize {
+        self.data.materials.len()
+    }
+
+    fn material_name(&self, index: usize) -> Option<String> {
+        self.data.materials.get(index).map(|m| match m {
+            Material::Simple(s) => s.name.clone(),
+            _ => String::new(),
+        })
+    }
+
+    fn material_has_texture(&self, index: usize) -> bool {
+        matches!(
+            self.data.materials.get(index),
+            Some(Material::Simple(s)) if s.diffuse_texture.is_some()
+        )
+    }
+
+    fn material_diffuse(&self, index: usize) -> Option<[f64; 3]> {
+        match self.data.materials.get(index)? {
+            Material::Simple(s) => s.diffuse.map(|d| [d.x, d.y, d.z]),
+            _ => None,
+        }
+    }
+
+    #[pyo3(signature = (target_faces, aggressiveness=None))]
+    fn simplify(&self, target_faces: usize, aggressiveness: Option<f64>) -> Self {
+        Self::new_from_trimesh(
+            self.data
+                .simplify(target_faces, aggressiveness.unwrap_or(7.0)),
+        )
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (vertices, faces, vertex_normals=None, face_colors=None))]
+    fn from_arrays(
+        vertices: PyReadonlyArray2<'_, f64>,
+        faces: PyReadonlyArray2<'_, i64>,
+        vertex_normals: Option<PyReadonlyArray2<'_, f64>>,
+        face_colors: Option<PyReadonlyArray2<'_, u8>>,
+    ) -> Result<Self> {
+        let vertices: Vec<Point3<f64>> = vertices
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|r| Point3::new(r[0], r[1], r[2]))
+            .collect();
+        let faces: Vec<[usize; 3]> = faces
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|r| [r[0] as usize, r[1] as usize, r[2] as usize])
+            .collect();
+
+        let mut attr_vertex = Attributes::default();
+        let mut attr_face = Attributes::default();
+
+        if let Some(n) = vertex_normals {
+            attr_vertex.normals.push(
+                n.as_array()
+                    .rows()
+                    .into_iter()
+                    .map(|r| Vector3::new(r[0], r[1], r[2]))
+                    .collect(),
+            );
+        }
+        if let Some(c) = face_colors {
+            attr_face.colors.push(
+                c.as_array()
+                    .rows()
+                    .into_iter()
+                    .map(|r| Vector4::new(r[0], r[1], r[2], r[3]))
+                    .collect(),
+            );
+        }
+
+        Ok(Self::new_from_trimesh(Trimesh::new(
+            vertices,
+            faces,
+            Some(attr_vertex),
+            Some(attr_face),
+        )?))
+    }
+}
+
+// ============================================================================
+// load_mesh
+// ============================================================================
+
+#[pyfunction(name = "load_mesh")]
+#[pyo3(signature = (file_obj, file_type=None, *, resolver=None))]
+pub fn py_load_mesh(
+    py: Python<'_>,
+    file_obj: Py<PyAny>,
+    file_type: Option<&str>,
+    resolver: Option<Py<PyAny>>,
+) -> Result<PyTrimesh> {
+    // Try bytes first
+    if let Ok(bytes) = file_obj.extract::<Vec<u8>>(py) {
+        let fmt = MeshFormat::from_string(
+            file_type.ok_or_else(|| anyhow::anyhow!("file_type required for bytes"))?,
+        )?;
+        return Ok(PyTrimesh::new_from_trimesh(load_with_resolver(
+            &bytes, fmt, resolver, py,
+        )?));
+    }
+
+    // Try path
+    let path_str: String = file_obj
+        .extract(py)
+        .or_else(|_| {
+            file_obj
+                .bind(py)
+                .call_method0("__fspath__")?
+                .extract::<String>()
+        })
+        .map_err(|_| anyhow::anyhow!("file_obj must be str, PathLike, or bytes"))?;
+
+    let path = Path::new(&path_str);
+    let bytes = std::fs::read(path)?;
+    let fmt = match file_type {
+        Some(ft) => MeshFormat::from_string(ft)?,
+        None => MeshFormat::from_string(
+            path.extension()
+                .and_then(|e| e.to_str())
+                .ok_or_else(|| anyhow::anyhow!("cannot infer file type"))?,
+        )?,
+    };
+
+    let data = load_mesh(&bytes, fmt, Some(&FileResolver::from_file_path(path)))?;
+    Ok(PyTrimesh::new_from_trimesh(data))
+}
+
+struct PyCallableResolver(Py<PyAny>);
 
 impl Resolver for PyCallableResolver {
     fn resolve(&self, path: &str) -> anyhow::Result<Vec<u8>> {
         Python::with_gil(|py| {
-            let result = self
-                .callable
-                .call1(py, (path,))
-                .map_err(|e| anyhow::anyhow!("resolver error: {e}"))?;
-
-            result
+            self.0
+                .call1(py, (path,))?
                 .extract::<Vec<u8>>(py)
                 .map_err(|e| anyhow::anyhow!("resolver must return bytes: {e}"))
         })
     }
 }
 
-#[pyclass(name = "Trimesh")]
-#[derive(Clone)]
-pub struct PyTrimesh {
-    data: Trimesh,
-}
-
-#[pymethods]
-impl PyTrimesh {
-    #[new]
-    /// Create a new Trimesh from vertices and faces.
-    pub fn new<'py>(
-        vertices: PyReadonlyArray2<'py, f64>,
-        faces: PyReadonlyArray2<'py, i64>,
-    ) -> Result<Self> {
-        let vertices: Vec<Point3<f64>> = vertices
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|x| Point3::new(x[0], x[1], x[2]))
-            .collect();
-
-        let faces: Vec<[usize; 3]> = faces
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|x| [x[0] as usize, x[1] as usize, x[2] as usize])
-            .collect();
-
-        Ok(PyTrimesh {
-            data: Trimesh::new(vertices, faces, None, None)?,
-        })
-    }
-
-    #[getter]
-    pub fn get_vertices<'py>(&self, py: Python<'py>) -> Py<PyArray2<f64>> {
-        let vertices = &self.data.vertices;
-        let shape = (vertices.len(), 3);
-
-        let arr = Array2::from_shape_vec(
-            shape,
-            vertices
-                .iter()
-                .flat_map(|p| [p.x, p.y, p.z])
-                .collect(),
-        )
-        .unwrap();
-
-        PyArray2::from_array(py, &arr).to_owned().into()
-    }
-
-    #[getter]
-    pub fn get_faces<'py>(&self, py: Python<'py>) -> Py<PyArray2<i64>> {
-        let faces = &self.data.faces;
-        let shape = (faces.len(), 3);
-
-        let arr = Array2::from_shape_vec(
-            shape,
-            faces
-                .iter()
-                .flat_map(|&[a, b, c]| [a as i64, b as i64, c as i64])
-                .collect(),
-        )
-        .unwrap();
-
-        PyArray2::from_array(py, &arr).to_owned().into()
-    }
-
-    #[getter]
-    pub fn get_uv<'py>(&self, py: Python<'py>) -> Option<Py<PyArray2<f64>>> {
-        self.data.uv().as_ref().map(|uvs| {
-            let shape = (uvs.len(), 2);
-            let arr =
-                Array2::from_shape_vec(shape, uvs.iter().flat_map(|p| [p.x, p.y]).collect())
-                    .unwrap();
-            PyArray2::from_array(py, &arr).to_owned().into()
-        })
-    }
-
-    pub fn py_check(&self) -> usize {
-        10
-    }
-
-    /// Get vertex normals if they exist.
-    #[getter]
-    pub fn get_vertex_normals<'py>(&self, py: Python<'py>) -> Option<Py<PyArray2<f64>>> {
-        self.data.attributes_vertex.normals.first().map(|normals| {
-            let shape = (normals.len(), 3);
-            let arr = Array2::from_shape_vec(
-                shape,
-                normals.iter().flat_map(|n| [n.x, n.y, n.z]).collect(),
-            )
-            .unwrap();
-            PyArray2::from_array(py, &arr).to_owned().into()
-        })
-    }
-
-    /// Get face colors if they exist.
-    /// Returns RGBA colors as uint8 array of shape (n_faces, 4).
-    #[getter]
-    pub fn get_face_colors<'py>(&self, py: Python<'py>) -> Option<Py<PyArray2<u8>>> {
-        self.data.attributes_face.colors.first().map(|colors| {
-            let shape = (colors.len(), 4);
-            let arr = Array2::from_shape_vec(
-                shape,
-                colors
-                    .iter()
-                    .flat_map(|c| [c.x, c.y, c.z, c.w])
-                    .collect(),
-            )
-            .unwrap();
-            PyArray2::from_array(py, &arr).to_owned().into()
-        })
-    }
-
-    /// Simplify the mesh to a target face count.
-    ///
-    /// Parameters
-    /// ----------
-    /// target_faces : int
-    ///     Target number of faces after simplification.
-    /// aggressiveness : float, optional
-    ///     Controls how aggressively to simplify. Default: 7.0.
-    ///     Higher values mean faster but potentially lower quality.
-    ///
-    /// Returns
-    /// -------
-    /// Trimesh
-    ///     Simplified mesh with preserved vertex attributes.
-    #[pyo3(signature = (target_faces, aggressiveness=None))]
-    pub fn simplify(&self, target_faces: usize, aggressiveness: Option<f64>) -> Self {
-        let simplified = self
-            .data
-            .simplify(target_faces, aggressiveness.unwrap_or(7.0));
-        PyTrimesh { data: simplified }
-    }
-
-    /// Simplify the mesh with quality metrics returned.
-    ///
-    /// Parameters
-    /// ----------
-    /// target_faces : int
-    ///     Target number of faces after simplification.
-    /// aggressiveness : float, optional
-    ///     Controls how aggressively to simplify. Default: 7.0.
-    ///
-    /// Returns
-    /// -------
-    /// tuple[Trimesh, dict]
-    ///     Tuple of (simplified mesh, quality metrics dict).
-    #[pyo3(signature = (target_faces, aggressiveness=None))]
-    pub fn simplify_with_quality<'py>(
-        &self,
-        py: Python<'py>,
-        target_faces: usize,
-        aggressiveness: Option<f64>,
-    ) -> (Self, Bound<'py, PyDict>) {
-        let options = SimplifyOptions {
-            target_count: target_faces,
-            aggressiveness: aggressiveness.unwrap_or(7.0),
-            preserve_attributes: true,
-            compute_quality: true,
-            ..Default::default()
-        };
-
-        let result = self.data.simplify_with_options(options);
-
-        let simplified = PyTrimesh {
-            data: Trimesh::new(
-                result.vertices,
-                result.faces,
-                Some(result.attributes_vertex),
-                Some(result.attributes_face),
-            )
-            .unwrap(),
-        };
-
-        let quality_dict = PyDict::new(py);
-        if let Some(q) = result.quality {
-            quality_dict
-                .set_item("volume_ratio", q.volume_ratio)
-                .unwrap();
-            quality_dict
-                .set_item("surface_area_ratio", q.surface_area_ratio)
-                .unwrap();
-            quality_dict
-                .set_item("face_count_ratio", q.face_count_ratio)
-                .unwrap();
-            quality_dict.set_item("min_angle", q.min_angle).unwrap();
-            quality_dict
-                .set_item("degenerate_count", q.degenerate_count)
-                .unwrap();
-            quality_dict
-                .set_item("flipped_count", q.flipped_count)
-                .unwrap();
-        }
-
-        (simplified, quality_dict)
-    }
-
-    #[getter]
-    pub fn get_face_count(&self) -> usize {
-        self.data.faces.len()
-    }
-
-    /// Create a mesh from arrays including vertex normals and face colors.
-    ///
-    /// Parameters
-    /// ----------
-    /// vertices : ndarray (n, 3)
-    /// faces : ndarray (m, 3)
-    /// vertex_normals : ndarray (n, 3), optional
-    /// face_colors : ndarray (m, 4) uint8, optional
-    ///     RGBA colors per face
-    #[staticmethod]
-    #[pyo3(signature = (vertices, faces, vertex_normals=None, face_colors=None))]
-    pub fn from_arrays<'py>(
-        vertices: PyReadonlyArray2<'py, f64>,
-        faces: PyReadonlyArray2<'py, i64>,
-        vertex_normals: Option<PyReadonlyArray2<'py, f64>>,
-        face_colors: Option<PyReadonlyArray2<'py, u8>>,
-    ) -> Result<Self> {
-        let vertices: Vec<Point3<f64>> = vertices
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|x| Point3::new(x[0], x[1], x[2]))
-            .collect();
-
-        let faces: Vec<[usize; 3]> = faces
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|x| [x[0] as usize, x[1] as usize, x[2] as usize])
-            .collect();
-
-        let mut attributes_vertex = Attributes::default();
-        let mut attributes_face = Attributes::default();
-
-        if let Some(normals_arr) = vertex_normals {
-            let normals: Vec<Vector3<f64>> = normals_arr
-                .as_array()
-                .rows()
-                .into_iter()
-                .map(|x| Vector3::new(x[0], x[1], x[2]))
-                .collect();
-            attributes_vertex.normals.push(normals);
-        }
-
-        if let Some(colors_arr) = face_colors {
-            let colors: Vec<Vector4<u8>> = colors_arr
-                .as_array()
-                .rows()
-                .into_iter()
-                .map(|x| Vector4::new(x[0], x[1], x[2], x[3]))
-                .collect();
-            attributes_face.colors.push(colors);
-        }
-
-        Ok(PyTrimesh {
-            data: Trimesh::new(
-                vertices,
-                faces,
-                Some(attributes_vertex),
-                Some(attributes_face),
-            )?,
-        })
-    }
-}
-
-/// Load a mesh from bytes.
-///
-/// Parameters
-/// ----------
-/// file_data : bytes
-///     The raw file data.
-/// file_type : str
-///     The file type (e.g., "obj", "stl").
-/// resolver : dict or callable, optional
-///     For resolving external file references (e.g., MTL files for OBJ).
-///     - If a dict, keys are file paths and values are file bytes.
-///     - If a callable, it should take a path string and return bytes.
-///     - If None (default), external references are silently ignored.
-#[pyfunction(name = "load_mesh")]
-#[pyo3(signature = (file_data, file_type, resolver=None))]
-pub fn py_load_mesh(
-    file_data: Vec<u8>,
-    file_type: String,
+fn load_with_resolver(
+    bytes: &[u8],
+    fmt: MeshFormat,
     resolver: Option<Py<PyAny>>,
-) -> Result<PyTrimesh> {
-    let format = MeshFormat::from_string(&file_type)?;
-    let bytes = &file_data;
-
-    let data = match resolver {
-        Some(res) => Python::with_gil(|py| {
+    py: Python<'_>,
+) -> Result<Trimesh> {
+    match resolver {
+        None => load_mesh(bytes, fmt, None),
+        Some(res) => {
             let bound = res.bind(py);
-            if bound.is_instance_of::<PyDict>() {
-                #[allow(deprecated)]
-                let dict: &Bound<'_, PyDict> = bound
-                    .downcast()
-                    .map_err(|e| anyhow::anyhow!("expected dict: {e}"))?;
-                let mut mem_resolver = InMemoryResolver::new();
-                for (key, value) in dict.iter() {
-                    let path: String = key
-                        .extract()
-                        .map_err(|e| anyhow::anyhow!("dict key must be str: {e}"))?;
-                    let data: Vec<u8> = value
-                        .extract()
-                        .map_err(|e| anyhow::anyhow!("dict value must be bytes: {e}"))?;
-                    mem_resolver.insert(path, data);
+            if let Ok(dict) = bound.downcast::<PyDict>() {
+                let mut mem = InMemoryResolver::new();
+                for (k, v) in dict.iter() {
+                    mem.insert(k.extract::<String>()?, v.extract::<Vec<u8>>()?);
                 }
-                load_mesh_with_resolver(bytes, format, &mem_resolver)
+                load_mesh(bytes, fmt, Some(&mem))
             } else if bound.is_callable() {
-                let callable_resolver = PyCallableResolver {
-                    callable: res.clone_ref(py),
-                };
-                load_mesh_with_resolver(bytes, format, &callable_resolver)
+                load_mesh(bytes, fmt, Some(&PyCallableResolver(res.clone_ref(py))))
             } else {
-                let type_name = bound
-                    .get_type()
-                    .name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-                Err(anyhow::anyhow!(
-                    "resolver must be a dict or callable, got {type_name}"
-                ))
+                Err(anyhow::anyhow!("resolver must be dict or callable"))
             }
-        })?,
-        None => load_mesh_with_resolver(bytes, format, &NoResolver)?,
-    };
-
-    Ok(PyTrimesh { data })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -370,9 +343,8 @@ mod tests {
     use rmesh::creation::create_box;
 
     #[test]
-    fn test_mesh_python() {
-        let data = create_box(&[1.0, 1.0, 1.0]);
-        let m = PyTrimesh { data };
-        assert_eq!(m.py_check(), 10);
+    fn test_pytrimesh() {
+        let m = PyTrimesh::new_from_trimesh(create_box(&[1.0, 1.0, 1.0]));
+        assert_eq!(m.face_count(), 12);
     }
 }

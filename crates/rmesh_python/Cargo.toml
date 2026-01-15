@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 anyhow = {workspace=true}
 bytemuck = {workspace=true}
 nalgebra = {workspace=true}
+once_cell = {workspace=true}
 rmesh = { path = "../rmesh" }
 
 numpy = "0.27"

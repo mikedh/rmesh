@@ -6,6 +6,7 @@ pub mod graph;
 pub mod image;
 pub mod mesh;
 pub mod path;
+pub mod resolvers;
 pub mod scene;
 pub mod simplify;
 pub mod subdivide;

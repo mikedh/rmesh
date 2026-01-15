@@ -174,7 +174,7 @@ mod tests {
     fn test_mesh_binary_stl() {
         let stl_data = include_bytes!("../../../../test/data/unit_cube.STL");
 
-        let mesh = load_mesh(stl_data, MeshFormat::STL).unwrap();
+        let mesh = load_mesh(stl_data, MeshFormat::STL, None).unwrap();
 
         assert_eq!(mesh.vertices.len(), 36);
         assert_eq!(mesh.faces.len(), 12);
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_mesh_ascii_stl() {
         let stl_data = include_bytes!("../../../../test/data/two_objects_mixed_case_names.stl");
-        let mesh = load_mesh(stl_data, MeshFormat::STL).unwrap();
+        let mesh = load_mesh(stl_data, MeshFormat::STL, None).unwrap();
 
         //assert_eq!(mesh.vertices.len(), 36);
         assert_eq!(mesh.faces.len(), 24);

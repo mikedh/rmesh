@@ -16,6 +16,9 @@ This is experimental, and doesn't do anything at the moment. It hasn't been rele
 - Load an STL, OBJ, and PLY file from Python 3.0x faster than `trimesh` in Python.
 - Implement the following for a mesh object: `edges`, `euler_number`, `merge_vertices`, `face_normals`, `face_adjacency`, `face_adjacency_angles`, `extents`, `bounds`, `split`, `is_watertight`, `is_winding_consistant`, `is_volume`, `is_convex`, mass properties using the [same](https://github.com/mikedh/trimesh/blob/76b2bd31d32a1231320f8151d94f99e77ac8dc5b/trimesh/triangles.py#L214-L329) [algorithm](http://www.geometrictools.com/Documentation/PolyhedralMassProperties.pdf), `principal_inertia_components` (using nalgebra `hermitian_eigen`),
 
+With Claude, this is more likely to actually happen. 
+
+
 ## Goals
 - Targeting use as a Rust crate, a nicely type hinted Python module, and WASM. WASM is mostly because `wasm-pack` made it kind of easy, and keeping the build in CI from the start makes sure we don't add things that break WASM builds.
 - Be generally faster than trimesh and pass many-to-most of trimesh's unit tests.
@@ -49,10 +52,6 @@ This is experimental, and doesn't do anything at the moment. It hasn't been rele
     - all `proc macros` must be their own crate for Reasons. This as of writing only contains the `cache_access` proc macro which handles some of the boilerplate for dealing with the `RwLock` cache.
   - `rmesh_python`
     - The crate that builds to `pip install rmesh`, and includes a dependency on `PyO3` and other Python plumbing. This should be 100% boilerplate for accessing `rmesh`.
-  - `rmesh_wasm`
-    - The crate that builds to a WASM blob for use in Node and browsers.
-  - `rmesh_external` (proposed but not implemented)
-    - For things that really *have* to be in C/C++, like accessing OpenCASCADE for STEP loading. This doesn't work with `wasm-pack` without a *lot* of plumbing work.
 
 ### Setup for Mixed Rust-Python Development
 
@@ -61,12 +60,4 @@ After cloning, run once:
 uv sync
 ```
 
-Then `cargo test` and `uv run pytest` work from anywhere in the workspace.
-
-**Why this is needed:** PyO3 requires knowing where Python and `libpython` are at compile time. Cargo has no pre-build hooks, so we use two mechanisms:
-
-1. `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python` with `relative=true` (resolved from workspace root). This is read *before* any `build.rs` runs, telling `pyo3-build-config` which Python to use.
-
-2. `crates/rmesh_python/build.rs` runs `uv run python` to get `LIBDIR` and emits `cargo:rustc-link-search` so the linker finds `libpython`.
-
-The `uv sync` must happen first because `pyo3-build-config` (a dependency) builds before our code, and it needs `.venv/bin/python` to exist when it runs.
+Then `cargo test` and `uv run pytest` work from anywhere in the workspace. The `uv sync` must happen first because `pyo3-build-config` (a dependency) builds before our code, and it needs `.venv/bin/python` to exist when it runs. If you are working entirely in the `crates/rmesh` in a rust-only project you shouldn't need UV.

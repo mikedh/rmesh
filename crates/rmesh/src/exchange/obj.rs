@@ -7,7 +7,7 @@ use crate::creation::{Triangulator, triangulate_fan};
 use crate::mesh::Trimesh;
 
 use super::mtl::parse_mtl;
-use super::Resolver;
+use crate::resolvers::Resolver;
 
 /// The intermediate representation of a single line from an OBJ file,
 /// which can later be turned into a more useful structure.
@@ -86,7 +86,6 @@ impl ObjLine {
             _ => ObjLine::Ignore(line.to_string()),
         }
     }
-
 }
 
 /// A helper function to upsert a value into a vector and return its index.
@@ -234,10 +233,14 @@ impl ObjFaces {
         // Record per-face attributes for each resulting triangle
         let num_tris = tri.len();
         self.faces.extend(tri);
-        self.face_object.extend(std::iter::repeat(self.object).take(num_tris));
-        self.face_group.extend(std::iter::repeat(self.group).take(num_tris));
-        self.face_material.extend(std::iter::repeat(self.material).take(num_tris));
-        self.face_smooth.extend(std::iter::repeat(self.smooth).take(num_tris));
+        self.face_object
+            .extend(std::iter::repeat(self.object).take(num_tris));
+        self.face_group
+            .extend(std::iter::repeat(self.group).take(num_tris));
+        self.face_material
+            .extend(std::iter::repeat(self.material).take(num_tris));
+        self.face_smooth
+            .extend(std::iter::repeat(self.smooth).take(num_tris));
     }
 }
 
@@ -253,8 +256,10 @@ pub struct ObjMesh {
 }
 
 impl ObjMesh {
-    /// Parse a string into an ObjMesh, using the resolver for external references.
-    pub fn from_string_with_resolver<R: Resolver>(data: &str, resolver: &R) -> Self {
+    /// Parse a string into an ObjMesh with an optional resolver for external references.
+    ///
+    /// If `resolver` is `None`, external files (MTL, textures) are silently skipped.
+    pub fn from_string(data: &str, resolver: Option<&dyn Resolver>) -> Self {
         // parse the strings in parallel
         let lines: Vec<ObjLine> = data
             .lines()
@@ -292,10 +297,12 @@ impl ObjMesh {
                 ObjLine::S(name) => faces.upsert_smooth(name),
                 ObjLine::UseMtl(name) => faces.upsert_material(name),
                 ObjLine::MtlLib(path) => {
-                    // Try to load the MTL file using the resolver
-                    if let Ok(mtl_bytes) = resolver.resolve(path) {
-                        let mtl_str = String::from_utf8_lossy(&mtl_bytes);
-                        materials.extend(parse_mtl(&mtl_str, resolver));
+                    // Try to load the MTL file using the resolver (if provided)
+                    if let Some(res) = resolver {
+                        if let Ok(mtl_bytes) = res.resolve(path) {
+                            let mtl_str = String::from_utf8_lossy(&mtl_bytes);
+                            materials.extend(parse_mtl(&mtl_str, resolver));
+                        }
                     }
                 }
                 ObjLine::Ignore(_) => (),
@@ -423,8 +430,8 @@ mod tests {
     fn test_mesh_obj_tex() {
         // has many of the test cases we need
         let data = include_str!("../../../../test/data/fuze.obj");
-        // make sure the OBJ file was loadable into a mesh
-        let mesh = load_mesh(data.as_bytes(), crate::exchange::MeshFormat::OBJ).unwrap();
+        // make sure the OBJ file was loadable into a mesh (no resolver)
+        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ, None).unwrap();
 
         // should have loaded a vertex for every occurrence of 'v '
         assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
@@ -463,8 +470,8 @@ mod tests {
             assert!(parsed.contains(req), "missing line: {req:?}");
         }
 
-        // make sure the OBJ file was loadable into a mesh
-        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
+        // make sure the OBJ file was loadable into a mesh (no resolver)
+        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ, None).unwrap();
 
         // should have loaded a vertex for every occurrence of 'v '
         assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
@@ -478,7 +485,7 @@ mod tests {
     #[test]
     fn test_obj_objects() {
         let data = include_str!("../../../../test/data/basic.obj");
-        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ).unwrap();
+        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ, None).unwrap();
 
         // Find the object grouping in face attributes
         let objects = mesh
@@ -489,10 +496,7 @@ mod tests {
             .expect("should have object groupings");
 
         // Verify 3 objects were found
-        assert_eq!(
-            objects.names,
-            vec!["Cone", "cube for life!!!", "tetra"]
-        );
+        assert_eq!(objects.names, vec!["Cone", "cube for life!!!", "tetra"]);
 
         // Verify per-face indices: 4 faces (Cone) + 12 faces (cube) + 4 faces (tetra) = 20
         assert_eq!(objects.indices.len(), 20);
@@ -508,7 +512,7 @@ mod tests {
     #[test]
     fn test_obj_materials() {
         use crate::attributes::Material;
-        use crate::exchange::{load_mesh_with_resolver, InMemoryResolver};
+        use crate::exchange::InMemoryResolver;
 
         let obj_data = include_str!("../../../../test/data/fuze.obj");
         let mtl_data = include_str!("../../../../test/data/fuze.obj.mtl");
@@ -517,7 +521,7 @@ mod tests {
         let mut resolver = InMemoryResolver::new();
         resolver.insert("./fuze.obj.mtl", mtl_data.as_bytes().to_vec());
 
-        let mesh = load_mesh_with_resolver(obj_data.as_bytes(), MeshFormat::OBJ, &resolver).unwrap();
+        let mesh = load_mesh(obj_data.as_bytes(), MeshFormat::OBJ, Some(&resolver)).unwrap();
 
         // Should have loaded 1 material
         assert_eq!(mesh.materials.len(), 1);

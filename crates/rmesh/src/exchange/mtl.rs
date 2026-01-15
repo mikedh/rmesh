@@ -2,12 +2,13 @@ use nalgebra::Vector3;
 
 use crate::attributes::{Material, SimpleMaterial};
 use crate::image::LazyImage;
-
-use super::Resolver;
+use crate::resolvers::Resolver;
 
 /// Parse an MTL file and return a list of materials.
-/// If a resolver is provided, textures will be loaded as LazyImage.
-pub fn parse_mtl<R: Resolver>(data: &str, resolver: &R) -> Vec<Material> {
+///
+/// If `resolver` is `Some`, textures will be loaded as LazyImage.
+/// If `resolver` is `None`, texture references are skipped.
+pub fn parse_mtl(data: &str, resolver: Option<&dyn Resolver>) -> Vec<Material> {
     let mut materials = Vec::new();
     let mut current: Option<SimpleMaterial> = None;
 
@@ -85,9 +86,9 @@ pub fn parse_mtl<R: Resolver>(data: &str, resolver: &R) -> Vec<Material> {
             }
             "map_Kd" if parts.len() >= 2 => {
                 // Diffuse texture map
-                if let Some(ref mut mat) = current {
+                if let (Some(mat), Some(res)) = (&mut current, resolver) {
                     let texture_path = parts[1..].join(" ");
-                    if let Ok(bytes) = resolver.resolve(&texture_path) {
+                    if let Ok(bytes) = res.resolve(&texture_path) {
                         mat.diffuse_texture = Some(LazyImage::new(bytes));
                     }
                 }
@@ -109,7 +110,6 @@ pub fn parse_mtl<R: Resolver>(data: &str, resolver: &R) -> Vec<Material> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exchange::NoResolver;
 
     #[test]
     fn test_parse_mtl_basic() {
@@ -125,7 +125,7 @@ newmtl material_1
 Kd 0.0 1.0 0.0
 "#;
 
-        let materials = parse_mtl(mtl_data, &NoResolver);
+        let materials = parse_mtl(mtl_data, None);
         assert_eq!(materials.len(), 2);
 
         // Extract SimpleMaterial from Material enum
