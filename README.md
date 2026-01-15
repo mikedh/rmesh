@@ -53,3 +53,20 @@ This is experimental, and doesn't do anything at the moment. It hasn't been rele
     - The crate that builds to a WASM blob for use in Node and browsers.
   - `rmesh_external` (proposed but not implemented)
     - For things that really *have* to be in C/C++, like accessing OpenCASCADE for STEP loading. This doesn't work with `wasm-pack` without a *lot* of plumbing work.
+
+### Setup for Mixed Rust-Python Development
+
+After cloning, run once:
+```bash
+uv sync
+```
+
+Then `cargo test` and `uv run pytest` work from anywhere in the workspace.
+
+**Why this is needed:** PyO3 requires knowing where Python and `libpython` are at compile time. Cargo has no pre-build hooks, so we use two mechanisms:
+
+1. `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python` with `relative=true` (resolved from workspace root). This is read *before* any `build.rs` runs, telling `pyo3-build-config` which Python to use.
+
+2. `crates/rmesh_python/build.rs` runs `uv run python` to get `LIBDIR` and emits `cargo:rustc-link-search` so the linker finds `libpython`.
+
+The `uv sync` must happen first because `pyo3-build-config` (a dependency) builds before our code, and it needs `.venv/bin/python` to exist when it runs.

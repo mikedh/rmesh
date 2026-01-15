@@ -11,7 +11,25 @@ use rmesh::exchange::{InMemoryResolver, MeshFormat, NoResolver, Resolver, load_m
 use rmesh::mesh::Trimesh;
 use rmesh::simplify::SimplifyOptions;
 
-//use crate::rmesh::mesh::{load_mesh, MeshFormat, Trimesh};
+/// A Python callable that acts as a Resolver.
+struct PyCallableResolver {
+    callable: Py<PyAny>,
+}
+
+impl Resolver for PyCallableResolver {
+    fn resolve(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+        Python::with_gil(|py| {
+            let result = self
+                .callable
+                .call1(py, (path,))
+                .map_err(|e| anyhow::anyhow!("resolver error: {e}"))?;
+
+            result
+                .extract::<Vec<u8>>(py)
+                .map_err(|e| anyhow::anyhow!("resolver must return bytes: {e}"))
+        })
+    }
+}
 
 #[pyclass(name = "Trimesh")]
 #[derive(Clone)]
@@ -22,7 +40,7 @@ pub struct PyTrimesh {
 #[pymethods]
 impl PyTrimesh {
     #[new]
-    /// (pyfunc) Create a new Trimesh from vertices and faces.
+    /// Create a new Trimesh from vertices and faces.
     pub fn new<'py>(
         vertices: PyReadonlyArray2<'py, f64>,
         faces: PyReadonlyArray2<'py, i64>,
@@ -32,14 +50,14 @@ impl PyTrimesh {
             .rows()
             .into_iter()
             .map(|x| Point3::new(x[0], x[1], x[2]))
-            .collect::<Vec<_>>();
+            .collect();
 
         let faces: Vec<[usize; 3]> = faces
             .as_array()
             .rows()
             .into_iter()
             .map(|x| [x[0] as usize, x[1] as usize, x[2] as usize])
-            .collect::<Vec<_>>();
+            .collect();
 
         Ok(PyTrimesh {
             data: Trimesh::new(vertices, faces, None, None)?,
@@ -48,9 +66,6 @@ impl PyTrimesh {
 
     #[getter]
     pub fn get_vertices<'py>(&self, py: Python<'py>) -> Py<PyArray2<f64>> {
-        // todo : is this the best way to do these conversions from Vec<Point3<f64>> to ndarray?
-        // todo : the output array should be read-only
-        // todo : should we cache this numpy conversion?
         let vertices = &self.data.vertices;
         let shape = (vertices.len(), 3);
 
@@ -58,7 +73,7 @@ impl PyTrimesh {
             shape,
             vertices
                 .iter()
-                .flat_map(|p| p.coords.iter().cloned().collect::<Vec<_>>())
+                .flat_map(|p| [p.x, p.y, p.z])
                 .collect(),
         )
         .unwrap();
@@ -75,7 +90,7 @@ impl PyTrimesh {
             shape,
             faces
                 .iter()
-                .flat_map(|&[a, b, c]| vec![a as i64, b as i64, c as i64])
+                .flat_map(|&[a, b, c]| [a as i64, b as i64, c as i64])
                 .collect(),
         )
         .unwrap();
@@ -88,7 +103,7 @@ impl PyTrimesh {
         self.data.uv().as_ref().map(|uvs| {
             let shape = (uvs.len(), 2);
             let arr =
-                Array2::from_shape_vec(shape, uvs.iter().flat_map(|p| vec![p.x, p.y]).collect())
+                Array2::from_shape_vec(shape, uvs.iter().flat_map(|p| [p.x, p.y]).collect())
                     .unwrap();
             PyArray2::from_array(py, &arr).to_owned().into()
         })
@@ -105,7 +120,7 @@ impl PyTrimesh {
             let shape = (normals.len(), 3);
             let arr = Array2::from_shape_vec(
                 shape,
-                normals.iter().flat_map(|n| vec![n.x, n.y, n.z]).collect(),
+                normals.iter().flat_map(|n| [n.x, n.y, n.z]).collect(),
             )
             .unwrap();
             PyArray2::from_array(py, &arr).to_owned().into()
@@ -122,7 +137,7 @@ impl PyTrimesh {
                 shape,
                 colors
                     .iter()
-                    .flat_map(|c| vec![c.x, c.y, c.z, c.w])
+                    .flat_map(|c| [c.x, c.y, c.z, c.w])
                     .collect(),
             )
             .unwrap();
@@ -215,7 +230,6 @@ impl PyTrimesh {
         (simplified, quality_dict)
     }
 
-    /// Get the vertex map from the last simplification.
     #[getter]
     pub fn get_face_count(&self) -> usize {
         self.data.faces.len()
@@ -286,41 +300,6 @@ impl PyTrimesh {
     }
 }
 
-/// A Python callable that acts as a Resolver.
-struct PyCallableResolver<'py> {
-    callable: Bound<'py, PyAny>,
-}
-
-impl<'py> Resolver for PyCallableResolver<'py> {
-    fn resolve(&self, path: &str) -> anyhow::Result<Vec<u8>> {
-        let result = self
-            .callable
-            .call1((path,))
-            .map_err(|e| anyhow::anyhow!("resolver error: {e}"))?;
-
-        result
-            .extract::<Vec<u8>>()
-            .map_err(|e| anyhow::anyhow!("resolver must return bytes: {e}"))
-    }
-}
-
-/// (pyfunc) Load a mesh from a file, doing no initial processing.
-///
-/// Parameters
-/// ----------
-/// file_data : bytes
-///     The raw file data.
-/// file_type : str
-///     The file type (e.g., "obj", "stl").
-/// resolver : dict or callable, optional
-///     For resolving external file references (e.g., MTL files for OBJ).
-///     - If a dict, keys are file paths and values are file bytes.
-///     - If a callable, it should take a path string and return bytes.
-///
-/// Returns
-/// -------
-/// Trimesh
-///     The loaded mesh.
 /// Load a mesh from bytes.
 ///
 /// Parameters
@@ -334,26 +313,22 @@ impl<'py> Resolver for PyCallableResolver<'py> {
 ///     - If a dict, keys are file paths and values are file bytes.
 ///     - If a callable, it should take a path string and return bytes.
 ///     - If None (default), external references are silently ignored.
-///
-/// Returns
-/// -------
-/// Trimesh
-///     The loaded mesh.
 #[pyfunction(name = "load_mesh")]
-#[pyo3(signature = (file_data, file_type, *, resolver=None))]
+#[pyo3(signature = (file_data, file_type, resolver=None))]
 pub fn py_load_mesh(
-    file_data: &[u8],
+    file_data: Vec<u8>,
     file_type: String,
-    resolver: Option<Bound<'_, PyAny>>,
+    resolver: Option<Py<PyAny>>,
 ) -> Result<PyTrimesh> {
     let format = MeshFormat::from_string(&file_type)?;
+    let bytes = &file_data;
 
     let data = match resolver {
-        Some(res) => {
-            if res.is_instance_of::<PyDict>() {
-                // Dict resolver: {path: bytes}
+        Some(res) => Python::with_gil(|py| {
+            let bound = res.bind(py);
+            if bound.is_instance_of::<PyDict>() {
                 #[allow(deprecated)]
-                let dict: &Bound<'_, PyDict> = res
+                let dict: &Bound<'_, PyDict> = bound
                     .downcast()
                     .map_err(|e| anyhow::anyhow!("expected dict: {e}"))?;
                 let mut mem_resolver = InMemoryResolver::new();
@@ -361,28 +336,29 @@ pub fn py_load_mesh(
                     let path: String = key
                         .extract()
                         .map_err(|e| anyhow::anyhow!("dict key must be str: {e}"))?;
-                    let bytes: Vec<u8> = value
+                    let data: Vec<u8> = value
                         .extract()
                         .map_err(|e| anyhow::anyhow!("dict value must be bytes: {e}"))?;
-                    mem_resolver.insert(path, bytes);
+                    mem_resolver.insert(path, data);
                 }
-                load_mesh_with_resolver(file_data, format, &mem_resolver)?
-            } else if res.is_callable() {
-                // Callable resolver: fn(path) -> bytes
-                let callable_resolver = PyCallableResolver { callable: res };
-                load_mesh_with_resolver(file_data, format, &callable_resolver)?
+                load_mesh_with_resolver(bytes, format, &mem_resolver)
+            } else if bound.is_callable() {
+                let callable_resolver = PyCallableResolver {
+                    callable: res.clone_ref(py),
+                };
+                load_mesh_with_resolver(bytes, format, &callable_resolver)
             } else {
-                let type_name = res
+                let type_name = bound
                     .get_type()
                     .name()
                     .map(|n| n.to_string())
                     .unwrap_or_else(|_| "unknown".to_string());
-                return Err(anyhow::anyhow!(
+                Err(anyhow::anyhow!(
                     "resolver must be a dict or callable, got {type_name}"
-                ));
+                ))
             }
-        }
-        None => load_mesh_with_resolver(file_data, format, &NoResolver)?,
+        })?,
+        None => load_mesh_with_resolver(bytes, format, &NoResolver)?,
     };
 
     Ok(PyTrimesh { data })
@@ -390,17 +366,13 @@ pub fn py_load_mesh(
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-
     use rmesh::creation::create_box;
 
     #[test]
     fn test_mesh_python() {
         let data = create_box(&[1.0, 1.0, 1.0]);
-
         let m = PyTrimesh { data };
-
         assert_eq!(m.py_check(), 10);
     }
 }
