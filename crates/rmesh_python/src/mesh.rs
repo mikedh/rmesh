@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use nalgebra::{Point3, Vector3, Vector4};
-use numpy::{PyArray2, PyReadonlyArray2, PyUntypedArrayMethods, ndarray::Array2, npyffi};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods, ndarray::Array2, npyffi};
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -70,6 +70,10 @@ pub struct PyTrimesh {
     uv_cache: OnceCell<Option<Py<PyArray2<f64>>>>,
     vertex_normals_cache: OnceCell<Option<Py<PyArray2<f64>>>>,
     face_colors_cache: OnceCell<Option<Py<PyArray2<u8>>>>,
+    face_normals_cache: OnceCell<Py<PyArray2<f64>>>,
+    edges_cache: OnceCell<Py<PyArray2<i64>>>,
+    face_adjacency_cache: OnceCell<Py<PyArray2<i64>>>,
+    face_adjacency_angles_cache: OnceCell<Py<PyArray1<f64>>>,
 }
 
 impl PyTrimesh {
@@ -81,6 +85,10 @@ impl PyTrimesh {
             uv_cache: OnceCell::new(),
             vertex_normals_cache: OnceCell::new(),
             face_colors_cache: OnceCell::new(),
+            face_normals_cache: OnceCell::new(),
+            edges_cache: OnceCell::new(),
+            face_adjacency_cache: OnceCell::new(),
+            face_adjacency_angles_cache: OnceCell::new(),
         }
     }
 }
@@ -161,13 +169,252 @@ impl PyTrimesh {
     }
 
     #[getter]
-    fn face_count(&self) -> usize {
-        self.data.faces.len()
+    fn face_normals(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        self.face_normals_cache
+            .get_or_init(|| {
+                let normals = self.data.face_normals();
+                let flat: Vec<f64> = normals.iter().flat_map(|n| [n.x, n.y, n.z]).collect();
+                let nd = Array2::from_shape_vec((normals.len(), 3), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
     }
 
     #[getter]
-    fn material_count(&self) -> usize {
-        self.data.materials.len()
+    fn edges(&self, py: Python<'_>) -> Py<PyArray2<i64>> {
+        self.edges_cache
+            .get_or_init(|| {
+                let edges = self.data.edges();
+                let flat: Vec<i64> = edges
+                    .iter()
+                    .flat_map(|e| [e[0] as i64, e[1] as i64])
+                    .collect();
+                let nd = Array2::from_shape_vec((edges.len(), 2), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    #[getter]
+    fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data.bounds().map(|(min, max)| {
+            let data = vec![min.x, min.y, min.z, max.x, max.y, max.z];
+            let nd = Array2::from_shape_vec((2, 3), data).unwrap();
+            let arr = PyArray2::from_array(py, &nd);
+            make_readonly(&arr);
+            arr.unbind()
+        })
+    }
+
+    #[getter]
+    fn area(&self) -> f64 {
+        self.data.area()
+    }
+
+    #[getter]
+    fn volume(&self) -> f64 {
+        self.data.volume()
+    }
+
+    #[getter]
+    fn mass(&self) -> f64 {
+        self.data.mass()
+    }
+
+    #[getter]
+    fn center_mass(&self) -> (f64, f64, f64) {
+        let cm = self.data.center_mass();
+        (cm.x, cm.y, cm.z)
+    }
+
+    #[getter]
+    fn moment_inertia(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data.moment_inertia().map(|m| {
+            let flat: Vec<f64> = vec![
+                m[(0, 0)],
+                m[(0, 1)],
+                m[(0, 2)],
+                m[(1, 0)],
+                m[(1, 1)],
+                m[(1, 2)],
+                m[(2, 0)],
+                m[(2, 1)],
+                m[(2, 2)],
+            ];
+            let nd = Array2::from_shape_vec((3, 3), flat).unwrap();
+            let arr = PyArray2::from_array(py, &nd);
+            make_readonly(&arr);
+            arr.unbind()
+        })
+    }
+
+    #[getter]
+    fn is_watertight(&self) -> bool {
+        self.data.is_watertight()
+    }
+
+    #[getter]
+    fn is_winding_consistent(&self) -> bool {
+        self.data.is_winding_consistent()
+    }
+
+    #[getter]
+    fn is_volume(&self) -> bool {
+        self.data.is_volume()
+    }
+
+    #[getter]
+    fn euler_number(&self) -> i64 {
+        self.data.euler_number()
+    }
+
+    #[getter]
+    fn edges_unique(&self, py: Python<'_>) -> Py<PyArray2<i64>> {
+        // Not cached since edges_unique is already cached in Rust
+        let edges = self.data.edges_unique();
+        let flat: Vec<i64> = edges
+            .iter()
+            .flat_map(|e| [e[0] as i64, e[1] as i64])
+            .collect();
+        let nd = Array2::from_shape_vec((edges.len(), 2), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    #[getter]
+    fn face_adjacency(&self, py: Python<'_>) -> Py<PyArray2<i64>> {
+        self.face_adjacency_cache
+            .get_or_init(|| {
+                let adj = self.data.face_adjacency();
+                let flat: Vec<i64> = adj
+                    .iter()
+                    .flat_map(|(a, b)| [*a as i64, *b as i64])
+                    .collect();
+                let nd = Array2::from_shape_vec((adj.len(), 2), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    fn face_adjacency_angles(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
+        self.face_adjacency_angles_cache
+            .get_or_init(|| {
+                let angles = self.data.face_adjacency_angles();
+                let arr = PyArray1::from_vec(py, angles);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    /// Per-face areas.
+    #[getter]
+    fn area_faces(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
+        let areas = self.data.faces_area();
+        let arr = PyArray1::from_slice(py, areas);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Cross product vectors for each face (unnormalized face normals * 2 * area).
+    #[getter]
+    fn faces_cross(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        let crosses = self.data.faces_cross();
+        let flat: Vec<f64> = crosses.iter().flat_map(|c| [c.x, c.y, c.z]).collect();
+        let nd = Array2::from_shape_vec((crosses.len(), 3), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Extents of the bounding box (max - min for each axis).
+    #[getter]
+    fn extents(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        self.data.extents().map(|e| {
+            let arr = PyArray1::from_vec(py, vec![e.x, e.y, e.z]);
+            make_readonly(&arr);
+            arr.unbind()
+        })
+    }
+
+    /// Geometric center of the vertices (mean position).
+    #[getter]
+    fn centroid(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        self.data.centroid().map(|c| {
+            let arr = PyArray1::from_vec(py, vec![c.x, c.y, c.z]);
+            make_readonly(&arr);
+            arr.unbind()
+        })
+    }
+
+    /// Actual vertex positions for each face, shape (n_faces, 3, 3).
+    #[getter]
+    fn triangles(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        let flat = self.data.triangles_flat();
+        let n_faces = self.data.faces.len();
+        // Return as (n_faces * 3, 3) - caller can reshape to (n_faces, 3, 3)
+        let nd = Array2::from_shape_vec((n_faces * 3, 3), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Center of each triangle, shape (n_faces, 3).
+    #[getter]
+    fn triangles_center(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        let centers = self.data.triangles_center();
+        let flat: Vec<f64> = centers.iter().flat_map(|c| [c.x, c.y, c.z]).collect();
+        let nd = Array2::from_shape_vec((centers.len(), 3), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// For each adjacent face pair, the vertex indices not on the shared edge.
+    /// Shape (n_adjacency, 2).
+    #[getter]
+    fn face_adjacency_unshared(&self, py: Python<'_>) -> Py<PyArray2<i64>> {
+        let unshared = self.data.face_adjacency_unshared();
+        let flat: Vec<i64> = unshared
+            .iter()
+            .flat_map(|[a, b]| [*a as i64, *b as i64])
+            .collect();
+        let nd = Array2::from_shape_vec((unshared.len(), 2), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Projection of unshared vertices onto adjacent face planes.
+    /// Negative values indicate locally convex geometry.
+    #[getter]
+    fn face_adjacency_projections(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
+        let projections = self.data.face_adjacency_projections();
+        let arr = PyArray1::from_vec(py, projections);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Boolean array indicating whether each adjacent face pair is locally convex.
+    #[getter]
+    fn face_adjacency_convex(&self, py: Python<'_>) -> Py<PyArray1<bool>> {
+        let convex = self.data.face_adjacency_convex();
+        let arr = PyArray1::from_vec(py, convex);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Check if the mesh is convex.
+    #[getter]
+    fn is_convex(&self) -> bool {
+        self.data.is_convex()
     }
 
     fn material_name(&self, index: usize) -> Option<String> {
@@ -193,10 +440,77 @@ impl PyTrimesh {
 
     #[pyo3(signature = (target_faces, aggressiveness=None))]
     fn simplify(&self, target_faces: usize, aggressiveness: Option<f64>) -> Self {
-        Self::new_from_trimesh(
-            self.data
-                .simplify(target_faces, aggressiveness.unwrap_or(7.0)),
-        )
+        let options = rmesh::simplify::SimplifyOptions {
+            target_count: target_faces,
+            aggressiveness: aggressiveness.unwrap_or(7.0),
+            preserve_attributes: true,
+            ..Default::default()
+        };
+        Self::new_from_trimesh(self.data.simplify(&options).into())
+    }
+
+    /// Clean up the mesh by merging vertices, removing degenerate faces, etc.
+    ///
+    /// Unlike trimesh which uses global tolerances, all options are passed explicitly.
+    ///
+    /// Parameters
+    /// ----------
+    /// merge_vertices : int, optional
+    ///     If provided, merge duplicate vertices at this decimal precision.
+    ///     Example: 8 means vertices within 1e-8 are considered equal.
+    /// merge_tex : int, optional
+    ///     If provided, also consider UV coordinates at this precision when merging.
+    ///     If None, UVs are ignored (vertices merged even if UVs differ).
+    /// merge_norm : int, optional
+    ///     If provided, also consider vertex normals at this precision when merging.
+    ///     If None, normals are ignored (vertices merged even if normals differ).
+    /// remove_degenerate : int, optional
+    ///     If provided, remove faces where any two vertices are equal at this
+    ///     decimal precision. Example: 8 means vertices within 1e-8 are considered
+    ///     equal and triangles with duplicate vertices are removed.
+    /// remove_infinite : bool
+    ///     Remove NaN/Inf values (default: False)
+    /// remove_unreferenced : bool
+    ///     Remove unreferenced vertices (default: False)
+    ///
+    /// Returns
+    /// -------
+    /// Trimesh
+    ///     A new cleaned mesh
+    ///
+    /// Examples
+    /// --------
+    /// >>> mesh = rmesh.load_mesh("model.stl")
+    /// >>> # Merge vertices at 1e-8 precision (like trimesh default)
+    /// >>> cleaned = mesh.cleanup(merge_vertices=8)
+    /// >>> # Full cleanup like trimesh.process(validate=True)
+    /// >>> cleaned = mesh.cleanup(merge_vertices=8, remove_degenerate=12, remove_infinite=True)
+    #[pyo3(signature = (
+        merge_vertices=None,
+        merge_tex=None,
+        merge_norm=None,
+        remove_degenerate=None,
+        remove_infinite=false,
+        remove_unreferenced=false
+    ))]
+    fn cleanup(
+        &self,
+        merge_vertices: Option<u32>,
+        merge_tex: Option<u32>,
+        merge_norm: Option<u32>,
+        remove_degenerate: Option<u32>,
+        remove_infinite: bool,
+        remove_unreferenced: bool,
+    ) -> Self {
+        let options = rmesh::cleanup::CleanupOptions {
+            merge_vertices,
+            merge_tex,
+            merge_norm,
+            remove_degenerate,
+            remove_infinite,
+            remove_unreferenced,
+        };
+        Self::new_from_trimesh(self.data.cleanup(&options).into())
     }
 
     #[staticmethod]
@@ -303,7 +617,7 @@ struct PyCallableResolver(Py<PyAny>);
 
 impl Resolver for PyCallableResolver {
     fn resolve(&self, path: &str) -> anyhow::Result<Vec<u8>> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.0
                 .call1(py, (path,))?
                 .extract::<Vec<u8>>(py)
@@ -345,6 +659,6 @@ mod tests {
     #[test]
     fn test_pytrimesh() {
         let m = PyTrimesh::new_from_trimesh(create_box(&[1.0, 1.0, 1.0]));
-        assert_eq!(m.face_count(), 12);
+        assert_eq!(m.data.faces.len(), 12);
     }
 }

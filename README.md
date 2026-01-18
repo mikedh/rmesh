@@ -61,3 +61,19 @@ uv sync
 ```
 
 Then `cargo test` and `uv run pytest` work from anywhere in the workspace. The `uv sync` must happen first because `pyo3-build-config` (a dependency) builds before our code, and it needs `.venv/bin/python` to exist when it runs. If you are working entirely in the `crates/rmesh` in a rust-only project you shouldn't need UV.
+
+
+
+### Concious API Differences
+
+- `mesh.process` -> `mesh.cleanup(tol_merge:int ...)
+  - remove_degenerate, remove_infinite, etc all go into cleanup
+- `mesh.apply_transform` returns a transformed copy, no in-place
+- `mesh.bounds`/ `mesh.extents` on empty meshes return None, not zeros
+- `mesh.density` -> `mesh.MassSettings` (override density + COM)
+- lists of structured stuff are on the mesh and flat:
+  - `mesh.materials`
+  - `mesh.patch_primitives`
+- OBJ groups/smoothing/objects are face attributes not new meshes
+  - can be used in like, `mesh.split_on`
+

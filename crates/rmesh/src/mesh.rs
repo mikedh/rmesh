@@ -59,6 +59,7 @@ pub struct Trimesh {
     cache_area: OnceLock<f64>,
     cache_edges: OnceLock<Vec<[usize; 2]>>,
     cache_face_adjacency: OnceLock<Vec<(usize, usize)>>,
+    cache_edges_unique: OnceLock<Vec<[usize; 2]>>,
     cache_mass_properties: OnceLock<MassProperties>,
     cache_topology: OnceLock<(bool, bool)>, // (is_watertight, is_winding_consistent)
 }
@@ -79,6 +80,7 @@ impl Default for Trimesh {
             cache_area: OnceLock::new(),
             cache_edges: OnceLock::new(),
             cache_face_adjacency: OnceLock::new(),
+            cache_edges_unique: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
             cache_topology: OnceLock::new(),
         }
@@ -102,6 +104,7 @@ impl Clone for Trimesh {
             cache_area: OnceLock::new(),
             cache_edges: OnceLock::new(),
             cache_face_adjacency: OnceLock::new(),
+            cache_edges_unique: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
             cache_topology: OnceLock::new(),
         }
@@ -147,43 +150,31 @@ impl Trimesh {
     /// Simplify the mesh to a target face count.
     ///
     /// Preserves vertex attributes (normals, UVs, colors) through interpolation.
-    #[must_use]
-    pub fn simplify(&self, target_count: usize, aggressiveness: f64) -> Self {
-        let options = SimplifyOptions {
-            target_count,
-            aggressiveness,
-            preserve_attributes: true,
-            ..Default::default()
-        };
-
-        let result = simplify_mesh(
-            &self.vertices,
-            &self.faces,
-            Some(&self.attributes_vertex),
-            Some(&self.attributes_face),
-            options,
-        );
-
-        Self {
-            vertices: result.vertices,
-            faces: result.faces,
-            attributes_vertex: result.attributes_vertex,
-            attributes_face: result.attributes_face,
-            ..Default::default()
-        }
-    }
-
-    /// Simplify the mesh with full control over options.
+    /// Returns a `SimplifyResult` containing the simplified mesh and optional quality metrics.
     ///
-    /// Returns the full SimplifyResult including quality metrics if requested.
+    /// # Example
+    ///
+    /// ```
+    /// use rmesh::simplify::SimplifyOptions;
+    /// use rmesh::mesh::Trimesh;
+    ///
+    /// let mesh = Trimesh::default();
+    /// let result = mesh.simplify(&SimplifyOptions {
+    ///     target_count: 1000,
+    ///     aggressiveness: 7.0,
+    ///     ..Default::default()
+    /// });
+    /// // Get the simplified mesh
+    /// let simplified: Trimesh = result.into();
+    /// ```
     #[must_use]
-    pub fn simplify_with_options(&self, options: SimplifyOptions) -> SimplifyResult {
+    pub fn simplify(&self, options: &SimplifyOptions) -> SimplifyResult {
         simplify_mesh(
             &self.vertices,
             &self.faces,
             Some(&self.attributes_vertex),
             Some(&self.attributes_face),
-            options,
+            *options,
         )
     }
 
@@ -206,6 +197,42 @@ impl Trimesh {
             attributes_face,
             ..Default::default()
         }
+    }
+
+    /// Clean up the mesh by merging vertices, removing degenerate faces, etc.
+    ///
+    /// Unlike trimesh which uses global tolerances, all options are passed explicitly.
+    /// Returns a `CleanupResult` containing the new mesh data and statistics about
+    /// what was changed (vertices merged, faces removed, etc.).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rmesh::cleanup::CleanupOptions;
+    /// use rmesh::mesh::Trimesh;
+    ///
+    /// let mesh = Trimesh::default();
+    /// // Merge duplicate vertices and remove degenerate faces
+    /// let result = mesh.cleanup(&CleanupOptions {
+    ///     merge_vertices: Some(8),
+    ///     remove_degenerate: Some(12),
+    ///     ..Default::default()
+    /// });
+    /// // Get the cleaned mesh
+    /// let cleaned: Trimesh = result.into();
+    /// ```
+    #[must_use]
+    pub fn cleanup(
+        &self,
+        options: &crate::cleanup::CleanupOptions,
+    ) -> crate::cleanup::CleanupResult {
+        crate::cleanup::cleanup(
+            &self.vertices,
+            &self.faces,
+            Some(&self.attributes_vertex),
+            Some(&self.attributes_face),
+            options,
+        )
     }
 
     /// The non-normalized cross product of every face.
@@ -365,6 +392,166 @@ impl Trimesh {
         watertight && consistent && self.volume() > 0.0
     }
 
+    /// Get unique edges (each undirected edge once, sorted as [min, max]).
+    ///
+    /// Cached on first access.
+    pub fn edges_unique(&self) -> &[[usize; 2]] {
+        self.cache_edges_unique.get_or_init(|| {
+            use ahash::AHashSet;
+            let unique: AHashSet<[usize; 2]> = self
+                .faces
+                .iter()
+                .flat_map(|[i0, i1, i2]| {
+                    [
+                        [(*i0).min(*i1), (*i0).max(*i1)],
+                        [(*i1).min(*i2), (*i1).max(*i2)],
+                        [(*i2).min(*i0), (*i2).max(*i0)],
+                    ]
+                })
+                .collect();
+            unique.into_iter().collect()
+        })
+    }
+
+    /// Calculate the Euler characteristic (V - E + F).
+    ///
+    /// For a closed manifold surface: χ = 2 - 2g where g is the genus.
+    /// - Sphere: χ = 2
+    /// - Torus: χ = 0
+    /// - Double torus: χ = -2
+    pub fn euler_number(&self) -> i64 {
+        let v = self.vertices.len() as i64;
+        let f = self.faces.len() as i64;
+        let e = self.edges_unique().len() as i64;
+        v - e + f
+    }
+
+    /// Get the extents of the bounding box (max - min for each axis).
+    ///
+    /// Returns None if the mesh is empty.
+    pub fn extents(&self) -> Option<Vector3<f64>> {
+        self.bounds().map(|(min, max)| max - min)
+    }
+
+    /// Get the geometric center of the vertices (mean position).
+    ///
+    /// This is different from center_mass which is weighted by volume.
+    pub fn centroid(&self) -> Option<Point3<f64>> {
+        if self.vertices.is_empty() {
+            return None;
+        }
+        let sum: Vector3<f64> = self
+            .vertices
+            .par_iter()
+            .map(|v| v.coords)
+            .reduce(Vector3::zeros, |a, b| a + b);
+        Some(Point3::from(sum / self.vertices.len() as f64))
+    }
+
+    /// Get the actual vertex positions for each face as (n_faces, 3, 3) data.
+    ///
+    /// Returns a flat Vec where every 9 elements represent one triangle:
+    /// [v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, ...]
+    pub fn triangles_flat(&self) -> Vec<f64> {
+        self.faces
+            .par_iter()
+            .flat_map(|[i0, i1, i2]| {
+                let v0 = &self.vertices[*i0];
+                let v1 = &self.vertices[*i1];
+                let v2 = &self.vertices[*i2];
+                [v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z]
+            })
+            .collect()
+    }
+
+    /// Get the center of each triangle.
+    pub fn triangles_center(&self) -> Vec<Point3<f64>> {
+        self.faces
+            .par_iter()
+            .map(|[i0, i1, i2]| {
+                let v0 = &self.vertices[*i0];
+                let v1 = &self.vertices[*i1];
+                let v2 = &self.vertices[*i2];
+                Point3::from((v0.coords + v1.coords + v2.coords) / 3.0)
+            })
+            .collect()
+    }
+
+    /// For each adjacent face pair, get the indices of the two vertices not on the shared edge.
+    ///
+    /// Returns (n_adjacency, 2) array where each row is [unshared_from_face_a, unshared_from_face_b].
+    pub fn face_adjacency_unshared(&self) -> Vec<[usize; 2]> {
+        let adjacency = self.face_adjacency();
+        adjacency
+            .par_iter()
+            .map(|(face_a, face_b)| {
+                let fa = &self.faces[*face_a];
+                let fb = &self.faces[*face_b];
+                // Find vertex in face_a not in face_b
+                let unshared_a = fa
+                    .iter()
+                    .find(|v| !fb.contains(v))
+                    .copied()
+                    .unwrap_or(fa[0]);
+                // Find vertex in face_b not in face_a
+                let unshared_b = fb
+                    .iter()
+                    .find(|v| !fa.contains(v))
+                    .copied()
+                    .unwrap_or(fb[0]);
+                [unshared_a, unshared_b]
+            })
+            .collect()
+    }
+
+    /// Project the unshared vertex of each adjacent face onto the plane of the other face.
+    ///
+    /// For each adjacent pair (A, B), computes the signed distance from B's unshared vertex
+    /// to the plane of face A. Negative means locally convex, positive means locally concave.
+    pub fn face_adjacency_projections(&self) -> Vec<f64> {
+        let adjacency = self.face_adjacency();
+        let normals = self.face_normals();
+        let unshared = self.face_adjacency_unshared();
+        let triangles_center = self.triangles_center();
+
+        adjacency
+            .par_iter()
+            .zip(unshared.par_iter())
+            .map(|((face_a, _face_b), [_unshared_a, unshared_b])| {
+                // Project unshared vertex from face B onto plane of face A
+                let normal_a = &normals[*face_a];
+                let center_a = &triangles_center[*face_a];
+                let vertex_b = &self.vertices[*unshared_b];
+
+                // Signed distance from vertex_b to plane of face_a
+                // plane equation: normal . (p - center) = 0
+                // signed distance = normal . (vertex_b - center_a)
+                normal_a.dot(&(vertex_b - center_a))
+            })
+            .collect()
+    }
+
+    /// Boolean array indicating whether each adjacent face pair is locally convex.
+    ///
+    /// A pair is locally convex if the projection of B's unshared vertex onto A's plane
+    /// is below the plane (negative projection value within tolerance).
+    pub fn face_adjacency_convex(&self) -> Vec<bool> {
+        let projections = self.face_adjacency_projections();
+        // Use a small tolerance for numerical stability
+        let tolerance = 1e-8;
+        projections.par_iter().map(|p| *p < tolerance).collect()
+    }
+
+    /// Check if the mesh is convex.
+    ///
+    /// A mesh is convex if all adjacent face pairs are locally convex.
+    pub fn is_convex(&self) -> bool {
+        if self.faces.is_empty() {
+            return false;
+        }
+        self.face_adjacency_convex().par_iter().all(|&c| c)
+    }
+
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,
     /// or None if the mesh is empty or degenerate.
     pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
@@ -382,6 +569,30 @@ impl Trimesh {
         }
 
         Some((lower, upper))
+    }
+}
+
+impl From<crate::cleanup::CleanupResult> for Trimesh {
+    fn from(result: crate::cleanup::CleanupResult) -> Self {
+        Self {
+            vertices: result.vertices,
+            faces: result.faces,
+            attributes_vertex: result.attributes_vertex,
+            attributes_face: result.attributes_face,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<SimplifyResult> for Trimesh {
+    fn from(result: SimplifyResult) -> Self {
+        Self {
+            vertices: result.vertices,
+            faces: result.faces,
+            attributes_vertex: result.attributes_vertex,
+            attributes_face: result.attributes_face,
+            ..Default::default()
+        }
     }
 }
 
