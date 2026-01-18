@@ -72,7 +72,7 @@ def clean_name(name: str) -> str:
     return name.replace("crate::", "")
 
 
-def format_type(info: TypeInfo, classname: str | None = None) -> str:
+def format_type(info: TypeInfo, classname: str | None = None) -> str:  # noqa: C901
     if classname is not None:
         classname = clean_name(classname)
 

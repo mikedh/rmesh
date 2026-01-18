@@ -24,7 +24,8 @@ def compare(file_data: bytes, file_type: str):
 
     count = 1
     tri = timeit(
-        stmt="len(trimesh.load_mesh(file_obj=BytesIO(file_data), file_type=file_type).vertices)",
+        stmt="len(trimesh.load_mesh("
+        "file_obj=BytesIO(file_data), file_type=file_type).vertices)",
         setup="import trimesh; from io import BytesIO",
         number=count,
         globals={"file_data": file_data, "file_type": file_type},

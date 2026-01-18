@@ -26,4 +26,27 @@ features = ["pyo3/extension-module"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "ruff>=0.14.13",
+]
+
+
+[tool.ruff]
+target-version = "py311"
+line-length = 90
+
+[tool.ruff.lint]
+select = [
+    "B", # bugbear
+    "C", # comprehensions
+    "E", # style errors
+    "F", # flakes
+    "I", # import sorting
+    "RUF", # ruff specific rules
+    "UP", # upgrade
+    "W", # style warnings
+    "YTT", # sys.version
+    "ISC001",
+    "ISC002",
+    "NPY201",
+    "TID251"
 ]
