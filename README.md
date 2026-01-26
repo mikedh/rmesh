@@ -107,12 +107,12 @@ print(mesh.volume)  # Uses faster rmesh implementation
 
 - `mesh.process` -> `mesh.cleanup(tol_merge:int ...)
   - remove_degenerate, remove_infinite, etc all go into cleanup
+  - all values are passed in explicitly rather than using magic-constants
 - `mesh.apply_transform` returns a transformed copy, no in-place
 - `mesh.bounds`/ `mesh.extents` on empty meshes return None, not zeros
 - `mesh.density` -> `mesh.MassSettings` (override density + COM)
 - lists of structured stuff are on the mesh and flat:
   - `mesh.materials`
-  - `mesh.patch_primitives`
+  - `mesh.patches`
 - OBJ groups/smoothing/objects are face attributes not new meshes
   - can be used in like, `mesh.split_on`
-

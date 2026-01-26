@@ -9,6 +9,7 @@ pub mod mesh;
 pub mod path;
 pub mod resolvers;
 pub mod scene;
+pub mod serialize;
 pub mod simplify;
 pub mod subdivide;
 pub mod triangles;

@@ -1,3 +1,13 @@
+//! Mesh creation utilities
+//!
+//! This module provides utilities for creating and manipulating meshes:
+//! - Primitive creation (boxes, etc.)
+//! - Triangulation (earcut-based 2D/3D triangulation)
+//! - Plane fitting and projection
+//! - Feature-based CAD system
+
+pub mod feature;
+
 use anyhow::Result;
 use approx::relative_eq;
 use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, Transform3, Unit, Vector3};
@@ -184,6 +194,10 @@ pub fn triangulate_fan(exterior: &[usize]) -> Vec<[usize; 3]> {
         .map(|i| [exterior[0], exterior[i], exterior[i + 1]])
         .collect()
 }
+
+/// A plane defined by a normal vector and origin point.
+///
+/// Used for projecting 3D points to 2D and fitting planes to point clouds.
 pub struct Plane {
     pub normal: Vector3<f64>,
     pub origin: Point3<f64>,
