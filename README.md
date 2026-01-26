@@ -62,7 +62,46 @@ uv sync
 
 Then `cargo test` and `uv run pytest` work from anywhere in the workspace. The `uv sync` must happen first because `pyo3-build-config` (a dependency) builds before our code, and it needs `.venv/bin/python` to exist when it runs. If you are working entirely in the `crates/rmesh` in a rust-only project you shouldn't need UV.
 
+### Running Tests
 
+Run the trimesh test suite with rmesh compatibility comparison:
+```bash
+# Basic test run (uses trimesh base install)
+uv run --extra test pytest
+
+# Full test run with all trimesh optional dependencies
+uv run --extra test-compat pytest
+```
+
+The pytest configuration automatically enables `--rmesh-compat=compare` mode, which:
+- Monkey-patches `trimesh.Trimesh` to run both trimesh and rmesh for each property access
+- Compares results and logs timing differences
+- Generates `comparison.md` after each test run
+
+To regenerate `comparison.md`, simply run pytest:
+```bash
+uv run --extra test-compat pytest test/trimesh/tests/
+```
+
+### Compatibility Module
+
+The `rmesh._compatibility` module provides two modes for integrating rmesh with trimesh:
+
+**Compare mode** (for testing): Run both implementations, log timing/equality, return trimesh values.
+```python
+import rmesh._compatibility
+rmesh._compatibility.enable("compare")
+# Now trimesh.Trimesh properties run both and compare results
+```
+
+**Wrap mode** (for users): Return rmesh values when available, fallback to trimesh.
+```python
+import rmesh._compatibility
+rmesh._compatibility.enable("wrap")
+import trimesh
+mesh = trimesh.load("model.stl")
+print(mesh.volume)  # Uses faster rmesh implementation
+```
 
 ### Concious API Differences
 

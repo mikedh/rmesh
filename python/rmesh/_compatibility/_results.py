@@ -248,7 +248,7 @@ def generate_comparison_report() -> str:
     Returns:
         Markdown formatted report
     """
-    from .api_coverage import get_api_coverage
+    from ._coverage import get_api_coverage
 
     results = get_session_results()
     aggregated = results.aggregate_by_property()

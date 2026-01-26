@@ -18,10 +18,12 @@ dependencies = ["numpy>=2.0"]
 
 [project.optional-dependencies]
 test = ["pytest", "trimesh"]
+test-compat = ["pytest", "trimesh[all]"]
 
 [tool.maturin]
 manifest-path = "crates/rmesh_python/Cargo.toml"
 features = ["pyo3/extension-module"]
+python-source = "python"
 
 [dependency-groups]
 dev = [
@@ -31,7 +33,7 @@ dev = [
 
 
 [tool.pytest.ini_options]
-addopts = "-p compare.conftest --compare-rmesh"
+addopts = "-p rmesh._compatibility.conftest --rmesh-compat=compare"
 testpaths = ["test/trimesh/tests"]
 
 [tool.ruff]

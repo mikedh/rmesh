@@ -9,8 +9,9 @@ def get_api_coverage() -> dict:
     Returns:
         Dict with keys: both, rmesh_only, trimesh_only, coverage_pct
     """
-    import rmesh
     import trimesh
+
+    import rmesh
 
     # Create minimal instances
     t = trimesh.Trimesh(vertices=np.zeros((3, 3)), faces=np.array([[0, 1, 2]]))

@@ -2,16 +2,23 @@
 
 import pytest
 
-from .results import get_session_results, reset_session_results
+from ._results import get_session_results, reset_session_results
 
 
 def pytest_addoption(parser):
     """Add custom pytest options for comparison mode."""
     parser.addoption(
+        "--rmesh-compat",
+        choices=["compare", "wrap", "off"],
+        default="off",
+        help="Enable rmesh compatibility mode: compare, wrap, or off (default: off)",
+    )
+    # Deprecated alias for backward compatibility
+    parser.addoption(
         "--compare-rmesh",
         action="store_true",
         default=False,
-        help="Enable rmesh comparison mode: run tests with both trimesh and rmesh",
+        help="[Deprecated] Use --rmesh-compat=compare instead",
     )
     parser.addoption(
         "--comparison-output",
@@ -29,20 +36,29 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     """Configure pytest with comparison mode if enabled."""
-    if config.getoption("--compare-rmesh"):
+    # Check for new option first, then deprecated alias
+    compat_mode = config.getoption("--rmesh-compat")
+    if compat_mode == "off" and config.getoption("--compare-rmesh"):
+        compat_mode = "compare"
+
+    if compat_mode in ("compare", "wrap"):
         # Reset session results at the start
         reset_session_results()
 
-        # Monkey-patch trimesh.Trimesh properties to log comparisons
-        from .wrapper import patch_trimesh
+        # Monkey-patch trimesh.Trimesh properties
+        from ._wrapper import patch_trimesh
 
-        patch_trimesh()
+        patch_trimesh(mode=compat_mode)
 
 
 def pytest_sessionfinish(session, exitstatus):
     """Write comparison results at the end of the test session."""
-    if session.config.getoption("--compare-rmesh"):
-        from .results import save_results
+    compat_mode = session.config.getoption("--rmesh-compat")
+    if compat_mode == "off" and session.config.getoption("--compare-rmesh"):
+        compat_mode = "compare"
+
+    if compat_mode == "compare":
+        from ._results import save_results
 
         # Write markdown output
         output_file = session.config.getoption("--comparison-output")
