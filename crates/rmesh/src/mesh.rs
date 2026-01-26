@@ -60,6 +60,8 @@ pub struct Trimesh {
     cache_edges: OnceLock<Vec<[usize; 2]>>,
     cache_face_adjacency: OnceLock<Vec<(usize, usize)>>,
     cache_edges_unique: OnceLock<Vec<[usize; 2]>>,
+    cache_edges_sorted: OnceLock<Vec<[usize; 2]>>,
+    cache_edges_unique_inverse: OnceLock<Vec<usize>>,
     cache_mass_properties: OnceLock<MassProperties>,
     cache_topology: OnceLock<(bool, bool)>, // (is_watertight, is_winding_consistent)
 }
@@ -81,6 +83,8 @@ impl Default for Trimesh {
             cache_edges: OnceLock::new(),
             cache_face_adjacency: OnceLock::new(),
             cache_edges_unique: OnceLock::new(),
+            cache_edges_sorted: OnceLock::new(),
+            cache_edges_unique_inverse: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
             cache_topology: OnceLock::new(),
         }
@@ -105,6 +109,8 @@ impl Clone for Trimesh {
             cache_edges: OnceLock::new(),
             cache_face_adjacency: OnceLock::new(),
             cache_edges_unique: OnceLock::new(),
+            cache_edges_sorted: OnceLock::new(),
+            cache_edges_unique_inverse: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
             cache_topology: OnceLock::new(),
         }
@@ -363,6 +369,21 @@ impl Trimesh {
         self.mass_properties().inertia.as_ref()
     }
 
+    /// Get principal inertia components (eigenvalues of inertia tensor, sorted descending).
+    ///
+    /// Returns None if inertia tensor was not computed.
+    pub fn principal_inertia_components(&self) -> Option<Vector3<f64>> {
+        self.mass_properties().principal_inertia().map(|(v, _)| v)
+    }
+
+    /// Get principal inertia vectors (eigenvectors of inertia tensor as matrix columns).
+    ///
+    /// The columns correspond to the principal axes, ordered by eigenvalue (descending).
+    /// Returns None if inertia tensor was not computed.
+    pub fn principal_inertia_vectors(&self) -> Option<Matrix3<f64>> {
+        self.mass_properties().principal_inertia().map(|(_, m)| m)
+    }
+
     /// Get cached topology info: (is_watertight, is_winding_consistent).
     fn topology(&self) -> (bool, bool) {
         *self
@@ -394,22 +415,96 @@ impl Trimesh {
 
     /// Get unique edges (each undirected edge once, sorted as [min, max]).
     ///
-    /// Cached on first access.
+    /// Uses sort-based deduplication for cache efficiency. The order is deterministic
+    /// (lexicographically sorted by edge). Cached on first access.
     pub fn edges_unique(&self) -> &[[usize; 2]] {
         self.cache_edges_unique.get_or_init(|| {
-            use ahash::AHashSet;
-            let unique: AHashSet<[usize; 2]> = self
+            // Build sorted edges
+            let mut edges: Vec<[usize; 2]> = self
                 .faces
-                .iter()
-                .flat_map(|[i0, i1, i2]| {
+                .par_iter()
+                .flat_map(|&[i0, i1, i2]| {
                     [
-                        [(*i0).min(*i1), (*i0).max(*i1)],
-                        [(*i1).min(*i2), (*i1).max(*i2)],
-                        [(*i2).min(*i0), (*i2).max(*i0)],
+                        [i0.min(i1), i0.max(i1)],
+                        [i1.min(i2), i1.max(i2)],
+                        [i2.min(i0), i2.max(i0)],
                     ]
                 })
                 .collect();
-            unique.into_iter().collect()
+
+            // Sort for deduplication
+            edges.par_sort_unstable();
+
+            // Deduplicate (sequential but fast after sort)
+            edges.dedup();
+            edges
+        })
+    }
+
+    /// Get all edges with each pair sorted [min, max].
+    ///
+    /// Returns 3 edges per face, unlike `edges_unique` which deduplicates.
+    /// Cached on first access.
+    pub fn edges_sorted(&self) -> &[[usize; 2]] {
+        self.cache_edges_sorted.get_or_init(|| {
+            self.faces
+                .par_iter()
+                .flat_map(|&[i0, i1, i2]| {
+                    [
+                        [i0.min(i1), i0.max(i1)],
+                        [i1.min(i2), i1.max(i2)],
+                        [i2.min(i0), i2.max(i0)],
+                    ]
+                })
+                .collect()
+        })
+    }
+
+    /// Get the geometric length of each unique edge.
+    ///
+    /// Not cached - cheap to recompute and would be stale if vertices change.
+    pub fn edges_unique_length(&self) -> Vec<f64> {
+        self.edges_unique()
+            .par_iter()
+            .map(|&[i, j]| (self.vertices[j] - self.vertices[i]).norm())
+            .collect()
+    }
+
+    /// Get the inverse mapping from edges_sorted to edges_unique indices.
+    ///
+    /// For each edge in edges_sorted, returns the index of that edge in edges_unique.
+    /// Cached on first access.
+    pub fn edges_unique_inverse(&self) -> &[usize] {
+        self.cache_edges_unique_inverse.get_or_init(|| {
+            let edges_unique = self.edges_unique();
+
+            // Build edges with original positions
+            let mut edges_with_pos: Vec<([usize; 2], usize)> = self
+                .faces
+                .par_iter()
+                .enumerate()
+                .flat_map_iter(|(face_idx, &[i0, i1, i2])| {
+                    let base = face_idx * 3;
+                    [
+                        ([i0.min(i1), i0.max(i1)], base),
+                        ([i1.min(i2), i1.max(i2)], base + 1),
+                        ([i2.min(i0), i2.max(i0)], base + 2),
+                    ]
+                })
+                .collect();
+
+            // Parallel sort by edge
+            edges_with_pos.par_sort_unstable_by_key(|(e, _)| *e);
+
+            // Binary search into edges_unique to find the actual index
+            let mut inverse = vec![0usize; edges_with_pos.len()];
+            for (edge, original_pos) in edges_with_pos {
+                // Binary search since edges_unique is sorted
+                // Use unwrap_or(0) to avoid panic - edge should always exist
+                let unique_idx = edges_unique.binary_search(&edge).unwrap_or(0);
+                inverse[original_pos] = unique_idx;
+            }
+            inverse
         })
     }
 

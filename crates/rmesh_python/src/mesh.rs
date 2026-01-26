@@ -7,10 +7,309 @@ use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use rmesh::attributes::{Attributes, Material};
+use rmesh::attributes::{Attributes, GroupingKind, Material};
 use rmesh::exchange::{FileResolver, InMemoryResolver, MeshFormat, load_mesh};
 use rmesh::mesh::Trimesh;
 use rmesh::resolvers::Resolver;
+
+// ============================================================================
+// Attribute Classes
+// ============================================================================
+
+/// A single grouping (e.g., material, group, smoothing) for faces.
+#[pyclass(name = "Grouping")]
+pub struct PyGrouping {
+    kind: String,
+    names: Py<pyo3::types::PyList>,
+    indices: Py<PyArray1<i64>>,
+}
+
+#[pymethods]
+impl PyGrouping {
+    /// The kind of grouping: "material", "group", "smoothing", "object", or "unspecified".
+    #[getter]
+    fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// List of unique names in this grouping.
+    #[getter]
+    fn names(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.names.clone_ref(py)
+    }
+
+    /// Per-face index into names, shape (n_faces,). Value of -1 means no assignment.
+    #[getter]
+    fn indices(&self, py: Python<'_>) -> Py<PyArray1<i64>> {
+        self.indices.clone_ref(py)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let names = self.names.bind(py);
+        format!(
+            "Grouping(kind='{}', names={}, n_faces={})",
+            self.kind,
+            names.len(),
+            self.indices.bind(py).len()
+        )
+    }
+}
+
+impl PyGrouping {
+    fn from_grouping(grouping: &rmesh::attributes::Grouping, py: Python<'_>) -> Self {
+        let kind = match grouping.kind {
+            GroupingKind::Material => "material",
+            GroupingKind::Group => "group",
+            GroupingKind::Smoothing => "smoothing",
+            GroupingKind::Object => "object",
+            GroupingKind::Unspecified => "unspecified",
+        };
+        let names = pyo3::types::PyList::new(py, &grouping.names).unwrap().unbind();
+        let indices: Vec<i64> = grouping.indices.iter().map(|&i| i as i64).collect();
+        let indices_arr = PyArray1::from_vec(py, indices);
+        make_readonly(&indices_arr);
+        Self {
+            kind: kind.to_string(),
+            names,
+            indices: indices_arr.unbind(),
+        }
+    }
+}
+
+/// Collection of groupings accessible by kind.
+#[pyclass(name = "GroupingCollection")]
+pub struct PyGroupingCollection {
+    groupings: Vec<Py<PyGrouping>>,
+}
+
+#[pymethods]
+impl PyGroupingCollection {
+    /// Get grouping by material if present.
+    #[getter]
+    fn material(&self, py: Python<'_>) -> Option<Py<PyGrouping>> {
+        self.find_by_kind(py, "material")
+    }
+
+    /// Get grouping by group if present.
+    #[getter]
+    fn group(&self, py: Python<'_>) -> Option<Py<PyGrouping>> {
+        self.find_by_kind(py, "group")
+    }
+
+    /// Get grouping by smoothing if present.
+    #[getter]
+    fn smoothing(&self, py: Python<'_>) -> Option<Py<PyGrouping>> {
+        self.find_by_kind(py, "smoothing")
+    }
+
+    /// Get grouping by object if present.
+    #[getter]
+    fn object(&self, py: Python<'_>) -> Option<Py<PyGrouping>> {
+        self.find_by_kind(py, "object")
+    }
+
+    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyGrouping>> {
+        self.find_by_kind(py, key)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("No grouping '{}'", key)))
+    }
+
+    fn __contains__(&self, py: Python<'_>, key: &str) -> bool {
+        self.find_by_kind(py, key).is_some()
+    }
+
+    fn __len__(&self) -> usize {
+        self.groupings.len()
+    }
+
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyGroupingIterator>> {
+        let cloned: Vec<Py<PyGrouping>> =
+            self.groupings.iter().map(|g| g.clone_ref(py)).collect();
+        Py::new(
+            py,
+            PyGroupingIterator {
+                groupings: cloned,
+                index: 0,
+            },
+        )
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let kinds: Vec<String> = self
+            .groupings
+            .iter()
+            .map(|g| g.borrow(py).kind.clone())
+            .collect();
+        format!("GroupingCollection([{}])", kinds.join(", "))
+    }
+
+    /// List all available grouping kinds.
+    fn keys(&self, py: Python<'_>) -> Vec<String> {
+        self.groupings
+            .iter()
+            .map(|g| g.borrow(py).kind.clone())
+            .collect()
+    }
+}
+
+impl PyGroupingCollection {
+    fn find_by_kind(&self, py: Python<'_>, kind: &str) -> Option<Py<PyGrouping>> {
+        self.groupings
+            .iter()
+            .find(|g| g.borrow(py).kind == kind)
+            .map(|g| g.clone_ref(py))
+    }
+}
+
+#[pyclass]
+struct PyGroupingIterator {
+    groupings: Vec<Py<PyGrouping>>,
+    index: usize,
+}
+
+#[pymethods]
+impl PyGroupingIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> Option<Py<PyGrouping>> {
+        if self.index < self.groupings.len() {
+            let item = self.groupings[self.index].clone_ref(py);
+            self.index += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+
+/// Access to vertex attribute arrays (uv, normals, colors).
+#[pyclass(name = "VertexAttributes")]
+pub struct PyVertexAttributes {
+    uv: Py<pyo3::types::PyList>,
+    normals: Py<pyo3::types::PyList>,
+    colors: Py<pyo3::types::PyList>,
+}
+
+#[pymethods]
+impl PyVertexAttributes {
+    /// List of UV coordinate arrays, each shape (n_vertices, 2).
+    #[getter]
+    fn uv(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.uv.clone_ref(py)
+    }
+
+    /// List of normal arrays, each shape (n_vertices, 3).
+    #[getter]
+    fn normals(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.normals.clone_ref(py)
+    }
+
+    /// List of color arrays, each shape (n_vertices, 4) as RGBA u8.
+    #[getter]
+    fn colors(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.colors.clone_ref(py)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> String {
+        format!(
+            "VertexAttributes(uv={}, normals={}, colors={})",
+            self.uv.bind(py).len(),
+            self.normals.bind(py).len(),
+            self.colors.bind(py).len()
+        )
+    }
+}
+
+/// Access to face attribute arrays (uv, normals, colors) and groupings.
+#[pyclass(name = "FaceAttributes")]
+pub struct PyFaceAttributes {
+    uv: Py<pyo3::types::PyList>,
+    normals: Py<pyo3::types::PyList>,
+    colors: Py<pyo3::types::PyList>,
+    groupings: Py<PyGroupingCollection>,
+}
+
+#[pymethods]
+impl PyFaceAttributes {
+    /// List of UV coordinate arrays, each shape (n_faces, 2).
+    #[getter]
+    fn uv(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.uv.clone_ref(py)
+    }
+
+    /// List of normal arrays, each shape (n_faces, 3).
+    #[getter]
+    fn normals(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.normals.clone_ref(py)
+    }
+
+    /// List of color arrays, each shape (n_faces, 4) as RGBA u8.
+    #[getter]
+    fn colors(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.colors.clone_ref(py)
+    }
+
+    /// Collection of groupings (material, group, smoothing, object).
+    #[getter]
+    fn groupings(&self, py: Python<'_>) -> Py<PyGroupingCollection> {
+        self.groupings.clone_ref(py)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let gc = self.groupings.borrow(py);
+        format!(
+            "FaceAttributes(uv={}, normals={}, colors={}, groupings={})",
+            self.uv.bind(py).len(),
+            self.normals.bind(py).len(),
+            self.colors.bind(py).len(),
+            gc.groupings.len()
+        )
+    }
+}
+
+/// Helper to create array lists from attribute vectors
+fn create_uv_list(py: Python<'_>, uv_sets: &[rmesh::attributes::UV]) -> Py<pyo3::types::PyList> {
+    let list = pyo3::types::PyList::empty(py);
+    for uv in uv_sets {
+        let flat: Vec<f64> = uv.iter().flat_map(|v| [v.x, v.y]).collect();
+        let nd = Array2::from_shape_vec((uv.len(), 2), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        list.append(arr).unwrap();
+    }
+    list.unbind()
+}
+
+fn create_normals_list(
+    py: Python<'_>,
+    normal_sets: &[rmesh::attributes::Normal],
+) -> Py<pyo3::types::PyList> {
+    let list = pyo3::types::PyList::empty(py);
+    for normals in normal_sets {
+        let flat: Vec<f64> = normals.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
+        let nd = Array2::from_shape_vec((normals.len(), 3), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        list.append(arr).unwrap();
+    }
+    list.unbind()
+}
+
+fn create_colors_list(
+    py: Python<'_>,
+    color_sets: &[rmesh::attributes::Color],
+) -> Py<pyo3::types::PyList> {
+    let list = pyo3::types::PyList::empty(py);
+    for colors in color_sets {
+        let flat: Vec<u8> = colors.iter().flat_map(|v| [v.x, v.y, v.z, v.w]).collect();
+        let nd = Array2::from_shape_vec((colors.len(), 4), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        list.append(arr).unwrap();
+    }
+    list.unbind()
+}
 
 // ============================================================================
 // Helpers
@@ -74,6 +373,8 @@ pub struct PyTrimesh {
     edges_cache: OnceCell<Py<PyArray2<i64>>>,
     face_adjacency_cache: OnceCell<Py<PyArray2<i64>>>,
     face_adjacency_angles_cache: OnceCell<Py<PyArray1<f64>>>,
+    vertex_attributes_cache: OnceCell<Py<PyVertexAttributes>>,
+    face_attributes_cache: OnceCell<Py<PyFaceAttributes>>,
 }
 
 impl PyTrimesh {
@@ -89,6 +390,8 @@ impl PyTrimesh {
             edges_cache: OnceCell::new(),
             face_adjacency_cache: OnceCell::new(),
             face_adjacency_angles_cache: OnceCell::new(),
+            vertex_attributes_cache: OnceCell::new(),
+            face_attributes_cache: OnceCell::new(),
         }
     }
 }
@@ -166,6 +469,51 @@ impl PyTrimesh {
             self.data.attributes_face.colors.first(),
             4
         )
+    }
+
+    /// Full access to vertex attributes (multiple UV sets, normals, colors).
+    #[getter]
+    fn vertex_attributes(&self, py: Python<'_>) -> Py<PyVertexAttributes> {
+        self.vertex_attributes_cache
+            .get_or_init(|| {
+                Py::new(
+                    py,
+                    PyVertexAttributes {
+                        uv: create_uv_list(py, &self.data.attributes_vertex.uv),
+                        normals: create_normals_list(py, &self.data.attributes_vertex.normals),
+                        colors: create_colors_list(py, &self.data.attributes_vertex.colors),
+                    },
+                )
+                .unwrap()
+            })
+            .clone_ref(py)
+    }
+
+    /// Full access to face attributes (multiple UV sets, normals, colors, groupings).
+    #[getter]
+    fn face_attributes(&self, py: Python<'_>) -> Py<PyFaceAttributes> {
+        self.face_attributes_cache
+            .get_or_init(|| {
+                let groupings: Vec<Py<PyGrouping>> = self
+                    .data
+                    .attributes_face
+                    .groupings
+                    .iter()
+                    .map(|g| Py::new(py, PyGrouping::from_grouping(g, py)).unwrap())
+                    .collect();
+                let gc = Py::new(py, PyGroupingCollection { groupings }).unwrap();
+                Py::new(
+                    py,
+                    PyFaceAttributes {
+                        uv: create_uv_list(py, &self.data.attributes_face.uv),
+                        normals: create_normals_list(py, &self.data.attributes_face.normals),
+                        colors: create_colors_list(py, &self.data.attributes_face.colors),
+                        groupings: gc,
+                    },
+                )
+                .unwrap()
+            })
+            .clone_ref(py)
     }
 
     #[getter]
@@ -284,6 +632,71 @@ impl PyTrimesh {
         let arr = PyArray2::from_array(py, &nd);
         make_readonly(&arr);
         arr.unbind()
+    }
+
+    /// All edges with each pair sorted [min, max], shape (n_faces * 3, 2).
+    #[getter]
+    fn edges_sorted(&self, py: Python<'_>) -> Py<PyArray2<i64>> {
+        let edges = self.data.edges_sorted();
+        let flat: Vec<i64> = edges
+            .iter()
+            .flat_map(|e| [e[0] as i64, e[1] as i64])
+            .collect();
+        let nd = Array2::from_shape_vec((edges.len(), 2), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Geometric length of each unique edge, shape (n_edges_unique,).
+    #[getter]
+    fn edges_unique_length(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
+        let lengths = self.data.edges_unique_length();
+        let arr = PyArray1::from_vec(py, lengths);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Index mapping: edges_sorted[i] -> edges_unique index, shape (n_faces * 3,).
+    #[getter]
+    fn edges_unique_inverse(&self, py: Python<'_>) -> Py<PyArray1<i64>> {
+        let inverse = self.data.edges_unique_inverse();
+        let flat: Vec<i64> = inverse.iter().map(|&i| i as i64).collect();
+        let arr = PyArray1::from_vec(py, flat);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Principal inertia components (eigenvalues of inertia tensor, sorted descending).
+    #[getter]
+    fn principal_inertia_components(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        self.data.principal_inertia_components().map(|v| {
+            let arr = PyArray1::from_vec(py, vec![v.x, v.y, v.z]);
+            make_readonly(&arr);
+            arr.unbind()
+        })
+    }
+
+    /// Principal inertia vectors (eigenvectors as matrix columns), shape (3, 3).
+    #[getter]
+    fn principal_inertia_vectors(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data.principal_inertia_vectors().map(|m| {
+            let flat: Vec<f64> = vec![
+                m[(0, 0)],
+                m[(0, 1)],
+                m[(0, 2)],
+                m[(1, 0)],
+                m[(1, 1)],
+                m[(1, 2)],
+                m[(2, 0)],
+                m[(2, 1)],
+                m[(2, 2)],
+            ];
+            let nd = Array2::from_shape_vec((3, 3), flat).unwrap();
+            let arr = PyArray2::from_array(py, &nd);
+            make_readonly(&arr);
+            arr.unbind()
+        })
     }
 
     #[getter]

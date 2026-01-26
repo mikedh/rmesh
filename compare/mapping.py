@@ -130,12 +130,20 @@ API_MAPPING: dict[str, APIMapping] = {
     "triangles_center": APIMapping(
         "triangles_center", is_property=True, rmesh_implemented=True
     ),
-    # Not yet implemented
+    # Principal inertia (eigenvalues/eigenvectors of inertia tensor)
     "principal_inertia_components": APIMapping(
-        "principal_inertia_components", is_property=True, rmesh_implemented=False
+        "principal_inertia_components", is_property=True, rmesh_implemented=True
     ),
     "principal_inertia_vectors": APIMapping(
-        "principal_inertia_vectors", is_property=True, rmesh_implemented=False
+        "principal_inertia_vectors", is_property=True, rmesh_implemented=True
+    ),
+    # Edge properties
+    "edges_sorted": APIMapping("edges_sorted", is_property=True, rmesh_implemented=True),
+    "edges_unique_length": APIMapping(
+        "edges_unique_length", is_property=True, rmesh_implemented=True
+    ),
+    "edges_unique_inverse": APIMapping(
+        "edges_unique_inverse", is_property=True, rmesh_implemented=True
     ),
 }
 
@@ -152,6 +160,9 @@ RMESH_PYTHON_EXPOSED = {
     "face_normals",
     "edges",
     "edges_unique",
+    "edges_sorted",
+    "edges_unique_length",
+    "edges_unique_inverse",
     "bounds",
     "extents",
     "area",
@@ -165,6 +176,8 @@ RMESH_PYTHON_EXPOSED = {
     "mass",
     "center_mass",
     "moment_inertia",
+    "principal_inertia_components",
+    "principal_inertia_vectors",
     # Topology
     "is_watertight",
     "is_winding_consistent",
@@ -180,9 +193,6 @@ RMESH_PYTHON_EXPOSED = {
 }
 
 RMESH_NOT_IMPLEMENTED = {
-    "principal_inertia_components",
-    "principal_inertia_vectors",
-    "edges_sorted",
     "face_adjacency_edges",
     "split",
     "merge_vertices",

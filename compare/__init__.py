@@ -6,37 +6,39 @@ reports.
 
 Example usage:
 
-    # Direct usage
-    from compare import TrimeshComparison
-
-    mesh = TrimeshComparison.from_file("model.stl")
-    print(mesh.volume)          # Compares both, returns trimesh result
-    print(mesh.is_watertight)   # Compares both
-    print(mesh.get_results_table())  # Show comparison table
-
-    # Via pytest
+    # Via pytest (recommended)
     pytest --compare-rmesh test/trimesh/tests/test_inertia.py
-    # -> Generates comparison_results.md
+    # -> Generates comparison.md
+
+    # Programmatic patching
+    from compare import patch_trimesh
+    patch_trimesh()  # Now trimesh.Trimesh properties log rmesh comparisons
+
+    import trimesh
+    mesh = trimesh.load("model.stl")
+    print(mesh.volume)  # Compares both, returns trimesh result
 """
 
-from .comparison import ComparisonResult, arrays_equal, values_equal
 from .mapping import API_MAPPING, get_mapping, is_comparable
 from .results import (
+    ComparisonResult,
     TestSessionResults,
+    arrays_equal,
     get_session_results,
     reset_session_results,
+    values_equal,
 )
-from .wrapper import TrimeshComparison
+from .wrapper import patch_trimesh
 
 __all__ = [
     "API_MAPPING",
     "ComparisonResult",
     "TestSessionResults",
-    "TrimeshComparison",
     "arrays_equal",
     "get_mapping",
     "get_session_results",
     "is_comparable",
+    "patch_trimesh",
     "reset_session_results",
     "values_equal",
 ]

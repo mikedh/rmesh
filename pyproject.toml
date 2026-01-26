@@ -30,6 +30,10 @@ dev = [
 ]
 
 
+[tool.pytest.ini_options]
+addopts = "-p compare.conftest --compare-rmesh"
+testpaths = ["test/trimesh/tests"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 90

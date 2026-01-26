@@ -1,292 +1,138 @@
-"""TrimeshComparison wrapper class that compares trimesh and rmesh implementations."""
+"""Monkey-patch trimesh.Trimesh to compare with rmesh implementations."""
 
-import time
-from pathlib import Path
-from typing import Any
+import functools
+import timeit
 
 import numpy as np
 
-from .comparison import ComparisonResult, values_equal
 from .mapping import API_MAPPING, get_mapping
-from .results import get_session_results
+from .results import ComparisonResult, get_session_results, values_equal
+
+# Track whether we've already patched
+_patched = False
 
 
-class TrimeshComparison:
-    """Wrapper that runs both trimesh and rmesh, compares results.
+def patch_trimesh():
+    """Monkey-patch trimesh.Trimesh to add comparison behavior.
 
-    Always returns trimesh results to maintain compatibility with existing tests.
-    Logs comparison results for analysis.
+    This patches property getters to also call rmesh and log comparisons.
+    The trimesh behavior is unchanged - we just add logging.
     """
+    global _patched
+    if _patched:
+        return
 
-    def __init__(
-        self,
-        trimesh_mesh: Any,
-        rmesh_mesh: Any = None,
-        source_path: str | None = None,
-    ):
-        """Initialize with trimesh and optionally rmesh mesh objects.
+    import trimesh
 
-        Args:
-            trimesh_mesh: The trimesh.Trimesh object
-            rmesh_mesh: The rmesh.Trimesh object (optional)
-            source_path: Path the mesh was loaded from (for logging)
-        """
-        self._trimesh = trimesh_mesh
-        self._rmesh = rmesh_mesh
-        self._source_path = source_path
-        self._results: list[ComparisonResult] = []
+    # Store original property getters
+    _originals = {}
 
-    @classmethod
-    def from_file(cls, path: str | Path, **kwargs) -> "TrimeshComparison":
-        """Load a mesh from file using both trimesh and rmesh.
+    for name in API_MAPPING:
+        if hasattr(trimesh.Trimesh, name):
+            _originals[name] = getattr(trimesh.Trimesh, name)
 
-        Args:
-            path: Path to mesh file
-            **kwargs: Additional arguments passed to trimesh.load
+    def make_comparing_property(name: str, original):
+        """Create a property that compares trimesh and rmesh."""
 
-        Returns:
-            TrimeshComparison wrapping both meshes
-        """
-        # Import the original load function to avoid recursion
-        # when conftest patches trimesh.load
-        import trimesh
-        from trimesh.exchange.load import load_mesh as trimesh_load_mesh
+        @functools.wraps(original.fget if isinstance(original, property) else original)
+        def comparing_getter(self):
+            # Get trimesh value with timing
+            try:
+                if isinstance(original, property):
+                    timer = timeit.Timer(lambda: original.fget(self))
+                else:
+                    timer = timeit.Timer(lambda: original(self))
+                times = timer.repeat(repeat=3, number=1)
+                trimesh_time = min(times)
+                trimesh_value = original.fget(self) if isinstance(original, property) else original(self)
+            except Exception:
+                return original.fget(self) if isinstance(original, property) else original(self)
 
-        path = Path(path)
-        path_str = str(path)
+            # Try to get rmesh value
+            mapping = get_mapping(name)
+            if mapping is None or not mapping.rmesh_implemented:
+                return trimesh_value
 
-        # Load with trimesh using internal loader
-        trimesh_mesh = trimesh_load_mesh(path_str, **kwargs)
+            rmesh_value = None
+            rmesh_time = 0.0
+            error = None
 
-        # Handle Scene objects - get first geometry
-        if hasattr(trimesh_mesh, "geometry"):
-            if len(trimesh_mesh.geometry) > 0:
-                trimesh_mesh = next(iter(trimesh_mesh.geometry.values()))
-            else:
-                trimesh_mesh = trimesh.Trimesh()
+            # Get or create rmesh mesh from cache
+            rmesh_mesh = getattr(self, '_rmesh_cache', None)
+            if rmesh_mesh is None and not getattr(self, '_rmesh_failed', False):
+                try:
+                    import rmesh
+                    # Use _originals to avoid recursion when getting vertices/faces
+                    verts_prop = _originals.get('vertices')
+                    faces_prop = _originals.get('faces')
+                    if verts_prop and faces_prop:
+                        verts = verts_prop.fget(self) if isinstance(verts_prop, property) else verts_prop(self)
+                        faces = faces_prop.fget(self) if isinstance(faces_prop, property) else faces_prop(self)
+                        rmesh_mesh = rmesh.Trimesh(
+                            np.asarray(verts, dtype=np.float64),
+                            np.asarray(faces, dtype=np.int64),
+                        )
+                        # Cache it
+                        object.__setattr__(self, '_rmesh_cache', rmesh_mesh)
+                except Exception as e:
+                    object.__setattr__(self, '_rmesh_failed', True)
+                    error = str(e)
 
-        # Try to load with rmesh
-        rmesh_mesh = None
-        try:
-            import rmesh
+            if rmesh_mesh is not None:
+                try:
+                    rmesh_name = mapping.rmesh_name
+                    attr = getattr(rmesh_mesh, rmesh_name)
+                    is_callable = callable(attr) and not mapping.is_property
 
-            rmesh_mesh = rmesh.load_mesh(path_str)
-            # Apply cleanup to match trimesh's default vertex merging behavior
-            rmesh_mesh = rmesh_mesh.cleanup(merge_vertices=8)
-        except Exception:
-            # Log but don't fail - we can still return trimesh results
-            pass
+                    if is_callable:
+                        timer = timeit.Timer(lambda: attr())
+                    else:
+                        timer = timeit.Timer(lambda: getattr(rmesh_mesh, rmesh_name))
 
-        return cls(trimesh_mesh, rmesh_mesh, path_str)
+                    times = timer.repeat(repeat=3, number=1)
+                    rmesh_time = min(times)
+                    rmesh_value = attr() if is_callable else attr
 
-    @classmethod
-    def from_arrays(
-        cls,
-        vertices: np.ndarray,
-        faces: np.ndarray,
-        **kwargs,
-    ) -> "TrimeshComparison":
-        """Create from vertex and face arrays using both libraries.
+                    if mapping.converter and rmesh_value is not None:
+                        rmesh_value = mapping.converter(rmesh_value)
+                except Exception as e:
+                    error = str(e)
 
-        Args:
-            vertices: (n, 3) array of vertex positions
-            faces: (m, 3) array of face indices
-            **kwargs: Additional arguments passed to trimesh.Trimesh
+            # Compare and log
+            identical = None
+            if error is None and rmesh_value is not None:
+                try:
+                    compare_trimesh = trimesh_value
+                    if mapping.trimesh_converter and trimesh_value is not None:
+                        compare_trimesh = mapping.trimesh_converter(trimesh_value)
+                    identical = values_equal(compare_trimesh, rmesh_value)
+                except Exception as e:
+                    error = f"Comparison failed: {e}"
 
-        Returns:
-            TrimeshComparison wrapping both meshes
-        """
-        import trimesh
+            if rmesh_mesh is not None or error:
+                result = ComparisonResult(
+                    name=name,
+                    trimesh_value=trimesh_value,
+                    rmesh_value=rmesh_value,
+                    trimesh_time=trimesh_time,
+                    rmesh_time=rmesh_time,
+                    identical=identical,
+                    error=error,
+                    rmesh_implemented=mapping.rmesh_implemented and error is None,
+                )
+                get_session_results().add_result(result)
 
-        # Create with trimesh
-        trimesh_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, **kwargs)
-
-        # Try to create with rmesh
-        rmesh_mesh = None
-        try:
-            import rmesh
-
-            rmesh_mesh = rmesh.Trimesh(
-                np.asarray(vertices, dtype=np.float64),
-                np.asarray(faces, dtype=np.int64),
-            )
-        except Exception:
-            pass
-
-        return cls(trimesh_mesh, rmesh_mesh, source_path="from_arrays")
-
-    def _get_trimesh_value(self, name: str) -> tuple[Any, float]:
-        """Get a value from trimesh and measure time.
-
-        Returns:
-            (value, time_seconds)
-        """
-        start = time.perf_counter()
-        try:
-            attr = getattr(self._trimesh, name)
-            if callable(attr):
-                value = attr()
-            else:
-                value = attr
-        except Exception:
-            return None, 0.0
-        elapsed = time.perf_counter() - start
-        return value, elapsed
-
-    def _get_rmesh_value(self, name: str, mapping) -> tuple[Any, float, str | None]:
-        """Get a value from rmesh and measure time.
-
-        Returns:
-            (value, time_seconds, error_message)
-        """
-        if self._rmesh is None:
-            return None, 0.0, "rmesh not loaded"
-
-        if not mapping.rmesh_implemented:
-            return None, 0.0, "Not exposed to Python"
-
-        rmesh_name = mapping.rmesh_name
-        start = time.perf_counter()
-        try:
-            attr = getattr(self._rmesh, rmesh_name)
-            if callable(attr) and not mapping.is_property:
-                value = attr()
-            else:
-                value = attr
-
-            # Apply converter if specified
-            if mapping.converter and value is not None:
-                value = mapping.converter(value)
-
-        except AttributeError:
-            return None, 0.0, f"rmesh has no attribute '{rmesh_name}'"
-        except Exception as e:
-            return None, 0.0, str(e)
-
-        elapsed = time.perf_counter() - start
-        return value, elapsed, None
-
-    def _compare_and_log(self, name: str) -> Any:
-        """Compare trimesh and rmesh values, log result, return trimesh value."""
-        mapping = get_mapping(name)
-
-        # Get trimesh value (always)
-        trimesh_value, trimesh_time = self._get_trimesh_value(name)
-
-        # If no mapping, just return trimesh value
-        if mapping is None:
             return trimesh_value
 
-        # Get rmesh value
-        rmesh_value, rmesh_time, error = self._get_rmesh_value(name, mapping)
+        if isinstance(original, property):
+            return property(comparing_getter, original.fset, original.fdel, original.__doc__)
+        return comparing_getter
 
-        # Compare values (apply converters for comparison only)
-        identical = None
-        if error is None and rmesh_value is not None:
-            try:
-                # Apply trimesh converter if specified (for comparison only)
-                compare_trimesh = trimesh_value
-                if mapping.trimesh_converter and trimesh_value is not None:
-                    compare_trimesh = mapping.trimesh_converter(trimesh_value)
-                identical = values_equal(compare_trimesh, rmesh_value)
-            except Exception as e:
-                error = f"Comparison failed: {e}"
+    # Patch each mapped property
+    for name, original in _originals.items():
+        try:
+            setattr(trimesh.Trimesh, name, make_comparing_property(name, original))
+        except Exception:
+            pass  # Some attributes can't be patched, that's ok
 
-        # Only record result if rmesh actually loaded (skip when rmesh failed)
-        if self._rmesh is not None:
-            result = ComparisonResult(
-                name=name,
-                trimesh_value=trimesh_value,
-                rmesh_value=rmesh_value,
-                trimesh_time=trimesh_time,
-                rmesh_time=rmesh_time,
-                identical=identical,
-                error=error,
-                rmesh_implemented=mapping.rmesh_implemented and error is None,
-            )
-            self._results.append(result)
-            get_session_results().add_result(result)
-
-        return trimesh_value
-
-    def __getattr__(self, name: str) -> Any:
-        """Intercept attribute access to compare implementations.
-
-        This is called when an attribute is not found on the wrapper itself.
-        """
-        # Check if this is a comparable property
-        if name in API_MAPPING:
-            return self._compare_and_log(name)
-
-        # Otherwise, just forward to trimesh
-        attr = getattr(self._trimesh, name)
-
-        # If it's a method, wrap it to return wrapper for chaining
-        if callable(attr):
-
-            def wrapper(*args, **kwargs):
-                result = attr(*args, **kwargs)
-                # If result is a Trimesh, wrap it
-                if hasattr(result, "vertices") and hasattr(result, "faces"):
-                    return TrimeshComparison(result, None, self._source_path)
-                return result
-
-            return wrapper
-
-        return attr
-
-    def get_results(self) -> list[ComparisonResult]:
-        """Get all comparison results for this mesh."""
-        return self._results.copy()
-
-    def get_results_table(self) -> str:
-        """Format results as a markdown table."""
-        if not self._results:
-            return "No comparison results yet."
-
-        lines = [
-            "| Property | trimesh (s) | rmesh (s) | Speedup | Identical? |",
-            "|----------|-------------|-----------|---------|------------|",
-        ]
-
-        for result in self._results:
-            row = result.to_row()
-            lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} |")
-
-        return "\n".join(lines)
-
-    # Properties that should be directly forwarded without comparison
-    @property
-    def visual(self):
-        """Forward visual property directly."""
-        return self._trimesh.visual
-
-    @visual.setter
-    def visual(self, value):
-        """Forward visual setter directly."""
-        self._trimesh.visual = value
-
-    @property
-    def metadata(self):
-        """Forward metadata property directly."""
-        return self._trimesh.metadata
-
-    @metadata.setter
-    def metadata(self, value):
-        """Forward metadata setter directly."""
-        self._trimesh.metadata = value
-
-    # Make wrapper work like the underlying trimesh object
-    def __len__(self):
-        return len(self._trimesh.faces)
-
-    def __repr__(self):
-        return f"TrimeshComparison({self._trimesh!r})"
-
-    def copy(self):
-        """Create a copy of the wrapper."""
-        return TrimeshComparison(
-            self._trimesh.copy(),
-            None,  # Don't copy rmesh for now
-            self._source_path,
-        )
+    _patched = True

@@ -3,7 +3,7 @@
 //! Implements the polyhedral mass properties algorithm from:
 //! http://www.geometrictools.com/Documentation/PolyhedralMassProperties.pdf
 
-use nalgebra::{Matrix3, Point3, Vector3};
+use nalgebra::{Matrix3, Point3, SymmetricEigen, Vector3};
 use rayon::prelude::*;
 
 /// Mass properties computed from a closed triangle mesh.
@@ -25,6 +25,38 @@ impl Default for MassProperties {
             center_mass: Vector3::zeros(),
             inertia: None,
         }
+    }
+}
+
+impl MassProperties {
+    /// Compute principal inertia components (eigenvalues) and vectors (eigenvectors).
+    ///
+    /// Returns (eigenvalues sorted descending, eigenvectors as columns of matrix).
+    /// The eigenvectors form an orthonormal basis aligned with the principal axes.
+    pub fn principal_inertia(&self) -> Option<(Vector3<f64>, Matrix3<f64>)> {
+        let inertia = self.inertia.as_ref()?;
+        let eigen = SymmetricEigen::new(*inertia);
+
+        // Sort eigenvalues descending, reorder eigenvectors to match
+        let mut indices: Vec<usize> = (0..3).collect();
+        indices.sort_by(|&a, &b| {
+            eigen.eigenvalues[b]
+                .partial_cmp(&eigen.eigenvalues[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let values = Vector3::new(
+            eigen.eigenvalues[indices[0]],
+            eigen.eigenvalues[indices[1]],
+            eigen.eigenvalues[indices[2]],
+        );
+        let vectors = Matrix3::from_columns(&[
+            eigen.eigenvectors.column(indices[0]).clone_owned(),
+            eigen.eigenvectors.column(indices[1]).clone_owned(),
+            eigen.eigenvectors.column(indices[2]).clone_owned(),
+        ]);
+
+        Some((values, vectors))
     }
 }
 
