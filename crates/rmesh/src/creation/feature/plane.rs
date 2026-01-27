@@ -15,14 +15,17 @@ pub struct SketchPlane {
     /// Origin point of the plane (where local (0,0) maps to)
     pub origin: Point3<f64>,
     /// Orientation as a unit quaternion (defines the plane's local X, Y axes)
-    #[serde(with = "quaternion_serde")]
+    #[serde(with = "crate::serialize::unit_quaternion")]
     pub orientation: UnitQuaternion<f64>,
 }
 
 impl SketchPlane {
     /// Create a new plane from origin and orientation
     pub fn new(origin: Point3<f64>, orientation: UnitQuaternion<f64>) -> Self {
-        Self { origin, orientation }
+        Self {
+            origin,
+            orientation,
+        }
     }
 
     /// The XY plane (Z=0, normal pointing +Z)
@@ -83,7 +86,10 @@ impl SketchPlane {
         if normal.dot(&Vector3::z()) < -0.9999 {
             return Self {
                 origin,
-                orientation: UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::PI),
+                orientation: UnitQuaternion::from_axis_angle(
+                    &Vector3::x_axis(),
+                    std::f64::consts::PI,
+                ),
             };
         }
 
@@ -93,7 +99,10 @@ impl SketchPlane {
 
         Self {
             origin,
-            orientation: UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(axis), angle),
+            orientation: UnitQuaternion::from_axis_angle(
+                &nalgebra::Unit::new_normalize(axis),
+                angle,
+            ),
         }
     }
 
@@ -156,44 +165,6 @@ impl Default for SketchPlane {
     }
 }
 
-/// Custom serde module for UnitQuaternion
-mod quaternion_serde {
-    use nalgebra::UnitQuaternion;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    struct QuatComponents {
-        w: f64,
-        i: f64,
-        j: f64,
-        k: f64,
-    }
-
-    pub fn serialize<S>(q: &UnitQuaternion<f64>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let quat = q.quaternion();
-        QuatComponents {
-            w: quat.w,
-            i: quat.i,
-            j: quat.j,
-            k: quat.k,
-        }
-        .serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<UnitQuaternion<f64>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let c = QuatComponents::deserialize(deserializer)?;
-        Ok(UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
-            c.w, c.i, c.j, c.k,
-        )))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,7 +204,8 @@ mod tests {
 
     #[test]
     fn test_point_roundtrip() {
-        let plane = SketchPlane::from_normal(Point3::new(1.0, 2.0, 3.0), Vector3::new(1.0, 1.0, 1.0));
+        let plane =
+            SketchPlane::from_normal(Point3::new(1.0, 2.0, 3.0), Vector3::new(1.0, 1.0, 1.0));
         let local = Point2::new(5.0, 3.0);
         let world = plane.point_to_world(local);
         let back = plane.point_to_local(world);
@@ -248,5 +220,19 @@ mod tests {
 
         assert_relative_eq!(plane.normal(), parsed.normal(), epsilon = 1e-10);
         assert_relative_eq!(plane.origin, parsed.origin, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_deserialize_zero_quaternion_returns_error() {
+        // JSON with a zero quaternion - should return Err, not panic
+        let json = r#"{"origin": [0.0, 0.0, 0.0], "orientation": {"w": 0.0, "i": 0.0, "j": 0.0, "k": 0.0}}"#;
+        let result: Result<SketchPlane, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("zero"),
+            "Expected error about zero quaternion, got: {}",
+            err
+        );
     }
 }

@@ -118,10 +118,8 @@ impl FidgetBackend {
 
         // Create Matrix4 using nalgebra 0.34 (fidget's version)
         let world_to_model = nalgebra_034::Matrix4::new(
-            half_size, 0.0, 0.0, cx,
-            0.0, half_size, 0.0, cy,
-            0.0, 0.0, half_size, cz,
-            0.0, 0.0, 0.0, 1.0,
+            half_size, 0.0, 0.0, cx, 0.0, half_size, 0.0, cy, 0.0, 0.0, half_size, cz, 0.0, 0.0,
+            0.0, 1.0,
         );
 
         let octree_settings = OctreeSettings {
@@ -252,7 +250,8 @@ fn sketch_to_tree(sketch: &Sketch) -> Result<Tree> {
     // Check if it's a single circle (simple case)
     if sketch.entities.len() == 1 {
         if let Segment2D::Circle(circle) = &sketch.entities[0].segment {
-            return Ok(circle_sdf(circle.center.x, circle.center.y, circle.radius));
+            let center = sketch.vertices[circle.center];
+            return Ok(circle_sdf(center.x, center.y, circle.radius));
         }
     }
 
@@ -262,7 +261,9 @@ fn sketch_to_tree(sketch: &Sketch) -> Result<Tree> {
         .map_err(|e| FeatureError::InvalidSketch(e.to_string()))?;
 
     if polygons.is_empty() {
-        return Err(FeatureError::InvalidSketch("No closed polygons".to_string()));
+        return Err(FeatureError::InvalidSketch(
+            "No closed polygons".to_string(),
+        ));
     }
 
     // For now, handle the common case: axis-aligned rectangle
@@ -408,29 +409,42 @@ fn calculate_bounds(model: &FeatureModel) -> ([f64; 3], [f64; 3]) {
 
     for op in &model.operations {
         if let Operation::Extrude(e) = op {
-            // Get sketch bounds
+            let vertices = &e.sketch.vertices;
+
+            // Get sketch bounds from entities
             for entity in &e.sketch.entities {
                 match &entity.segment {
                     Segment2D::Line(line) => {
-                        min[0] = min[0].min(line.start.x).min(line.finish.x);
-                        min[1] = min[1].min(line.start.y).min(line.finish.y);
-                        max[0] = max[0].max(line.start.x).max(line.finish.x);
-                        max[1] = max[1].max(line.start.y).max(line.finish.y);
+                        // Line now has multiple points
+                        for &idx in &line.points {
+                            let p = vertices[idx];
+                            min[0] = min[0].min(p.x);
+                            min[1] = min[1].min(p.y);
+                            max[0] = max[0].max(p.x);
+                            max[1] = max[1].max(p.y);
+                        }
                     }
                     Segment2D::Circle(circle) => {
-                        min[0] = min[0].min(circle.center.x - circle.radius);
-                        min[1] = min[1].min(circle.center.y - circle.radius);
-                        max[0] = max[0].max(circle.center.x + circle.radius);
-                        max[1] = max[1].max(circle.center.y + circle.radius);
+                        let center = vertices[circle.center];
+                        min[0] = min[0].min(center.x - circle.radius);
+                        min[1] = min[1].min(center.y - circle.radius);
+                        max[0] = max[0].max(center.x + circle.radius);
+                        max[1] = max[1].max(center.y + circle.radius);
                     }
                     Segment2D::Arc(arc) => {
-                        // Use start/finish as bounds approximation
-                        min[0] = min[0].min(arc.start.x).min(arc.finish.x);
-                        min[1] = min[1].min(arc.start.y).min(arc.finish.y);
-                        max[0] = max[0].max(arc.start.x).max(arc.finish.x);
-                        max[1] = max[1].max(arc.start.y).max(arc.finish.y);
-                        if let Some(center) = arc.center {
-                            let radius = arc.radius();
+                        // Use endpoints as bounds approximation
+                        if let (Some(start), Some(finish)) =
+                            (vertices.get(arc.start), vertices.get(arc.finish))
+                        {
+                            min[0] = min[0].min(start.x).min(finish.x);
+                            min[1] = min[1].min(start.y).min(finish.y);
+                            max[0] = max[0].max(start.x).max(finish.x);
+                            max[1] = max[1].max(start.y).max(finish.y);
+                        }
+                        // Also include arc center + radius if available
+                        if let (Some(center), Some(radius)) =
+                            (arc.center(vertices), arc.radius(vertices))
+                        {
                             min[0] = min[0].min(center.x - radius);
                             min[1] = min[1].min(center.y - radius);
                             max[0] = max[0].max(center.x + radius);
@@ -438,14 +452,16 @@ fn calculate_bounds(model: &FeatureModel) -> ([f64; 3], [f64; 3]) {
                         }
                     }
                     Segment2D::Ellipse(ellipse) => {
+                        let center = vertices[ellipse.center];
                         let r = ellipse.major.max(ellipse.minor);
-                        min[0] = min[0].min(ellipse.center.x - r);
-                        min[1] = min[1].min(ellipse.center.y - r);
-                        max[0] = max[0].max(ellipse.center.x + r);
-                        max[1] = max[1].max(ellipse.center.y + r);
+                        min[0] = min[0].min(center.x - r);
+                        min[1] = min[1].min(center.y - r);
+                        max[0] = max[0].max(center.x + r);
+                        max[1] = max[1].max(center.y + r);
                     }
                     Segment2D::CubicBezier(bezier) => {
-                        for p in [&bezier.p0, &bezier.p1, &bezier.p2, &bezier.p3] {
+                        for &idx in &[bezier.p0, bezier.p1, bezier.p2, bezier.p3] {
+                            let p = vertices[idx];
                             min[0] = min[0].min(p.x);
                             min[1] = min[1].min(p.y);
                             max[0] = max[0].max(p.x);
@@ -453,7 +469,8 @@ fn calculate_bounds(model: &FeatureModel) -> ([f64; 3], [f64; 3]) {
                         }
                     }
                     Segment2D::QuadraticBezier(bezier) => {
-                        for p in [&bezier.p0, &bezier.p1, &bezier.p2] {
+                        for &idx in &[bezier.p0, bezier.p1, bezier.p2] {
+                            let p = vertices[idx];
                             min[0] = min[0].min(p.x);
                             min[1] = min[1].min(p.y);
                             max[0] = max[0].max(p.x);
@@ -461,7 +478,8 @@ fn calculate_bounds(model: &FeatureModel) -> ([f64; 3], [f64; 3]) {
                         }
                     }
                     Segment2D::BSpline(spline) => {
-                        for p in &spline.points {
+                        for &idx in &spline.points {
+                            let p = vertices[idx];
                             min[0] = min[0].min(p.x);
                             min[1] = min[1].min(p.y);
                             max[0] = max[0].max(p.x);
@@ -499,7 +517,9 @@ mod tests {
 
         let backend = FidgetBackend::new();
         let settings = FidgetSettings::with_depth(5);
-        let mesh = backend.execute(&model, &settings).expect("Failed to execute");
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("Failed to execute");
 
         assert!(!mesh.vertices.is_empty(), "Mesh should have vertices");
         assert!(!mesh.faces.is_empty(), "Mesh should have faces");
@@ -512,7 +532,9 @@ mod tests {
 
         let backend = FidgetBackend::new();
         let settings = FidgetSettings::with_depth(5);
-        let mesh = backend.execute(&model, &settings).expect("Failed to execute");
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("Failed to execute");
 
         assert!(!mesh.vertices.is_empty(), "Mesh should have vertices");
         assert!(!mesh.faces.is_empty(), "Mesh should have faces");
@@ -534,7 +556,9 @@ mod tests {
 
         let backend = FidgetBackend::new();
         let settings = FidgetSettings::with_depth(5);
-        let mesh = backend.execute(&model, &settings).expect("Failed to execute");
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("Failed to execute");
 
         assert!(!mesh.vertices.is_empty(), "Mesh should have vertices");
         assert!(!mesh.faces.is_empty(), "Mesh should have faces");
@@ -568,7 +592,9 @@ mod tests {
         // Use higher depth for better accuracy
         let backend = FidgetBackend::new();
         let settings = FidgetSettings::with_depth(7);
-        let mesh = backend.execute(&model, &settings).expect("Failed to execute");
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("Failed to execute");
 
         // Calculate expected volume
         let box_volume = box_width * box_height * box_depth;
@@ -584,7 +610,9 @@ mod tests {
 
         println!(
             "Box with hole: expected volume {:.4}, actual {:.4}, error {:.2}%",
-            expected_volume, actual_volume, relative_error * 100.0
+            expected_volume,
+            actual_volume,
+            relative_error * 100.0
         );
 
         assert!(
@@ -648,7 +676,10 @@ mod tests {
                 Operation::Extrude(e) => {
                     println!(
                         "  {}: Extrude depth={:.4}, sign={:?}, entities={}",
-                        i, e.depth, e.sign, e.sketch.entities.len()
+                        i,
+                        e.depth,
+                        e.sign,
+                        e.sketch.entities.len()
                     );
                 }
                 _ => println!("  {}: {:?}", i, op),

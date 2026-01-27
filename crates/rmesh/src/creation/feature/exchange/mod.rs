@@ -83,18 +83,14 @@ pub fn load_feature_model(data: &[u8], format: FeatureFormat) -> Result<FeatureM
 /// The parsed feature model. Format is detected from file extension.
 pub fn load_feature_model_from_path(path: impl AsRef<std::path::Path>) -> Result<FeatureModel> {
     let path = path.as_ref();
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let format = FeatureFormat::from_extension(ext).ok_or_else(|| {
         super::FeatureError::ParseError(format!("Unknown file extension: {}", ext))
     })?;
 
-    let data = std::fs::read(path).map_err(|e| {
-        super::FeatureError::ParseError(format!("Failed to read file: {}", e))
-    })?;
+    let data = std::fs::read(path)
+        .map_err(|e| super::FeatureError::ParseError(format!("Failed to read file: {}", e)))?;
 
     load_feature_model(&data, format)
 }
@@ -105,10 +101,22 @@ mod tests {
 
     #[test]
     fn test_format_from_extension() {
-        assert_eq!(FeatureFormat::from_extension("json"), Some(FeatureFormat::Json));
-        assert_eq!(FeatureFormat::from_extension("JSON"), Some(FeatureFormat::Json));
-        assert_eq!(FeatureFormat::from_extension("sldprt"), Some(FeatureFormat::Sldprt));
-        assert_eq!(FeatureFormat::from_extension("SLDPRT"), Some(FeatureFormat::Sldprt));
+        assert_eq!(
+            FeatureFormat::from_extension("json"),
+            Some(FeatureFormat::Json)
+        );
+        assert_eq!(
+            FeatureFormat::from_extension("JSON"),
+            Some(FeatureFormat::Json)
+        );
+        assert_eq!(
+            FeatureFormat::from_extension("sldprt"),
+            Some(FeatureFormat::Sldprt)
+        );
+        assert_eq!(
+            FeatureFormat::from_extension("SLDPRT"),
+            Some(FeatureFormat::Sldprt)
+        );
         assert_eq!(FeatureFormat::from_extension("stl"), None);
     }
 

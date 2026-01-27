@@ -6,8 +6,9 @@
 //! # Structure
 //!
 //! - [`sketch`] - 2D sketches with entity IDs on planes
+//! - [`constraint`] - Geometric constraints (Fixed, Coincident, Horizontal, etc.)
 //! - [`operation`] - CAD operations (Extrude, Revolve, Sweep, Loft, Fillet, Chamfer)
-//! - [`environment`] - Units, variables, and parametric equations
+//! - [`environment`] - Units, variables, and Starlark expression evaluation
 //! - [`plane`] - Sketch plane definition with quaternion orientation
 //! - [`backend`] - Backend trait for mesh generation
 //! - [`error`] - Error types
@@ -33,6 +34,7 @@
 
 pub mod backend;
 pub mod backends;
+pub mod constraint;
 pub mod environment;
 pub mod error;
 pub mod exchange;
@@ -42,9 +44,12 @@ pub mod sketch;
 
 // Re-export commonly used types
 pub use backend::{BackendSettings, DefaultSettings, FeatureBackend};
+pub use constraint::{Constraint, Dim, PointRef};
 pub use environment::{Environment, Units};
 pub use error::{FeatureError, Result};
-pub use operation::{Chamfer, EdgeSelection, Extrude, Fillet, Loft, Operation, Revolve, Sign, Sweep};
+pub use operation::{
+    Chamfer, EdgeSelection, Extrude, Fillet, Loft, Operation, Revolve, Sign, Sweep,
+};
 pub use plane::SketchPlane;
 pub use sketch::{EntityId, Sketch, SketchEntity};
 
@@ -179,8 +184,8 @@ mod tests {
 
     #[test]
     fn test_model_operations() {
-        let mut model = FeatureModel::new()
-            .with_operation(Extrude::simple(Sketch::circle(10.0), 5.0));
+        let mut model =
+            FeatureModel::new().with_operation(Extrude::simple(Sketch::circle(10.0), 5.0));
 
         assert_eq!(model.len(), 1);
         assert!(!model.is_empty());

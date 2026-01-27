@@ -8,11 +8,13 @@ anyhow = { workspace = true }
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }
 serde = { workspace = true }
+starlark = { workspace = true }
 
 ahash = "0.8.11"
 itertools = "0.14.0"
 rayon = "1.11"
 earcut = "0.4"
+i_overlay = "4"
 approx = "0.5"
 image = "0.25"
 smallvec = "1.15"

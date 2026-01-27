@@ -13,9 +13,7 @@
 
 use nalgebra::Point2;
 
-use super::entity::{
-    Arc2D, Circle2D, CubicBezier2D, Ellipse2D, Line2D, QuadraticBezier2D, Winding,
-};
+use super::entity::{Arc2, Circle2, CubicBezier, Ellipse2, Line, QuadraticBezier, Winding};
 use super::{Path2D, Segment2D};
 
 /// Error type for SVG parsing
@@ -63,18 +61,29 @@ impl Path2D {
     /// Convert this path to an SVG path d-string.
     ///
     /// All geometry is converted to SVG path commands (M, L, C, Q, A, Z).
+    /// If the path forms a closed ring, Z is appended.
     pub fn to_svg(&self) -> String {
         let mut path = String::new();
         let mut current_pos: Option<Point2<f64>> = None;
 
         for segment in &self.segments {
-            let svg = segment_to_svg(segment, &mut current_pos);
-            path.push_str(&svg);
+            if let Some(svg) = segment_to_svg(segment, &self.vertices, &mut current_pos) {
+                path.push_str(&svg);
+            }
         }
 
-        // Close path if marked as closed
-        if self.closed && !path.is_empty() {
-            path.push_str(" Z");
+        // Close path if it forms a ring (start and finish are the same)
+        if !self.segments.is_empty() {
+            if let (Some(first_start), Some(last_finish)) = (
+                self.segments[0].start(&self.vertices),
+                self.segments.last().and_then(|s| s.finish(&self.vertices)),
+            ) {
+                let is_closed = (first_start.x - last_finish.x).abs() < 1e-10
+                    && (first_start.y - last_finish.y).abs() < 1e-10;
+                if is_closed && !path.is_empty() {
+                    path.push_str(" Z");
+                }
+            }
         }
 
         path
@@ -107,49 +116,6 @@ impl Path2D {
             path_str
         )
     }
-
-    /// Calculate the bounding box of this path
-    fn bounds(&self) -> Option<(Point2<f64>, Point2<f64>)> {
-        use super::entity::Curve;
-
-        let points: Vec<Point2<f64>> = self
-            .segments
-            .iter()
-            .flat_map(|s| match s {
-                Segment2D::Line(l) => vec![l.start(), l.finish()],
-                Segment2D::Arc(a) => {
-                    vec![a.start, a.finish]
-                }
-                Segment2D::Circle(c) => {
-                    vec![
-                        Point2::new(c.center.x - c.radius, c.center.y - c.radius),
-                        Point2::new(c.center.x + c.radius, c.center.y + c.radius),
-                    ]
-                }
-                Segment2D::Ellipse(e) => {
-                    // Conservative bounds using major axis
-                    vec![
-                        Point2::new(e.center.x - e.major, e.center.y - e.major),
-                        Point2::new(e.center.x + e.major, e.center.y + e.major),
-                    ]
-                }
-                Segment2D::CubicBezier(b) => vec![b.p0, b.p1, b.p2, b.p3],
-                Segment2D::QuadraticBezier(b) => vec![b.p0, b.p1, b.p2],
-                Segment2D::BSpline(s) => s.points.clone(),
-            })
-            .collect();
-
-        if points.is_empty() {
-            return None;
-        }
-
-        let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-        let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-        let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-        let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-
-        Some((Point2::new(min_x, min_y), Point2::new(max_x, max_y)))
-    }
 }
 
 // =============================================================================
@@ -179,7 +145,10 @@ fn parse_svg_element(svg: &str) -> Result<Path2D> {
         // Full SVG document - extract path elements
         parse_svg_document(svg)
     } else {
-        Err(SvgError(format!("Unknown SVG element: {}", &svg[..svg.len().min(20)])))
+        Err(SvgError(format!(
+            "Unknown SVG element: {}",
+            &svg[..svg.len().min(20)]
+        )))
     }
 }
 
@@ -215,31 +184,47 @@ fn parse_rect_element(svg: &str) -> Result<Path2D> {
         parse_svg_path(&rounded_rect_to_path(x, y, width, height, rx, ry))
     } else {
         // Simple rectangle
-        let segments = vec![
-            Segment2D::Line(Line2D::new(Point2::new(x, y), Point2::new(x + width, y))),
-            Segment2D::Line(Line2D::new(Point2::new(x + width, y), Point2::new(x + width, y + height))),
-            Segment2D::Line(Line2D::new(Point2::new(x + width, y + height), Point2::new(x, y + height))),
-            Segment2D::Line(Line2D::new(Point2::new(x, y + height), Point2::new(x, y))),
+        let vertices = vec![
+            Point2::new(x, y),
+            Point2::new(x + width, y),
+            Point2::new(x + width, y + height),
+            Point2::new(x, y + height),
         ];
-        Ok(Path2D {
-            segments,
-            closed: true,
-        })
+        let segments = vec![
+            Segment2D::Line(Line::new(0, 1)),
+            Segment2D::Line(Line::new(1, 2)),
+            Segment2D::Line(Line::new(2, 3)),
+            Segment2D::Line(Line::new(3, 0)),
+        ];
+        Ok(Path2D::from_vertices_and_segments(vertices, segments))
     }
 }
 
 fn rounded_rect_to_path(x: f64, y: f64, w: f64, h: f64, rx: f64, ry: f64) -> String {
     format!(
         "M{},{} h{} a{},{} 0 0 1 {},{} v{} a{},{} 0 0 1 -{},{} h-{} a{},{} 0 0 1 -{}-{} v-{} a{},{} 0 0 1 {}-{} Z",
-        x + rx, y,
+        x + rx,
+        y,
         w - 2.0 * rx,
-        rx, ry, rx, ry,
+        rx,
+        ry,
+        rx,
+        ry,
         h - 2.0 * ry,
-        rx, ry, rx, ry,
+        rx,
+        ry,
+        rx,
+        ry,
         w - 2.0 * rx,
-        rx, ry, rx, ry,
+        rx,
+        ry,
+        rx,
+        ry,
         h - 2.0 * ry,
-        rx, ry, rx, ry
+        rx,
+        ry,
+        rx,
+        ry
     )
 }
 
@@ -254,10 +239,9 @@ fn parse_circle_element(svg: &str) -> Result<Path2D> {
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| SvgError("Missing 'r' attribute".into()))?;
 
-    Ok(Path2D {
-        segments: vec![Segment2D::Circle(Circle2D::new(Point2::new(cx, cy), r))],
-        closed: true,
-    })
+    let vertices = vec![Point2::new(cx, cy)];
+    let segments = vec![Segment2D::Circle(Circle2::new(0, r))];
+    Ok(Path2D::from_vertices_and_segments(vertices, segments))
 }
 
 fn parse_ellipse_element(svg: &str) -> Result<Path2D> {
@@ -274,14 +258,13 @@ fn parse_ellipse_element(svg: &str) -> Result<Path2D> {
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| SvgError("Missing 'ry' attribute".into()))?;
 
-    Ok(Path2D {
-        segments: vec![Segment2D::Ellipse(Ellipse2D::axis_aligned(
-            Point2::new(cx, cy),
-            rx.max(ry),
-            rx.min(ry),
-        ))],
-        closed: true,
-    })
+    let vertices = vec![Point2::new(cx, cy)];
+    let segments = vec![Segment2D::Ellipse(Ellipse2::axis_aligned(
+        0,
+        rx.max(ry),
+        rx.min(ry),
+    ))];
+    Ok(Path2D::from_vertices_and_segments(vertices, segments))
 }
 
 fn parse_line_element(svg: &str) -> Result<Path2D> {
@@ -298,16 +281,12 @@ fn parse_line_element(svg: &str) -> Result<Path2D> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
 
-    Ok(Path2D {
-        segments: vec![Segment2D::Line(Line2D::new(
-            Point2::new(x1, y1),
-            Point2::new(x2, y2),
-        ))],
-        closed: false,
-    })
+    let vertices = vec![Point2::new(x1, y1), Point2::new(x2, y2)];
+    let segments = vec![Segment2D::Line(Line::new(0, 1))];
+    Ok(Path2D::from_vertices_and_segments(vertices, segments))
 }
 
-fn parse_polyline_element(svg: &str, closed: bool) -> Result<Path2D> {
+fn parse_polyline_element(svg: &str, close: bool) -> Result<Path2D> {
     let points_str = extract_attribute(svg, "points")
         .ok_or_else(|| SvgError("Missing 'points' attribute".into()))?;
 
@@ -316,26 +295,25 @@ fn parse_polyline_element(svg: &str, closed: bool) -> Result<Path2D> {
         return Err(SvgError("Polyline needs at least 2 points".into()));
     }
 
-    let mut segments: Vec<Segment2D> = points
-        .windows(2)
-        .map(|w| Segment2D::Line(Line2D::new(w[0], w[1])))
+    let vertices = points.clone();
+    let mut segments: Vec<Segment2D> = (0..points.len() - 1)
+        .map(|i| Segment2D::Line(Line::new(i, i + 1)))
         .collect();
 
-    if closed && points.len() > 2 {
-        segments.push(Segment2D::Line(Line2D::new(
-            *points.last().unwrap(),
-            points[0],
-        )));
+    if close && points.len() > 2 {
+        segments.push(Segment2D::Line(Line::new(points.len() - 1, 0)));
     }
 
-    Ok(Path2D { segments, closed })
+    Ok(Path2D::from_vertices_and_segments(vertices, segments))
 }
 
 fn parse_svg_document(svg: &str) -> Result<Path2D> {
     // Simple extraction of first path element from SVG document
     // A full implementation would parse all elements
     if let Some(start) = svg.find("<path") {
-        let end = svg[start..].find("/>").or_else(|| svg[start..].find("</path>"));
+        let end = svg[start..]
+            .find("/>")
+            .or_else(|| svg[start..].find("</path>"));
         if let Some(end_idx) = end {
             let path_elem = &svg[start..start + end_idx + 2];
             return parse_path_element(path_elem);
@@ -385,104 +363,180 @@ fn extract_attribute(svg: &str, name: &str) -> Option<String> {
 // SVG Path d-string Parsing
 // =============================================================================
 
+/// SVG path parser state
+struct SvgPathParser {
+    vertices: Vec<Point2<f64>>,
+    segments: Vec<Segment2D>,
+    current: Point2<f64>,
+    start: Point2<f64>,
+    last_control: Option<Point2<f64>>,
+}
+
+impl SvgPathParser {
+    fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            segments: Vec::new(),
+            current: Point2::new(0.0, 0.0),
+            start: Point2::new(0.0, 0.0),
+            last_control: None,
+        }
+    }
+
+    /// Add a vertex and return its index (with deduplication)
+    fn add_vertex(&mut self, point: Point2<f64>) -> usize {
+        const TOL: f64 = 1e-10;
+        for (i, v) in self.vertices.iter().enumerate() {
+            let dx = v.x - point.x;
+            let dy = v.y - point.y;
+            if dx * dx + dy * dy < TOL * TOL {
+                return i;
+            }
+        }
+        let idx = self.vertices.len();
+        self.vertices.push(point);
+        idx
+    }
+
+    fn into_path(self) -> Path2D {
+        Path2D::from_vertices_and_segments(self.vertices, self.segments)
+    }
+}
+
 /// Parse an SVG path d-string into a Path2D
 fn parse_svg_path(path: &str) -> Result<Path2D> {
-    let mut segments = Vec::new();
+    let mut parser = SvgPathParser::new();
     let mut chars = path.chars().peekable();
-    let mut current = Point2::new(0.0, 0.0);
-    let mut start = Point2::new(0.0, 0.0);
-    let mut last_control: Option<Point2<f64>> = None;
-    let mut closed = false;
 
     while let Some(c) = chars.next() {
         match c {
             'M' => {
                 let (x, y) = parse_coordinate_pair(&mut chars)?;
-                current = Point2::new(x, y);
-                start = current;
-                last_control = None;
+                parser.current = Point2::new(x, y);
+                parser.start = parser.current;
+                parser.last_control = None;
 
                 // M can be followed by implicit L commands
                 skip_separators(&mut chars);
-                while chars.peek().is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.') {
+                while chars
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.')
+                {
                     let (x, y) = parse_coordinate_pair(&mut chars)?;
                     let end = Point2::new(x, y);
-                    segments.push(Segment2D::Line(Line2D::new(current, end)));
-                    current = end;
+                    let start_idx = parser.add_vertex(parser.current);
+                    let end_idx = parser.add_vertex(end);
+                    parser
+                        .segments
+                        .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                    parser.current = end;
                     skip_separators(&mut chars);
                 }
             }
             'm' => {
                 let (dx, dy) = parse_coordinate_pair(&mut chars)?;
-                current = Point2::new(current.x + dx, current.y + dy);
-                start = current;
-                last_control = None;
+                parser.current = Point2::new(parser.current.x + dx, parser.current.y + dy);
+                parser.start = parser.current;
+                parser.last_control = None;
 
                 // m can be followed by implicit l commands
                 skip_separators(&mut chars);
-                while chars.peek().is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.') {
+                while chars
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.')
+                {
                     let (dx, dy) = parse_coordinate_pair(&mut chars)?;
-                    let end = Point2::new(current.x + dx, current.y + dy);
-                    segments.push(Segment2D::Line(Line2D::new(current, end)));
-                    current = end;
+                    let end = Point2::new(parser.current.x + dx, parser.current.y + dy);
+                    let start_idx = parser.add_vertex(parser.current);
+                    let end_idx = parser.add_vertex(end);
+                    parser
+                        .segments
+                        .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                    parser.current = end;
                     skip_separators(&mut chars);
                 }
             }
-            'L' => {
-                loop {
-                    let (x, y) = parse_coordinate_pair(&mut chars)?;
-                    let end = Point2::new(x, y);
-                    segments.push(Segment2D::Line(Line2D::new(current, end)));
-                    current = end;
-                    last_control = None;
+            'L' => loop {
+                let (x, y) = parse_coordinate_pair(&mut chars)?;
+                let end = Point2::new(x, y);
+                let start_idx = parser.add_vertex(parser.current);
+                let end_idx = parser.add_vertex(end);
+                parser
+                    .segments
+                    .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                parser.current = end;
+                parser.last_control = None;
 
-                    skip_separators(&mut chars);
-                    if !chars.peek().is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.') {
-                        break;
-                    }
+                skip_separators(&mut chars);
+                if !chars
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.')
+                {
+                    break;
                 }
-            }
-            'l' => {
-                loop {
-                    let (dx, dy) = parse_coordinate_pair(&mut chars)?;
-                    let end = Point2::new(current.x + dx, current.y + dy);
-                    segments.push(Segment2D::Line(Line2D::new(current, end)));
-                    current = end;
-                    last_control = None;
+            },
+            'l' => loop {
+                let (dx, dy) = parse_coordinate_pair(&mut chars)?;
+                let end = Point2::new(parser.current.x + dx, parser.current.y + dy);
+                let start_idx = parser.add_vertex(parser.current);
+                let end_idx = parser.add_vertex(end);
+                parser
+                    .segments
+                    .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                parser.current = end;
+                parser.last_control = None;
 
-                    skip_separators(&mut chars);
-                    if !chars.peek().is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.') {
-                        break;
-                    }
+                skip_separators(&mut chars);
+                if !chars
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.')
+                {
+                    break;
                 }
-            }
+            },
             'H' => {
                 let x = parse_number(&mut chars)?;
-                let end = Point2::new(x, current.y);
-                segments.push(Segment2D::Line(Line2D::new(current, end)));
-                current = end;
-                last_control = None;
+                let end = Point2::new(x, parser.current.y);
+                let start_idx = parser.add_vertex(parser.current);
+                let end_idx = parser.add_vertex(end);
+                parser
+                    .segments
+                    .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                parser.current = end;
+                parser.last_control = None;
             }
             'h' => {
                 let dx = parse_number(&mut chars)?;
-                let end = Point2::new(current.x + dx, current.y);
-                segments.push(Segment2D::Line(Line2D::new(current, end)));
-                current = end;
-                last_control = None;
+                let end = Point2::new(parser.current.x + dx, parser.current.y);
+                let start_idx = parser.add_vertex(parser.current);
+                let end_idx = parser.add_vertex(end);
+                parser
+                    .segments
+                    .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                parser.current = end;
+                parser.last_control = None;
             }
             'V' => {
                 let y = parse_number(&mut chars)?;
-                let end = Point2::new(current.x, y);
-                segments.push(Segment2D::Line(Line2D::new(current, end)));
-                current = end;
-                last_control = None;
+                let end = Point2::new(parser.current.x, y);
+                let start_idx = parser.add_vertex(parser.current);
+                let end_idx = parser.add_vertex(end);
+                parser
+                    .segments
+                    .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                parser.current = end;
+                parser.last_control = None;
             }
             'v' => {
                 let dy = parse_number(&mut chars)?;
-                let end = Point2::new(current.x, current.y + dy);
-                segments.push(Segment2D::Line(Line2D::new(current, end)));
-                current = end;
-                last_control = None;
+                let end = Point2::new(parser.current.x, parser.current.y + dy);
+                let start_idx = parser.add_vertex(parser.current);
+                let end_idx = parser.add_vertex(end);
+                parser
+                    .segments
+                    .push(Segment2D::Line(Line::new(start_idx, end_idx)));
+                parser.current = end;
+                parser.last_control = None;
             }
             'C' => {
                 let (x1, y1) = parse_coordinate_pair(&mut chars)?;
@@ -495,9 +549,18 @@ fn parse_svg_path(path: &str) -> Result<Path2D> {
                 let p2 = Point2::new(x2, y2);
                 let end = Point2::new(x, y);
 
-                segments.push(Segment2D::CubicBezier(CubicBezier2D::new(current, p1, p2, end)));
-                last_control = Some(p2);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(p2);
+                let p3_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::CubicBezier(CubicBezier::new(
+                        p0_idx, p1_idx, p2_idx, p3_idx,
+                    )));
+                parser.last_control = Some(p2);
+                parser.current = end;
             }
             'c' => {
                 let (dx1, dy1) = parse_coordinate_pair(&mut chars)?;
@@ -506,19 +569,30 @@ fn parse_svg_path(path: &str) -> Result<Path2D> {
                 skip_separators(&mut chars);
                 let (dx, dy) = parse_coordinate_pair(&mut chars)?;
 
-                let p1 = Point2::new(current.x + dx1, current.y + dy1);
-                let p2 = Point2::new(current.x + dx2, current.y + dy2);
-                let end = Point2::new(current.x + dx, current.y + dy);
+                let p1 = Point2::new(parser.current.x + dx1, parser.current.y + dy1);
+                let p2 = Point2::new(parser.current.x + dx2, parser.current.y + dy2);
+                let end = Point2::new(parser.current.x + dx, parser.current.y + dy);
 
-                segments.push(Segment2D::CubicBezier(CubicBezier2D::new(current, p1, p2, end)));
-                last_control = Some(p2);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(p2);
+                let p3_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::CubicBezier(CubicBezier::new(
+                        p0_idx, p1_idx, p2_idx, p3_idx,
+                    )));
+                parser.last_control = Some(p2);
+                parser.current = end;
             }
             'S' => {
                 // Smooth cubic bezier - reflects previous control point
-                let p1 = match last_control {
-                    Some(lc) => Point2::new(2.0 * current.x - lc.x, 2.0 * current.y - lc.y),
-                    None => current,
+                let p1 = match parser.last_control {
+                    Some(lc) => {
+                        Point2::new(2.0 * parser.current.x - lc.x, 2.0 * parser.current.y - lc.y)
+                    }
+                    None => parser.current,
                 };
 
                 let (x2, y2) = parse_coordinate_pair(&mut chars)?;
@@ -528,26 +602,46 @@ fn parse_svg_path(path: &str) -> Result<Path2D> {
                 let p2 = Point2::new(x2, y2);
                 let end = Point2::new(x, y);
 
-                segments.push(Segment2D::CubicBezier(CubicBezier2D::new(current, p1, p2, end)));
-                last_control = Some(p2);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(p2);
+                let p3_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::CubicBezier(CubicBezier::new(
+                        p0_idx, p1_idx, p2_idx, p3_idx,
+                    )));
+                parser.last_control = Some(p2);
+                parser.current = end;
             }
             's' => {
-                let p1 = match last_control {
-                    Some(lc) => Point2::new(2.0 * current.x - lc.x, 2.0 * current.y - lc.y),
-                    None => current,
+                let p1 = match parser.last_control {
+                    Some(lc) => {
+                        Point2::new(2.0 * parser.current.x - lc.x, 2.0 * parser.current.y - lc.y)
+                    }
+                    None => parser.current,
                 };
 
                 let (dx2, dy2) = parse_coordinate_pair(&mut chars)?;
                 skip_separators(&mut chars);
                 let (dx, dy) = parse_coordinate_pair(&mut chars)?;
 
-                let p2 = Point2::new(current.x + dx2, current.y + dy2);
-                let end = Point2::new(current.x + dx, current.y + dy);
+                let p2 = Point2::new(parser.current.x + dx2, parser.current.y + dy2);
+                let end = Point2::new(parser.current.x + dx, parser.current.y + dy);
 
-                segments.push(Segment2D::CubicBezier(CubicBezier2D::new(current, p1, p2, end)));
-                last_control = Some(p2);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(p2);
+                let p3_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::CubicBezier(CubicBezier::new(
+                        p0_idx, p1_idx, p2_idx, p3_idx,
+                    )));
+                parser.last_control = Some(p2);
+                parser.current = end;
             }
             'Q' => {
                 let (x1, y1) = parse_coordinate_pair(&mut chars)?;
@@ -557,48 +651,84 @@ fn parse_svg_path(path: &str) -> Result<Path2D> {
                 let p1 = Point2::new(x1, y1);
                 let end = Point2::new(x, y);
 
-                segments.push(Segment2D::QuadraticBezier(QuadraticBezier2D::new(current, p1, end)));
-                last_control = Some(p1);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::QuadraticBezier(QuadraticBezier::new(
+                        p0_idx, p1_idx, p2_idx,
+                    )));
+                parser.last_control = Some(p1);
+                parser.current = end;
             }
             'q' => {
                 let (dx1, dy1) = parse_coordinate_pair(&mut chars)?;
                 skip_separators(&mut chars);
                 let (dx, dy) = parse_coordinate_pair(&mut chars)?;
 
-                let p1 = Point2::new(current.x + dx1, current.y + dy1);
-                let end = Point2::new(current.x + dx, current.y + dy);
+                let p1 = Point2::new(parser.current.x + dx1, parser.current.y + dy1);
+                let end = Point2::new(parser.current.x + dx, parser.current.y + dy);
 
-                segments.push(Segment2D::QuadraticBezier(QuadraticBezier2D::new(current, p1, end)));
-                last_control = Some(p1);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::QuadraticBezier(QuadraticBezier::new(
+                        p0_idx, p1_idx, p2_idx,
+                    )));
+                parser.last_control = Some(p1);
+                parser.current = end;
             }
             'T' => {
                 // Smooth quadratic bezier
-                let p1 = match last_control {
-                    Some(lc) => Point2::new(2.0 * current.x - lc.x, 2.0 * current.y - lc.y),
-                    None => current,
+                let p1 = match parser.last_control {
+                    Some(lc) => {
+                        Point2::new(2.0 * parser.current.x - lc.x, 2.0 * parser.current.y - lc.y)
+                    }
+                    None => parser.current,
                 };
 
                 let (x, y) = parse_coordinate_pair(&mut chars)?;
                 let end = Point2::new(x, y);
 
-                segments.push(Segment2D::QuadraticBezier(QuadraticBezier2D::new(current, p1, end)));
-                last_control = Some(p1);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::QuadraticBezier(QuadraticBezier::new(
+                        p0_idx, p1_idx, p2_idx,
+                    )));
+                parser.last_control = Some(p1);
+                parser.current = end;
             }
             't' => {
-                let p1 = match last_control {
-                    Some(lc) => Point2::new(2.0 * current.x - lc.x, 2.0 * current.y - lc.y),
-                    None => current,
+                let p1 = match parser.last_control {
+                    Some(lc) => {
+                        Point2::new(2.0 * parser.current.x - lc.x, 2.0 * parser.current.y - lc.y)
+                    }
+                    None => parser.current,
                 };
 
                 let (dx, dy) = parse_coordinate_pair(&mut chars)?;
-                let end = Point2::new(current.x + dx, current.y + dy);
+                let end = Point2::new(parser.current.x + dx, parser.current.y + dy);
 
-                segments.push(Segment2D::QuadraticBezier(QuadraticBezier2D::new(current, p1, end)));
-                last_control = Some(p1);
-                current = end;
+                let p0_idx = parser.add_vertex(parser.current);
+                let p1_idx = parser.add_vertex(p1);
+                let p2_idx = parser.add_vertex(end);
+
+                parser
+                    .segments
+                    .push(Segment2D::QuadraticBezier(QuadraticBezier::new(
+                        p0_idx, p1_idx, p2_idx,
+                    )));
+                parser.last_control = Some(p1);
+                parser.current = end;
             }
             'A' | 'a' => {
                 let is_relative = c == 'a';
@@ -616,25 +746,31 @@ fn parse_svg_path(path: &str) -> Result<Path2D> {
                 let (ex, ey) = parse_coordinate_pair(&mut chars)?;
 
                 let end = if is_relative {
-                    Point2::new(current.x + ex, current.y + ey)
+                    Point2::new(parser.current.x + ex, parser.current.y + ey)
                 } else {
                     Point2::new(ex, ey)
                 };
 
-                if let Some(arc) = svg_arc_to_center_arc(current, end, rx, ry, large_arc, sweep) {
-                    segments.push(arc);
+                if let Some(arc) = svg_arc_to_center_arc(&mut parser, end, rx, ry, large_arc, sweep)
+                {
+                    parser.segments.push(arc);
                 }
 
-                current = end;
-                last_control = None;
+                parser.current = end;
+                parser.last_control = None;
             }
             'Z' | 'z' => {
-                if (current.x - start.x).abs() > 1e-10 || (current.y - start.y).abs() > 1e-10 {
-                    segments.push(Segment2D::Line(Line2D::new(current, start)));
+                if (parser.current.x - parser.start.x).abs() > 1e-10
+                    || (parser.current.y - parser.start.y).abs() > 1e-10
+                {
+                    let start_idx = parser.add_vertex(parser.current);
+                    let end_idx = parser.add_vertex(parser.start);
+                    parser
+                        .segments
+                        .push(Segment2D::Line(Line::new(start_idx, end_idx)));
                 }
-                current = start;
-                last_control = None;
-                closed = true;
+                parser.current = parser.start;
+                parser.last_control = None;
             }
             ' ' | ',' | '\n' | '\t' | '\r' => {
                 // Skip whitespace
@@ -645,22 +781,24 @@ fn parse_svg_path(path: &str) -> Result<Path2D> {
         }
     }
 
-    Ok(Path2D { segments, closed })
+    Ok(parser.into_path())
 }
 
-/// Convert SVG arc parameters to Arc2D segment
+/// Convert SVG arc parameters to Arc segment
 fn svg_arc_to_center_arc(
-    p1: Point2<f64>,
+    parser: &mut SvgPathParser,
     p2: Point2<f64>,
     rx: f64,
     ry: f64,
     large_arc: bool,
     sweep: bool,
 ) -> Option<Segment2D> {
+    let p1 = parser.current;
+
     // For elliptical arcs where rx != ry, approximate as circular using average radius
     if (rx - ry).abs() > 1e-10 {
         let r = (rx + ry) / 2.0;
-        return svg_arc_to_center_arc(p1, p2, r, r, large_arc, sweep);
+        return svg_arc_to_center_arc(parser, p2, r, r, large_arc, sweep);
     }
 
     let r = rx;
@@ -673,7 +811,9 @@ fn svg_arc_to_center_arc(
 
     if d > r {
         // Points too far apart - return line instead
-        return Some(Segment2D::Line(Line2D::new(p1, p2)));
+        let start_idx = parser.add_vertex(p1);
+        let end_idx = parser.add_vertex(p2);
+        return Some(Segment2D::Line(Line::new(start_idx, end_idx)));
     }
 
     let h = (r * r - d * d).sqrt();
@@ -689,14 +829,35 @@ fn svg_arc_to_center_arc(
     let sign = if large_arc == sweep { -1.0 } else { 1.0 };
     let center = Point2::new(mid.x + sign * h * px, mid.y + sign * h * py);
 
+    // Calculate sweep angle
+    let start_angle = (p1.y - center.y).atan2(p1.x - center.x);
+    let end_angle = (p2.y - center.y).atan2(p2.x - center.x);
+    let mut sweep_angle = end_angle - start_angle;
+
+    // Adjust sweep angle based on sweep direction
+    if sweep {
+        // Counter-clockwise
+        if sweep_angle < 0.0 {
+            sweep_angle += 2.0 * std::f64::consts::PI;
+        }
+    } else {
+        // Clockwise
+        if sweep_angle > 0.0 {
+            sweep_angle -= 2.0 * std::f64::consts::PI;
+        }
+    }
+
     let winding = if sweep { Winding::Ccw } else { Winding::Cw };
 
-    Some(Segment2D::Arc(Arc2D {
-        start: p1,
-        finish: p2,
-        center: Some(center),
+    let start_idx = parser.add_vertex(p1);
+    let end_idx = parser.add_vertex(p2);
+
+    Some(Segment2D::Arc(Arc2::new(
+        start_idx,
+        end_idx,
+        sweep_angle,
         winding,
-    }))
+    )))
 }
 
 // =============================================================================
@@ -704,31 +865,51 @@ fn svg_arc_to_center_arc(
 // =============================================================================
 
 /// Convert a segment to SVG path commands
-fn segment_to_svg(segment: &Segment2D, current_pos: &mut Option<Point2<f64>>) -> String {
+fn segment_to_svg(
+    segment: &Segment2D,
+    vertices: &[Point2<f64>],
+    current_pos: &mut Option<Point2<f64>>,
+) -> Option<String> {
     match segment {
         Segment2D::Line(line) => {
+            if line.points.is_empty() {
+                return None;
+            }
+
+            let start = *vertices.get(*line.points.first()?)?;
             let mut result = String::new();
 
             // Move to start if needed
-            if needs_move(*current_pos, line.start) {
-                result.push_str(&format!("M{},{} ", fmt_num(line.start.x), fmt_num(line.start.y)));
+            if needs_move(*current_pos, start) {
+                result.push_str(&format!("M{},{} ", fmt_num(start.x), fmt_num(start.y)));
             }
 
-            result.push_str(&format!("L{},{}", fmt_num(line.finish.x), fmt_num(line.finish.y)));
-            *current_pos = Some(line.finish);
-            result
+            // Draw lines to all subsequent points
+            for &idx in line.points.iter().skip(1) {
+                let p = *vertices.get(idx)?;
+                result.push_str(&format!("L{},{} ", fmt_num(p.x), fmt_num(p.y)));
+            }
+
+            *current_pos = line.points.last().and_then(|&i| vertices.get(i).copied());
+            Some(result.trim_end().to_string())
         }
 
         Segment2D::Arc(arc) => {
+            let start = *vertices.get(arc.start)?;
+            let finish = *vertices.get(arc.finish)?;
             let mut result = String::new();
 
-            if needs_move(*current_pos, arc.start) {
-                result.push_str(&format!("M{},{} ", fmt_num(arc.start.x), fmt_num(arc.start.y)));
+            if needs_move(*current_pos, start) {
+                result.push_str(&format!("M{},{} ", fmt_num(start.x), fmt_num(start.y)));
             }
 
-            let radius = arc.radius();
-            let sweep_angle = arc.angle();
-            let large_arc = if sweep_angle.abs() > std::f64::consts::PI { 1 } else { 0 };
+            let radius = arc.radius(vertices).unwrap_or(0.0);
+            let sweep_angle = arc.sweep_angle();
+            let large_arc = if sweep_angle.abs() > std::f64::consts::PI {
+                1
+            } else {
+                0
+            };
             let sweep_flag = if sweep_angle > 0.0 { 1 } else { 0 };
 
             result.push_str(&format!(
@@ -737,110 +918,133 @@ fn segment_to_svg(segment: &Segment2D, current_pos: &mut Option<Point2<f64>>) ->
                 fmt_num(radius),
                 large_arc,
                 sweep_flag,
-                fmt_num(arc.finish.x),
-                fmt_num(arc.finish.y)
+                fmt_num(finish.x),
+                fmt_num(finish.y)
             ));
-            *current_pos = Some(arc.finish);
-            result
+            *current_pos = Some(finish);
+            Some(result)
         }
 
         Segment2D::Circle(circle) => {
+            let center = *vertices.get(circle.center)?;
             // Circle as two arcs
-            let right = Point2::new(circle.center.x + circle.radius, circle.center.y);
-            let left = Point2::new(circle.center.x - circle.radius, circle.center.y);
+            let right = Point2::new(center.x + circle.radius, center.y);
+            let left = Point2::new(center.x - circle.radius, center.y);
             let r = circle.radius;
 
             *current_pos = Some(right);
-            format!(
+            Some(format!(
                 "M{},{} A{},{} 0 1 1 {},{} A{},{} 0 1 1 {},{}",
-                fmt_num(right.x), fmt_num(right.y),
-                fmt_num(r), fmt_num(r),
-                fmt_num(left.x), fmt_num(left.y),
-                fmt_num(r), fmt_num(r),
-                fmt_num(right.x), fmt_num(right.y)
-            )
+                fmt_num(right.x),
+                fmt_num(right.y),
+                fmt_num(r),
+                fmt_num(r),
+                fmt_num(left.x),
+                fmt_num(left.y),
+                fmt_num(r),
+                fmt_num(r),
+                fmt_num(right.x),
+                fmt_num(right.y)
+            ))
         }
 
         Segment2D::Ellipse(ellipse) => {
+            let center = *vertices.get(ellipse.center)?;
             // Ellipse as two arcs
             let cos_r = ellipse.rotation.cos();
             let sin_r = ellipse.rotation.sin();
             let right = Point2::new(
-                ellipse.center.x + ellipse.major * cos_r,
-                ellipse.center.y + ellipse.major * sin_r,
+                center.x + ellipse.major * cos_r,
+                center.y + ellipse.major * sin_r,
             );
             let left = Point2::new(
-                ellipse.center.x - ellipse.major * cos_r,
-                ellipse.center.y - ellipse.major * sin_r,
+                center.x - ellipse.major * cos_r,
+                center.y - ellipse.major * sin_r,
             );
 
             *current_pos = Some(right);
-            format!(
+            Some(format!(
                 "M{},{} A{},{} {} 1 1 {},{} A{},{} {} 1 1 {},{}",
-                fmt_num(right.x), fmt_num(right.y),
-                fmt_num(ellipse.major), fmt_num(ellipse.minor),
+                fmt_num(right.x),
+                fmt_num(right.y),
+                fmt_num(ellipse.major),
+                fmt_num(ellipse.minor),
                 fmt_num(ellipse.rotation.to_degrees()),
-                fmt_num(left.x), fmt_num(left.y),
-                fmt_num(ellipse.major), fmt_num(ellipse.minor),
+                fmt_num(left.x),
+                fmt_num(left.y),
+                fmt_num(ellipse.major),
+                fmt_num(ellipse.minor),
                 fmt_num(ellipse.rotation.to_degrees()),
-                fmt_num(right.x), fmt_num(right.y)
-            )
+                fmt_num(right.x),
+                fmt_num(right.y)
+            ))
         }
 
         Segment2D::CubicBezier(bezier) => {
+            let p0 = *vertices.get(bezier.p0)?;
+            let p1 = *vertices.get(bezier.p1)?;
+            let p2 = *vertices.get(bezier.p2)?;
+            let p3 = *vertices.get(bezier.p3)?;
             let mut result = String::new();
 
-            if needs_move(*current_pos, bezier.p0) {
-                result.push_str(&format!("M{},{} ", fmt_num(bezier.p0.x), fmt_num(bezier.p0.y)));
+            if needs_move(*current_pos, p0) {
+                result.push_str(&format!("M{},{} ", fmt_num(p0.x), fmt_num(p0.y)));
             }
 
             result.push_str(&format!(
                 "C{},{} {},{} {},{}",
-                fmt_num(bezier.p1.x), fmt_num(bezier.p1.y),
-                fmt_num(bezier.p2.x), fmt_num(bezier.p2.y),
-                fmt_num(bezier.p3.x), fmt_num(bezier.p3.y)
+                fmt_num(p1.x),
+                fmt_num(p1.y),
+                fmt_num(p2.x),
+                fmt_num(p2.y),
+                fmt_num(p3.x),
+                fmt_num(p3.y)
             ));
-            *current_pos = Some(bezier.p3);
-            result
+            *current_pos = Some(p3);
+            Some(result)
         }
 
         Segment2D::QuadraticBezier(bezier) => {
+            let p0 = *vertices.get(bezier.p0)?;
+            let p1 = *vertices.get(bezier.p1)?;
+            let p2 = *vertices.get(bezier.p2)?;
             let mut result = String::new();
 
-            if needs_move(*current_pos, bezier.p0) {
-                result.push_str(&format!("M{},{} ", fmt_num(bezier.p0.x), fmt_num(bezier.p0.y)));
+            if needs_move(*current_pos, p0) {
+                result.push_str(&format!("M{},{} ", fmt_num(p0.x), fmt_num(p0.y)));
             }
 
             result.push_str(&format!(
                 "Q{},{} {},{}",
-                fmt_num(bezier.p1.x), fmt_num(bezier.p1.y),
-                fmt_num(bezier.p2.x), fmt_num(bezier.p2.y)
+                fmt_num(p1.x),
+                fmt_num(p1.y),
+                fmt_num(p2.x),
+                fmt_num(p2.y)
             ));
-            *current_pos = Some(bezier.p2);
-            result
+            *current_pos = Some(p2);
+            Some(result)
         }
 
         Segment2D::BSpline(spline) => {
-            // Convert B-spline to cubic Bezier approximation for SVG
-            // This is a simplification - a proper implementation would use the actual knot vector
-            if spline.points.len() < 2 {
-                return String::new();
+            // Convert B-spline to polyline for SVG
+            if spline.points.is_empty() {
+                return None;
             }
 
             let mut result = String::new();
-            let start = spline.points[0];
+            let start = *vertices.get(*spline.points.first()?)?;
 
             if needs_move(*current_pos, start) {
                 result.push_str(&format!("M{},{} ", fmt_num(start.x), fmt_num(start.y)));
             }
 
-            // Simple polyline approximation
-            for point in spline.points.iter().skip(1) {
+            for &idx in spline.points.iter().skip(1) {
+                let point = *vertices.get(idx)?;
                 result.push_str(&format!("L{},{} ", fmt_num(point.x), fmt_num(point.y)));
             }
 
-            *current_pos = spline.points.last().copied();
-            result
+            *current_pos = spline.points.last().and_then(|&i| vertices.get(i).copied());
+            Some(result)
         }
     }
 }
@@ -919,7 +1123,16 @@ mod tests {
     fn test_parse_simple_path() {
         let path = Path2D::from_svg("M0,0 L10,0 L10,10 L0,10 Z").unwrap();
         assert_eq!(path.segments.len(), 4);
-        assert!(path.closed);
+        // Path forms a closed ring (start and end are the same)
+        let first_start = path.segments[0].start(&path.vertices).unwrap();
+        let last_finish = path
+            .segments
+            .last()
+            .unwrap()
+            .finish(&path.vertices)
+            .unwrap();
+        assert!((first_start.x - last_finish.x).abs() < 1e-10);
+        assert!((first_start.y - last_finish.y).abs() < 1e-10);
     }
 
     #[test]
@@ -928,8 +1141,10 @@ mod tests {
         assert_eq!(path.segments.len(), 4);
 
         if let Segment2D::Line(line) = &path.segments[0] {
-            assert_relative_eq!(line.start.x, 0.0, epsilon = 1e-10);
-            assert_relative_eq!(line.finish.x, 10.0, epsilon = 1e-10);
+            let start = path.vertices[line.points[0]];
+            let finish = path.vertices[*line.points.last().unwrap()];
+            assert_relative_eq!(start.x, 0.0, epsilon = 1e-10);
+            assert_relative_eq!(finish.x, 10.0, epsilon = 1e-10);
         } else {
             panic!("Expected Line");
         }
@@ -947,8 +1162,10 @@ mod tests {
         assert_eq!(path.segments.len(), 1);
 
         if let Segment2D::CubicBezier(bezier) = &path.segments[0] {
-            assert_relative_eq!(bezier.p0.x, 0.0, epsilon = 1e-10);
-            assert_relative_eq!(bezier.p3.x, 4.0, epsilon = 1e-10);
+            let p0 = path.vertices[bezier.p0];
+            let p3 = path.vertices[bezier.p3];
+            assert_relative_eq!(p0.x, 0.0, epsilon = 1e-10);
+            assert_relative_eq!(p3.x, 4.0, epsilon = 1e-10);
         } else {
             panic!("Expected CubicBezier");
         }
@@ -958,7 +1175,16 @@ mod tests {
     fn test_parse_rect_element() {
         let path = Path2D::from_svg("<rect x='0' y='0' width='10' height='5'/>").unwrap();
         assert_eq!(path.segments.len(), 4);
-        assert!(path.closed);
+        // Rectangle should form a closed ring
+        let first_start = path.segments[0].start(&path.vertices).unwrap();
+        let last_finish = path
+            .segments
+            .last()
+            .unwrap()
+            .finish(&path.vertices)
+            .unwrap();
+        assert!((first_start.x - last_finish.x).abs() < 1e-10);
+        assert!((first_start.y - last_finish.y).abs() < 1e-10);
     }
 
     #[test]
@@ -967,7 +1193,8 @@ mod tests {
         assert_eq!(path.segments.len(), 1);
 
         if let Segment2D::Circle(circle) = &path.segments[0] {
-            assert_relative_eq!(circle.center.x, 5.0, epsilon = 1e-10);
+            let center = path.vertices[circle.center];
+            assert_relative_eq!(center.x, 5.0, epsilon = 1e-10);
             assert_relative_eq!(circle.radius, 10.0, epsilon = 1e-10);
         } else {
             panic!("Expected Circle");
@@ -995,13 +1222,10 @@ mod tests {
 
     #[test]
     fn test_to_svg_line() {
-        let path = Path2D {
-            segments: vec![Segment2D::Line(Line2D::new(
-                Point2::new(0.0, 0.0),
-                Point2::new(10.0, 5.0),
-            ))],
-            closed: false,
-        };
+        let path = Path2D::from_vertices_and_segments(
+            vec![Point2::new(0.0, 0.0), Point2::new(10.0, 5.0)],
+            vec![Segment2D::Line(Line::new(0, 1))],
+        );
 
         let svg = path.to_svg();
         assert!(svg.contains("M0,0"));

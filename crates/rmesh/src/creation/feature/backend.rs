@@ -2,9 +2,9 @@
 //!
 //! Backends convert feature models to triangle meshes using different algorithms.
 
-use crate::mesh::Trimesh;
-use super::error::Result;
 use super::FeatureModel;
+use super::error::Result;
+use crate::mesh::Trimesh;
 
 /// Settings for mesh generation backends
 pub trait BackendSettings: Default + Clone {
@@ -85,8 +85,7 @@ mod tests {
 
     #[test]
     fn test_settings_with_bounds() {
-        let settings = DefaultSettings::with_depth(8)
-            .with_bounds([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let settings = DefaultSettings::with_depth(8).with_bounds([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
 
         assert_eq!(settings.depth, 8);
         assert!(settings.bounds.is_some());

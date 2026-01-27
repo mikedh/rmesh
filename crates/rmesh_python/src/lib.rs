@@ -1,8 +1,7 @@
 mod mesh;
 
 pub use mesh::{
-    PyFaceAttributes, PyGrouping, PyGroupingCollection, PyTrimesh, PyVertexAttributes,
-    py_load_mesh,
+    PyFaceAttributes, PyGrouping, PyGroupingCollection, PyTrimesh, PyVertexAttributes, py_load_mesh,
 };
 
 use pyo3::prelude::*;

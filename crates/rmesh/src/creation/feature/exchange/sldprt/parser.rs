@@ -13,14 +13,13 @@ use super::tokenizer::{self, SketchData, SketchEntity as TokenSketchEntity};
 use crate::creation::feature::{
     Extrude, FeatureError, FeatureModel, Operation, Result, Sign, Sketch, SketchPlane,
 };
-use crate::path::{Circle2D, Line2D, Segment2D};
+// Note: Sketch now uses indexed vertices, so we use sketch.add_line() and sketch.add_circle()
 
 /// Magic bytes at start of SLDPRT files
 const SLDPRT_MAGIC: [u8; 4] = [0xCD, 0xA4, 0xFA, 0x92];
 
 /// Block header marker in SLDPRT files
-const BLOCK_HEADER_MARKER: [u8; 10] =
-    [0x14, 0x00, 0x06, 0x00, 0x08, 0x00, 0xDF, 0x3F, 0xF1, 0x7F];
+const BLOCK_HEADER_MARKER: [u8; 10] = [0x14, 0x00, 0x06, 0x00, 0x08, 0x00, 0xDF, 0x3F, 0xF1, 0x7F];
 
 /// Result of parsing an SLDPRT file
 #[derive(Debug)]
@@ -42,9 +41,7 @@ impl SldprtImport {
 pub fn parse_sldprt_bytes(data: &[u8]) -> Result<SldprtImport> {
     // Validate magic
     if data.len() < 21 || data[0..4] != SLDPRT_MAGIC {
-        return Err(FeatureError::ParseError(
-            "Invalid SLDPRT magic".to_string(),
-        ));
+        return Err(FeatureError::ParseError("Invalid SLDPRT magic".to_string()));
     }
 
     // Find and decompress streams
@@ -158,11 +155,7 @@ fn extract_features(segments: &[tokenizer::Segment], data: &[u8]) -> Vec<Extract
                 let num: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
                 format!(
                     "Sketch{}",
-                    if num.is_empty() {
-                        "1".to_string()
-                    } else {
-                        num
-                    }
+                    if num.is_empty() { "1".to_string() } else { num }
                 )
             };
 
@@ -216,11 +209,7 @@ fn find_extrusion_depth(data: &[u8], feature_offset: usize, is_cut: bool) -> f64
     }
 
     // Default depths if not found
-    if is_cut {
-        0.009525
-    } else {
-        0.0762
-    }
+    if is_cut { 0.009525 } else { 0.0762 }
 }
 
 /// Find and decompress all streams in an SLDPRT file
@@ -312,9 +301,9 @@ fn decode_stream_name(data: &[u8]) -> String {
 fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = DeflateDecoder::new(data);
     let mut result = Vec::new();
-    decoder.read_to_end(&mut result).map_err(|e| {
-        FeatureError::ParseError(format!("DEFLATE decompression failed: {}", e))
-    })?;
+    decoder
+        .read_to_end(&mut result)
+        .map_err(|e| FeatureError::ParseError(format!("DEFLATE decompression failed: {}", e)))?;
     Ok(result)
 }
 
@@ -336,10 +325,7 @@ fn build_sketch_from_geometry(geom: &SketchData) -> Option<Sketch> {
                 let x2 = end_x / 0.0254;
                 let y2 = end_y / 0.0254;
 
-                sketch.add(Segment2D::Line(Line2D::new(
-                    Point2::new(x1, y1),
-                    Point2::new(x2, y2),
-                )));
+                sketch.add_line(Point2::new(x1, y1), Point2::new(x2, y2));
             }
             TokenSketchEntity::Circle {
                 center_x,
@@ -351,7 +337,7 @@ fn build_sketch_from_geometry(geom: &SketchData) -> Option<Sketch> {
                 let cy = center_y / 0.0254;
                 let radius = (diameter / 0.0254) / 2.0;
 
-                sketch.add(Segment2D::Circle(Circle2D::new(Point2::new(cx, cy), radius)));
+                sketch.add_circle(Point2::new(cx, cy), radius);
             }
         }
     }
@@ -366,6 +352,7 @@ fn build_sketch_from_geometry(geom: &SketchData) -> Option<Sketch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::Segment2D;
 
     #[test]
     fn test_decode_stream_name() {

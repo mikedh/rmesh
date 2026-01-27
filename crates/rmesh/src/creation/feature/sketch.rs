@@ -2,11 +2,16 @@
 //!
 //! Sketches are the foundation for feature operations like extrude and revolve.
 //! Each entity has a stable ID that survives editing and serialization.
+//!
+//! Sketches use indexed vertices - all points are stored in a shared `vertices`
+//! array and entities reference them by index.
 
 use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
 
-use crate::path::{Segment2D, Line2D, Circle2D, Arc2D, Winding};
+use crate::path::{Arc2, Circle2, Line, Segment2D, Winding};
+
+use super::constraint::Constraint;
 use super::error::{FeatureError, Result};
 use super::plane::SketchPlane;
 
@@ -42,7 +47,7 @@ pub struct SketchEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// The geometry of this entity
+    /// The geometry of this entity (references vertex indices)
     pub segment: Segment2D,
 
     /// Construction geometry doesn't form part of the profile
@@ -73,14 +78,14 @@ impl SketchEntity {
         self
     }
 
-    /// Get the start point of this entity
-    pub fn start(&self) -> Point2<f64> {
-        self.segment.start()
+    /// Get the start point of this entity using vertices array
+    pub fn start(&self, vertices: &[Point2<f64>]) -> Option<Point2<f64>> {
+        self.segment.start(vertices)
     }
 
-    /// Get the end point of this entity
-    pub fn finish(&self) -> Point2<f64> {
-        self.segment.finish()
+    /// Get the end point of this entity using vertices array
+    pub fn finish(&self, vertices: &[Point2<f64>]) -> Option<Point2<f64>> {
+        self.segment.finish(vertices)
     }
 }
 
@@ -88,6 +93,10 @@ impl SketchEntity {
 ///
 /// Sketches are the foundation for operations like extrude, revolve, etc.
 /// Each entity has a stable ID that survives editing and serialization.
+///
+/// Vertices are stored in a shared array and entities reference them by index.
+/// Constraints define geometric relationships between entities and are solved
+/// to determine final vertex positions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sketch {
     /// The plane this sketch lies on
@@ -98,9 +107,19 @@ pub struct Sketch {
     #[serde(default = "default_next_id")]
     next_id: u64,
 
+    /// Shared vertex array
+    #[serde(default)]
+    pub vertices: Vec<Point2<f64>>,
+
     /// The entities in this sketch
     #[serde(default)]
     pub entities: Vec<SketchEntity>,
+
+    /// Constraints defining geometric relationships
+    ///
+    /// Dimension values can be Starlark expressions referencing environment variables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<Constraint>,
 }
 
 fn default_next_id() -> u64 {
@@ -119,7 +138,9 @@ impl Sketch {
         Self {
             plane: SketchPlane::xy(),
             next_id: 1,
+            vertices: Vec::new(),
             entities: Vec::new(),
+            constraints: Vec::new(),
         }
     }
 
@@ -128,8 +149,21 @@ impl Sketch {
         Self {
             plane,
             next_id: 1,
+            vertices: Vec::new(),
             entities: Vec::new(),
+            constraints: Vec::new(),
         }
+    }
+
+    /// Add a constraint to the sketch
+    pub fn add_constraint(&mut self, constraint: Constraint) {
+        self.constraints.push(constraint);
+    }
+
+    /// Add a constraint and return self (builder pattern)
+    pub fn with_constraint(mut self, constraint: Constraint) -> Self {
+        self.constraints.push(constraint);
+        self
     }
 
     /// Generate a new unique entity ID
@@ -137,6 +171,25 @@ impl Sketch {
         let id = EntityId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    /// Add a vertex and return its index
+    pub fn add_vertex(&mut self, point: Point2<f64>) -> usize {
+        let idx = self.vertices.len();
+        self.vertices.push(point);
+        idx
+    }
+
+    /// Add or get vertex index (deduplicates within tolerance)
+    pub fn add_or_get_vertex(&mut self, point: Point2<f64>, tolerance: f64) -> usize {
+        for (i, v) in self.vertices.iter().enumerate() {
+            let dx = v.x - point.x;
+            let dy = v.y - point.y;
+            if dx * dx + dy * dy < tolerance * tolerance {
+                return i;
+            }
+        }
+        self.add_vertex(point)
     }
 
     /// Add a segment to the sketch, returning its assigned ID
@@ -149,29 +202,39 @@ impl Sketch {
     /// Add a segment with a name
     pub fn add_named(&mut self, name: impl Into<String>, segment: Segment2D) -> EntityId {
         let id = self.next_entity_id();
-        self.entities.push(SketchEntity::new(id, segment).with_name(name));
+        self.entities
+            .push(SketchEntity::new(id, segment).with_name(name));
         id
     }
 
     /// Add a line segment
     pub fn add_line(&mut self, start: Point2<f64>, end: Point2<f64>) -> EntityId {
-        self.add(Segment2D::Line(Line2D::new(start, end)))
+        let start_idx = self.add_or_get_vertex(start, 1e-10);
+        let end_idx = self.add_or_get_vertex(end, 1e-10);
+        self.add(Segment2D::Line(Line::new(start_idx, end_idx)))
     }
 
     /// Add a circle
     pub fn add_circle(&mut self, center: Point2<f64>, radius: f64) -> EntityId {
-        self.add(Segment2D::Circle(Circle2D::new(center, radius)))
+        let center_idx = self.add_or_get_vertex(center, 1e-10);
+        self.add(Segment2D::Circle(Circle2::new(center_idx, radius)))
     }
 
-    /// Add an arc
+    /// Add an arc from center, angle, and winding
+    ///
+    /// The center is computed from the endpoints and angle.
     pub fn add_arc(
         &mut self,
         start: Point2<f64>,
         finish: Point2<f64>,
-        center: Point2<f64>,
+        angle: f64,
         winding: Winding,
     ) -> EntityId {
-        self.add(Segment2D::Arc(Arc2D::new(start, finish, center, winding)))
+        let start_idx = self.add_or_get_vertex(start, 1e-10);
+        let finish_idx = self.add_or_get_vertex(finish, 1e-10);
+        self.add(Segment2D::Arc(Arc2::new(
+            start_idx, finish_idx, angle, winding,
+        )))
     }
 
     /// Get an entity by ID
@@ -202,15 +265,15 @@ impl Sketch {
         let hh = height / 2.0;
 
         let mut sketch = Self::new();
-        let p0 = Point2::new(-hw, -hh);
-        let p1 = Point2::new(hw, -hh);
-        let p2 = Point2::new(hw, hh);
-        let p3 = Point2::new(-hw, hh);
+        let p0 = sketch.add_vertex(Point2::new(-hw, -hh));
+        let p1 = sketch.add_vertex(Point2::new(hw, -hh));
+        let p2 = sketch.add_vertex(Point2::new(hw, hh));
+        let p3 = sketch.add_vertex(Point2::new(-hw, hh));
 
-        sketch.add_line(p0, p1);
-        sketch.add_line(p1, p2);
-        sketch.add_line(p2, p3);
-        sketch.add_line(p3, p0);
+        sketch.add(Segment2D::Line(Line::new(p0, p1)));
+        sketch.add(Segment2D::Line(Line::new(p1, p2)));
+        sketch.add(Segment2D::Line(Line::new(p2, p3)));
+        sketch.add(Segment2D::Line(Line::new(p3, p0)));
 
         sketch
     }
@@ -218,15 +281,15 @@ impl Sketch {
     /// Create a rectangle with corner at origin
     pub fn rectangle_corner(width: f64, height: f64) -> Self {
         let mut sketch = Self::new();
-        let p0 = Point2::new(0.0, 0.0);
-        let p1 = Point2::new(width, 0.0);
-        let p2 = Point2::new(width, height);
-        let p3 = Point2::new(0.0, height);
+        let p0 = sketch.add_vertex(Point2::new(0.0, 0.0));
+        let p1 = sketch.add_vertex(Point2::new(width, 0.0));
+        let p2 = sketch.add_vertex(Point2::new(width, height));
+        let p3 = sketch.add_vertex(Point2::new(0.0, height));
 
-        sketch.add_line(p0, p1);
-        sketch.add_line(p1, p2);
-        sketch.add_line(p2, p3);
-        sketch.add_line(p3, p0);
+        sketch.add(Segment2D::Line(Line::new(p0, p1)));
+        sketch.add(Segment2D::Line(Line::new(p1, p2)));
+        sketch.add(Segment2D::Line(Line::new(p2, p3)));
+        sketch.add(Segment2D::Line(Line::new(p3, p0)));
 
         sketch
     }
@@ -234,7 +297,8 @@ impl Sketch {
     /// Create a circle sketch centered at origin
     pub fn circle(radius: f64) -> Self {
         let mut sketch = Self::new();
-        sketch.add_circle(Point2::new(0.0, 0.0), radius);
+        let center_idx = sketch.add_vertex(Point2::new(0.0, 0.0));
+        sketch.add(Segment2D::Circle(Circle2::new(center_idx, radius)));
         sketch
     }
 
@@ -257,22 +321,24 @@ impl Sketch {
 
         // Check for closed single entities (like Circle)
         if entities.len() == 1 && entities[0].segment.is_closed() {
-            let mut points = entities[0].segment.tessellate(tolerance);
-            // Close the polygon by adding the end point
-            points.push(entities[0].finish());
+            let mut points = entities[0].segment.discretize(&self.vertices, tolerance);
+            // Close the polygon by adding the first point at the end
+            if let Some(first) = points.first().copied() {
+                points.push(first);
+            }
             return Ok(vec![points]);
         }
 
         // For multiple entities, find connected chains
-        let chains = find_connected_chains(&entities, tolerance)?;
+        let chains = find_connected_chains(&entities, &self.vertices, tolerance)?;
 
         let mut polygons = Vec::new();
         for chain in chains {
             let mut points = Vec::new();
             for idx in chain {
                 let entity = &entities[idx];
-                let tessellated = entity.segment.tessellate(tolerance);
-                points.extend(tessellated);
+                let discretized = entity.segment.discretize(&self.vertices, tolerance);
+                points.extend(discretized);
             }
             if !points.is_empty() {
                 polygons.push(points);
@@ -290,7 +356,11 @@ impl Sketch {
 }
 
 /// Find connected chains of entities that form closed loops
-fn find_connected_chains(entities: &[&SketchEntity], tolerance: f64) -> Result<Vec<Vec<usize>>> {
+fn find_connected_chains(
+    entities: &[&SketchEntity],
+    vertices: &[Point2<f64>],
+    tolerance: f64,
+) -> Result<Vec<Vec<usize>>> {
     if entities.is_empty() {
         return Ok(vec![]);
     }
@@ -304,8 +374,12 @@ fn find_connected_chains(entities: &[&SketchEntity], tolerance: f64) -> Result<V
         let mut chain = vec![start_idx];
         used[start_idx] = true;
 
-        let chain_start = entities[start_idx].start();
-        let mut chain_end = entities[start_idx].finish();
+        let Some(chain_start) = entities[start_idx].start(vertices) else {
+            continue; // Skip degenerate entities
+        };
+        let Some(mut chain_end) = entities[start_idx].finish(vertices) else {
+            continue;
+        };
 
         // Keep extending the chain
         loop {
@@ -316,8 +390,12 @@ fn find_connected_chains(entities: &[&SketchEntity], tolerance: f64) -> Result<V
                     continue;
                 }
 
-                let start = entities[i].start();
-                let end = entities[i].finish();
+                let Some(start) = entities[i].start(vertices) else {
+                    continue;
+                };
+                let Some(end) = entities[i].finish(vertices) else {
+                    continue;
+                };
 
                 // Check if this entity connects to the chain end
                 if points_close(chain_end, start, tolerance) {
@@ -369,10 +447,9 @@ mod tests {
         let mut sketch = Sketch::new();
 
         let id1 = sketch.add_line(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0));
-        let id2 = sketch.add_named(
-            "vertical",
-            Segment2D::Line(Line2D::new(Point2::new(10.0, 0.0), Point2::new(10.0, 10.0))),
-        );
+        let start_idx = sketch.add_or_get_vertex(Point2::new(10.0, 0.0), 1e-10);
+        let end_idx = sketch.add_vertex(Point2::new(10.0, 10.0));
+        let id2 = sketch.add_named("vertical", Segment2D::Line(Line::new(start_idx, end_idx)));
 
         assert_eq!(id1, EntityId(1));
         assert_eq!(id2, EntityId(2));
@@ -385,6 +462,7 @@ mod tests {
         let sketch = Sketch::rectangle(10.0, 5.0);
 
         assert_eq!(sketch.entities.len(), 4);
+        assert_eq!(sketch.vertices.len(), 4);
 
         let polygons = sketch.to_polygon().unwrap();
         assert_eq!(polygons.len(), 1);
@@ -396,6 +474,7 @@ mod tests {
         let sketch = Sketch::circle(5.0);
 
         assert_eq!(sketch.entities.len(), 1);
+        assert_eq!(sketch.vertices.len(), 1); // Just center
 
         let polygons = sketch.to_polygon().unwrap();
         assert_eq!(polygons.len(), 1);
@@ -411,6 +490,7 @@ mod tests {
         let parsed: Sketch = serde_json::from_str(&json).unwrap();
 
         assert_eq!(sketch.entities.len(), parsed.entities.len());
+        assert_eq!(sketch.vertices.len(), parsed.vertices.len());
 
         // Entity IDs should be preserved
         for (orig, loaded) in sketch.entities.iter().zip(parsed.entities.iter()) {
@@ -441,5 +521,17 @@ mod tests {
     #[test]
     fn test_entity_id_display() {
         assert_eq!(EntityId(42).to_string(), "e42");
+    }
+
+    #[test]
+    fn test_vertex_deduplication() {
+        let mut sketch = Sketch::new();
+        let idx1 = sketch.add_or_get_vertex(Point2::new(0.0, 0.0), 0.01);
+        let idx2 = sketch.add_or_get_vertex(Point2::new(0.001, 0.001), 0.01); // Within tolerance
+        let idx3 = sketch.add_or_get_vertex(Point2::new(10.0, 0.0), 0.01); // New vertex
+
+        assert_eq!(idx1, idx2);
+        assert_ne!(idx1, idx3);
+        assert_eq!(sketch.vertices.len(), 2);
     }
 }

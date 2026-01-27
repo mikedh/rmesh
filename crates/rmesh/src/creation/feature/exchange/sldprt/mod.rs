@@ -54,9 +54,8 @@ pub use parser::SldprtImport;
 ///
 /// An `SldprtImport` containing the extracted operations and any warnings.
 pub fn read_sldprt(path: impl AsRef<Path>) -> Result<SldprtImport> {
-    let data = std::fs::read(path.as_ref()).map_err(|e| {
-        FeatureError::ParseError(format!("Failed to read file: {}", e))
-    })?;
+    let data = std::fs::read(path.as_ref())
+        .map_err(|e| FeatureError::ParseError(format!("Failed to read file: {}", e)))?;
     parse_sldprt_bytes(&data)
 }
 

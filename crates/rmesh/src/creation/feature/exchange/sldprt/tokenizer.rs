@@ -162,7 +162,10 @@ pub fn tokenize(data: &[u8]) -> Vec<Segment> {
             continue;
         }
         let type_bytes = &data[start + 6..start + 6 + len];
-        if !type_bytes.iter().all(|&b| b.is_ascii_graphic() || b == b' ') {
+        if !type_bytes
+            .iter()
+            .all(|&b| b.is_ascii_graphic() || b == b' ')
+        {
             continue;
         }
         let type_name = match std::str::from_utf8(type_bytes) {
@@ -255,9 +258,7 @@ mod handlers {
         let (cx, cy) = coords.first().copied().unwrap_or((0.0, 0.0));
 
         // Get diameter from adjacent sgCircleDim (should be within 5 segments)
-        let diameter = ctx
-            .find_following("sgCircleDim", 5)?
-            .dimension()?;
+        let diameter = ctx.find_following("sgCircleDim", 5)?.dimension()?;
 
         Some(SketchEntity::Circle {
             center_x: cx,
@@ -265,15 +266,14 @@ mod handlers {
             diameter,
         })
     }
-
-    // Future handlers can be added here:
-    // pub fn line_handle(seg: &Segment, ctx: &ExtractContext) -> Option<SketchEntity> { ... }
-    // pub fn spline_handle(seg: &Segment, ctx: &ExtractContext) -> Option<SketchEntity> { ... }
-    // pub fn ellipse_handle(seg: &Segment, ctx: &ExtractContext) -> Option<SketchEntity> { ... }
 }
 
 /// Try to extract an entity from a segment using the appropriate handler
-fn extract_entity(seg: &Segment, ctx: &ExtractContext, warnings: &mut Vec<String>) -> Option<SketchEntity> {
+fn extract_entity(
+    seg: &Segment,
+    ctx: &ExtractContext,
+    warnings: &mut Vec<String>,
+) -> Option<SketchEntity> {
     match seg.type_name.as_str() {
         "sgArcHandle" => handlers::arc_handle(seg, ctx),
 
@@ -503,9 +503,7 @@ mod tests {
     #[test]
     fn test_tokenize_segment_with_coords() {
         // Type marker + coord in payload
-        let mut data = vec![
-            0xff, 0xff, 0x01, 0x00, 0x04, 0x00, b't', b'e', b's', b't',
-        ];
+        let mut data = vec![0xff, 0xff, 0x01, 0x00, 0x04, 0x00, b't', b'e', b's', b't'];
         // Add coord marker: 1E 00 <x:f64> <y:f64>
         data.extend_from_slice(&[0x1e, 0x00]);
         data.extend_from_slice(&(-0.0127f64).to_le_bytes()); // -0.5"

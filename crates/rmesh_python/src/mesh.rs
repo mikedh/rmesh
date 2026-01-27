@@ -64,7 +64,9 @@ impl PyGrouping {
             GroupingKind::Object => "object",
             GroupingKind::Unspecified => "unspecified",
         };
-        let names = pyo3::types::PyList::new(py, &grouping.names).unwrap().unbind();
+        let names = pyo3::types::PyList::new(py, &grouping.names)
+            .unwrap()
+            .unbind();
         let indices: Vec<i64> = grouping.indices.iter().map(|&i| i as i64).collect();
         let indices_arr = PyArray1::from_vec(py, indices);
         make_readonly(&indices_arr);
@@ -122,8 +124,7 @@ impl PyGroupingCollection {
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyGroupingIterator>> {
-        let cloned: Vec<Py<PyGrouping>> =
-            self.groupings.iter().map(|g| g.clone_ref(py)).collect();
+        let cloned: Vec<Py<PyGrouping>> = self.groupings.iter().map(|g| g.clone_ref(py)).collect();
         Py::new(
             py,
             PyGroupingIterator {
