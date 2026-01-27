@@ -326,8 +326,10 @@ pub trait RmeshSerializable: Serialize + for<'de> Deserialize<'de> + Sized {
             Ok(json.into_bytes())
         } else {
             // Binary format: MessagePack + zstd
+            // Use to_vec_named to preserve struct field names (required for custom deserializers
+            // like unit_quaternion). Arrays/Vecs are still serialized efficiently as msgpack arrays.
             let serialized =
-                rmp_serde::to_vec(self).map_err(|e| anyhow!("Failed to serialize: {e}"))?;
+                rmp_serde::to_vec_named(self).map_err(|e| anyhow!("Failed to serialize: {e}"))?;
 
             // Calculate SHA256 hash of uncompressed data
             let mut hasher = Sha256::new();

@@ -8,8 +8,10 @@ use pyo3::types::PyDict;
 
 use rmesh::creation::feature::{
     backends::fidget::{FidgetBackend, FidgetSettings},
-    evaluator, Chamfer, EdgeSelection, Environment, Extrude, FeatureBackend, FeatureModel, Fillet,
-    Loft, Operation, Revolve, Sign, Sketch, SketchPlane, Sweep, Units,
+    evaluator,
+    exchange::load_feature_model_from_path,
+    Chamfer, EdgeSelection, Environment, Extrude, FeatureBackend, FeatureModel, Fillet, Loft,
+    Operation, Revolve, Sign, Sketch, SketchPlane, Sweep, Units,
 };
 use rmesh::path::{Line, Path2D, Path3D, Segment3D};
 use rmesh::serialize::RmeshSerializable;
@@ -968,10 +970,66 @@ impl PyFeatureModel {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
-    /// Load a model from JSON (rmesh format with rmesh_name wrapper).
+    /// Serialize the model to compressed binary format.
+    ///
+    /// Uses MessagePack + zstd compression with integrity checking.
+    /// Much more compact than JSON for storage/transmission.
+    ///
+    /// Parameters
+    /// ----------
+    /// compress_level : int, optional
+    ///     Zstd compression level 1-22 (default: 3).
+    ///
+    /// Returns
+    /// -------
+    /// bytes
+    ///     Compressed binary data with 128-byte header.
+    #[pyo3(signature = (compress_level=None))]
+    fn to_bytes<'py>(&self, py: Python<'py>, compress_level: Option<i32>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let bytes = self
+            .inner
+            .to_bytes(compress_level, false) // as_json=false
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(pyo3::types::PyBytes::new(py, &bytes))
+    }
+
+    /// Load a model from a file path.
+    ///
+    /// Format is auto-detected from file extension (.json, .sldprt).
+    ///
+    /// Parameters
+    /// ----------
+    /// path : str
+    ///     Path to the file.
+    ///
+    /// Returns
+    /// -------
+    /// FeatureModel
+    ///     The loaded model.
     #[staticmethod]
-    fn from_json(json: &str) -> PyResult<Self> {
-        let inner = FeatureModel::from_bytes(json.as_bytes())
+    fn load(path: &str) -> PyResult<Self> {
+        let inner = load_feature_model_from_path(path)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// Load a model from bytes.
+    ///
+    /// Auto-detects rmesh JSON vs binary format. For external formats
+    /// like SLDPRT, use `load()` with a file path.
+    ///
+    /// Parameters
+    /// ----------
+    /// data : bytes
+    ///     Raw bytes (rmesh JSON or binary format).
+    ///
+    /// Returns
+    /// -------
+    /// FeatureModel
+    ///     The loaded model.
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner = FeatureModel::from_bytes(data)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
