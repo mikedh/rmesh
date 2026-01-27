@@ -379,7 +379,7 @@ pub struct PyTrimesh {
 }
 
 impl PyTrimesh {
-    fn new_from_trimesh(data: Trimesh) -> Self {
+    pub fn new_from_trimesh(data: Trimesh) -> Self {
         Self {
             data,
             vertices_cache: OnceCell::new(),
