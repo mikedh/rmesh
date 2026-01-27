@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::path::{Arc2, Circle2, Line, Segment2D, Winding};
 
 use super::constraint::Constraint;
+use super::environment::Environment;
 use super::error::{FeatureError, Result};
 use super::plane::SketchPlane;
 
@@ -166,6 +167,30 @@ impl Sketch {
         self
     }
 
+    /// Solve constraints and update vertex positions in place
+    ///
+    /// This is the main entry point for constraint solving. After solving,
+    /// the sketch's vertices are updated to satisfy the constraints.
+    ///
+    /// For animations/sweeps, call this repeatedly - it automatically
+    /// warm-starts from the current vertex positions.
+    ///
+    /// Returns the solve result with status and diagnostics.
+    pub fn solve(&mut self, env: &Environment) -> Result<super::constraint::SolveResult> {
+        let solver = super::constraint::Solver2D::new(self, env)?;
+        let result = solver.solve()?;
+
+        // Update vertices with solved positions (warm start for next solve)
+        for (i, v) in self.vertices.iter_mut().enumerate() {
+            if let Some((x, y)) = result.vertex(i) {
+                v.x = x;
+                v.y = y;
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Generate a new unique entity ID
     fn next_entity_id(&mut self) -> EntityId {
         let id = EntityId(self.next_id);
@@ -245,6 +270,44 @@ impl Sketch {
     /// Get a mutable reference to an entity by ID
     pub fn get_mut(&mut self, id: EntityId) -> Option<&mut SketchEntity> {
         self.entities.iter_mut().find(|e| e.id == id)
+    }
+
+    /// Get the start and end vertex indices for a line or arc entity
+    ///
+    /// Returns an error if the entity doesn't exist or has no endpoints.
+    pub fn entity_endpoints(&self, id: EntityId) -> Result<(usize, usize)> {
+        let entity = self.get(id).ok_or_else(|| {
+            FeatureError::InvalidSketch(format!("Entity {} not found", id))
+        })?;
+
+        // Try to get endpoints using the Curve trait
+        match entity.segment.end_indices() {
+            Some([start, end]) => Ok((start, end)),
+            None => Err(FeatureError::InvalidSketch(
+                "Entity has no endpoints (e.g., closed circle)".into(),
+            )),
+        }
+    }
+
+    /// Get the center vertex index for a circle entity
+    ///
+    /// Returns an error if the entity doesn't exist or isn't a circle.
+    pub fn entity_center(&self, id: EntityId) -> Result<usize> {
+        let entity = self.get(id).ok_or_else(|| {
+            FeatureError::InvalidSketch(format!("Entity {} not found", id))
+        })?;
+
+        match &entity.segment {
+            Segment2D::Circle(circle) => Ok(circle.center),
+            Segment2D::Arc(_)
+            | Segment2D::Line(_)
+            | Segment2D::Ellipse(_)
+            | Segment2D::CubicBezier(_)
+            | Segment2D::QuadraticBezier(_)
+            | Segment2D::BSpline(_) => Err(FeatureError::GeometryError(
+                "Entity has no center vertex".into(),
+            )),
+        }
     }
 
     /// Get an entity by name

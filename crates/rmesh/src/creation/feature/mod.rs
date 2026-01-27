@@ -37,6 +37,7 @@ pub mod backends;
 pub mod constraint;
 pub mod environment;
 pub mod error;
+pub mod evaluator;
 pub mod exchange;
 pub mod operation;
 pub mod plane;
@@ -44,7 +45,7 @@ pub mod sketch;
 
 // Re-export commonly used types
 pub use backend::{BackendSettings, DefaultSettings, FeatureBackend};
-pub use constraint::{Constraint, Dim, PointRef};
+pub use constraint::{Constraint, Dim, PointRef, SolveResult, SolveStatus, Solver2D};
 pub use environment::{Environment, Units};
 pub use error::{FeatureError, Result};
 pub use operation::{
