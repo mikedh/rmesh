@@ -8,7 +8,7 @@ use crate::{
     simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
     triangles::inertia::{self, MassProperties},
 };
-use nalgebra::{Matrix3, Point3, Vector2, Vector3};
+use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
 
 /// A triangle mesh with vertices and face indices.
@@ -302,12 +302,6 @@ impl Trimesh {
         *self
             .cache_area
             .get_or_init(|| self.faces_area().iter().sum())
-    }
-
-    /// A helper method to get the UV coordinate attributes
-    /// stored in `mesh.attributes_vertex`.
-    pub fn uv(&self) -> Option<&Vec<Vector2<f64>>> {
-        self.attributes_vertex.uv.first()
     }
 
     /// What are the pairs of face indices that share an edge?
@@ -696,7 +690,8 @@ mod tests {
 
     use super::*;
     use crate::creation::create_box;
-    use crate::exchange::{MeshFormat, load_mesh};
+    use crate::exchange::{FileType, load};
+    use crate::geometry::Geometry;
     use approx::relative_eq;
 
     #[test]
@@ -739,7 +734,11 @@ mod tests {
         let stl_data = include_bytes!("../../../test/data/unit_cube.STL");
 
         // STL doesn't need a resolver, pass None
-        let mesh = load_mesh(stl_data, MeshFormat::STL, None).unwrap();
+        let scene = load(stl_data, Some(FileType::STL), None).unwrap();
+        let mesh = match &scene.geometry[0] {
+            Geometry::Mesh(m) => m,
+            _ => panic!("Expected Mesh geometry"),
+        };
 
         assert_eq!(mesh.vertices.len(), 36);
         assert_eq!(mesh.faces.len(), 12);

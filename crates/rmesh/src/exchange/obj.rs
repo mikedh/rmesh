@@ -260,6 +260,9 @@ impl ObjMesh {
     ///
     /// If `resolver` is `None`, external files (MTL, textures) are silently skipped.
     pub fn from_string(data: &str, resolver: Option<&dyn Resolver>) -> Self {
+        // Handle OBJ line continuation: backslash at end of line joins with next line
+        let data = data.replace("\\\n", " ").replace("\\\r\n", " ");
+
         // parse the strings in parallel
         let lines: Vec<ObjLine> = data
             .lines()
@@ -284,7 +287,8 @@ impl ObjMesh {
                 ObjLine::V(p, color) => {
                     vertex.vertices.push(*p);
                     if let Some(c) = color {
-                        vertex.color.push((vertex.vertices.len(), *c));
+                        // Use len() - 1 since we already pushed the vertex
+                        vertex.color.push((vertex.vertices.len() - 1, *c));
                     }
                 }
                 ObjLine::Vn(n) => vertex.normal.push(*n),
@@ -314,6 +318,12 @@ impl ObjMesh {
             faces,
             materials,
         }
+    }
+
+    /// Get the primary name for this OBJ mesh.
+    /// Uses the first object name if available, otherwise returns empty string.
+    pub fn primary_name(&self) -> &str {
+        self.faces.objects.first().map(|s| s.as_str()).unwrap_or("")
     }
 
     pub fn into_mesh(self) -> Result<Trimesh> {
@@ -405,9 +415,18 @@ fn str_to_rgba(raw: &[&str]) -> Option<Vector4<u8>> {
 #[cfg(test)]
 mod tests {
 
-    use crate::exchange::{MeshFormat, load_mesh};
+    use crate::exchange::{FileType, load};
+    use crate::geometry::Geometry;
 
     use super::*;
+
+    /// Helper to extract a Trimesh from a Scene's first geometry.
+    fn get_mesh(scene: &crate::scene::Scene) -> &Trimesh {
+        match scene.geometry.values().next().unwrap() {
+            Geometry::Mesh(mesh) => mesh,
+            _ => panic!("Expected Mesh geometry"),
+        }
+    }
 
     #[test]
     fn test_color_parse() {
@@ -431,7 +450,8 @@ mod tests {
         // has many of the test cases we need
         let data = include_str!("../../../../test/data/fuze.obj");
         // make sure the OBJ file was loadable into a mesh (no resolver)
-        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ, None).unwrap();
+        let scene = load(data.as_bytes(), Some(FileType::OBJ), None).unwrap();
+        let mesh = get_mesh(&scene);
 
         // should have loaded a vertex for every occurrence of 'v '
         assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
@@ -439,8 +459,8 @@ mod tests {
         // should have loaded a face for every occurrence of 'f '
         assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
 
-        assert!(mesh.uv().is_some());
-        let uv = mesh.uv().unwrap();
+        assert!(!mesh.attributes_vertex.uv.is_empty());
+        let uv = &mesh.attributes_vertex.uv[0];
         assert_eq!(uv.len(), data.matches("\nvt ").count());
 
         // here's the big tricky TODO
@@ -471,7 +491,8 @@ mod tests {
         }
 
         // make sure the OBJ file was loadable into a mesh (no resolver)
-        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ, None).unwrap();
+        let scene = load(data.as_bytes(), Some(FileType::OBJ), None).unwrap();
+        let mesh = get_mesh(&scene);
 
         // should have loaded a vertex for every occurrence of 'v '
         assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
@@ -485,7 +506,8 @@ mod tests {
     #[test]
     fn test_obj_objects() {
         let data = include_str!("../../../../test/data/basic.obj");
-        let mesh = load_mesh(data.as_bytes(), MeshFormat::OBJ, None).unwrap();
+        let scene = load(data.as_bytes(), Some(FileType::OBJ), None).unwrap();
+        let mesh = get_mesh(&scene);
 
         // Find the object grouping in face attributes
         let objects = mesh
@@ -521,7 +543,8 @@ mod tests {
         let mut resolver = InMemoryResolver::new();
         resolver.insert("./fuze.obj.mtl", mtl_data.as_bytes().to_vec());
 
-        let mesh = load_mesh(obj_data.as_bytes(), MeshFormat::OBJ, Some(&resolver)).unwrap();
+        let scene = load(obj_data.as_bytes(), Some(FileType::OBJ), Some(&resolver)).unwrap();
+        let mesh = get_mesh(&scene);
 
         // Should have loaded 1 material
         assert_eq!(mesh.materials.len(), 1);

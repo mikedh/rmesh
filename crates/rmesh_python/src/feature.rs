@@ -853,7 +853,7 @@ fn parse_edge_selection(edges: Option<Py<PyAny>>, py: Python<'_>) -> PyResult<Ed
 /// >>> print(model.to_json())
 #[pyclass(name = "FeatureModel")]
 pub struct PyFeatureModel {
-    inner: FeatureModel,
+    pub(crate) inner: FeatureModel,
 }
 
 #[pymethods]

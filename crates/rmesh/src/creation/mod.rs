@@ -134,10 +134,17 @@ impl Triangulator {
         let mut result: Vec<usize> = vec![];
         earcut.earcut(flat, &holes, &mut result);
 
-        // convert the flat result into a list of triangles
+        // Build index mapping: earcut returns indices into `flat`, we need original vertex indices
+        // flat[0..exterior.len()] maps to exterior, then interiors follow
+        let mut index_map: Vec<usize> = exterior.to_vec();
+        for interior in interiors {
+            index_map.extend(interior);
+        }
+
+        // convert the flat result into triangles with original vertex indices
         result
             .chunks_exact(3)
-            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .map(|chunk| [index_map[chunk[0]], index_map[chunk[1]], index_map[chunk[2]]])
             .collect()
     }
 

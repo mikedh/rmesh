@@ -7,10 +7,249 @@ use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use rmesh::attributes::{Attributes, GroupingKind, Material};
-use rmesh::exchange::{FileResolver, InMemoryResolver, MeshFormat, load_mesh};
+use rmesh::attributes::{AlphaMode, Attributes, GroupingKind, Material, PBRMaterial, SimpleMaterial};
+use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
+use rmesh::geometry::Geometry;
 use rmesh::mesh::Trimesh;
 use rmesh::resolvers::Resolver;
+
+// ============================================================================
+// PyMaterial
+// ============================================================================
+
+/// A material that can be applied to mesh faces.
+#[pyclass(name = "Material")]
+pub struct PyMaterial {
+    data: Material,
+}
+
+#[pymethods]
+impl PyMaterial {
+    /// The name of the material.
+    #[getter]
+    fn name(&self) -> &str {
+        self.data.name()
+    }
+
+    /// The kind of material: "empty", "simple", or "pbr".
+    #[getter]
+    fn kind(&self) -> &str {
+        match &self.data {
+            Material::Empty(_) => "empty",
+            Material::Simple(_) => "simple",
+            Material::PBR(_) => "pbr",
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // SimpleMaterial properties
+    // -------------------------------------------------------------------------
+
+    /// Diffuse color (RGB), only for simple materials.
+    #[getter]
+    fn diffuse(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        if let Material::Simple(SimpleMaterial { diffuse: Some(d), .. }) = &self.data {
+            let arr = PyArray1::from_vec(py, vec![d.x, d.y, d.z]);
+            make_readonly(&arr);
+            Some(arr.unbind())
+        } else {
+            None
+        }
+    }
+
+    /// Specular color (RGB), only for simple materials.
+    #[getter]
+    fn specular(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        if let Material::Simple(SimpleMaterial { specular: Some(s), .. }) = &self.data {
+            let arr = PyArray1::from_vec(py, vec![s.x, s.y, s.z]);
+            make_readonly(&arr);
+            Some(arr.unbind())
+        } else {
+            None
+        }
+    }
+
+    /// Shininess value, only for simple materials.
+    #[getter]
+    fn shininess(&self) -> Option<f64> {
+        if let Material::Simple(SimpleMaterial { shininess, .. }) = &self.data {
+            *shininess
+        } else {
+            None
+        }
+    }
+
+    /// Alpha (transparency) value, only for simple materials.
+    #[getter]
+    fn alpha(&self) -> Option<f64> {
+        if let Material::Simple(SimpleMaterial { alpha, .. }) = &self.data {
+            *alpha
+        } else {
+            None
+        }
+    }
+
+    /// Whether this material has a diffuse texture, only for simple materials.
+    #[getter]
+    fn has_diffuse_texture(&self) -> bool {
+        matches!(&self.data, Material::Simple(s) if s.diffuse_texture.is_some())
+    }
+
+    // -------------------------------------------------------------------------
+    // PBRMaterial properties
+    // -------------------------------------------------------------------------
+
+    /// Base color factor (RGBA), only for PBR materials.
+    #[getter]
+    fn base_color_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        if let Material::PBR(PBRMaterial { base_color_factor, .. }) = &self.data {
+            let arr = PyArray1::from_vec(py, vec![
+                base_color_factor.x,
+                base_color_factor.y,
+                base_color_factor.z,
+                base_color_factor.w,
+            ]);
+            make_readonly(&arr);
+            Some(arr.unbind())
+        } else {
+            None
+        }
+    }
+
+    /// Metallic factor (0.0 = dielectric, 1.0 = metal), only for PBR materials.
+    #[getter]
+    fn metallic_factor(&self) -> Option<f64> {
+        if let Material::PBR(PBRMaterial { metallic_factor, .. }) = &self.data {
+            Some(*metallic_factor)
+        } else {
+            None
+        }
+    }
+
+    /// Roughness factor (0.0 = smooth, 1.0 = rough), only for PBR materials.
+    #[getter]
+    fn roughness_factor(&self) -> Option<f64> {
+        if let Material::PBR(PBRMaterial { roughness_factor, .. }) = &self.data {
+            Some(*roughness_factor)
+        } else {
+            None
+        }
+    }
+
+    /// Normal map scale, only for PBR materials.
+    #[getter]
+    fn normal_scale(&self) -> Option<f64> {
+        if let Material::PBR(PBRMaterial { normal_scale, .. }) = &self.data {
+            Some(*normal_scale)
+        } else {
+            None
+        }
+    }
+
+    /// Occlusion strength, only for PBR materials.
+    #[getter]
+    fn occlusion_strength(&self) -> Option<f64> {
+        if let Material::PBR(PBRMaterial { occlusion_strength, .. }) = &self.data {
+            Some(*occlusion_strength)
+        } else {
+            None
+        }
+    }
+
+    /// Emissive color factor (RGB), only for PBR materials.
+    #[getter]
+    fn emissive_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        if let Material::PBR(PBRMaterial { emissive_factor, .. }) = &self.data {
+            let arr = PyArray1::from_vec(py, vec![
+                emissive_factor.x,
+                emissive_factor.y,
+                emissive_factor.z,
+            ]);
+            make_readonly(&arr);
+            Some(arr.unbind())
+        } else {
+            None
+        }
+    }
+
+    /// Alpha blending mode: "opaque", "mask", or "blend", only for PBR materials.
+    #[getter]
+    fn alpha_mode(&self) -> Option<&str> {
+        if let Material::PBR(PBRMaterial { alpha_mode, .. }) = &self.data {
+            Some(match alpha_mode {
+                AlphaMode::Opaque => "opaque",
+                AlphaMode::Mask => "mask",
+                AlphaMode::Blend => "blend",
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Alpha cutoff threshold for mask mode, only for PBR materials.
+    #[getter]
+    fn alpha_cutoff(&self) -> Option<f64> {
+        if let Material::PBR(PBRMaterial { alpha_cutoff, .. }) = &self.data {
+            Some(*alpha_cutoff)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the material is double-sided, only for PBR materials.
+    #[getter]
+    fn double_sided(&self) -> Option<bool> {
+        if let Material::PBR(PBRMaterial { double_sided, .. }) = &self.data {
+            Some(*double_sided)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this material has a base color texture, only for PBR materials.
+    #[getter]
+    fn has_base_color_texture(&self) -> bool {
+        matches!(&self.data, Material::PBR(p) if p.base_color_texture.is_some())
+    }
+
+    /// Whether this material has a metallic-roughness texture, only for PBR materials.
+    #[getter]
+    fn has_metallic_roughness_texture(&self) -> bool {
+        matches!(&self.data, Material::PBR(p) if p.metallic_roughness_texture.is_some())
+    }
+
+    /// Whether this material has a normal texture, only for PBR materials.
+    #[getter]
+    fn has_normal_texture(&self) -> bool {
+        matches!(&self.data, Material::PBR(p) if p.normal_texture.is_some())
+    }
+
+    /// Whether this material has an occlusion texture, only for PBR materials.
+    #[getter]
+    fn has_occlusion_texture(&self) -> bool {
+        matches!(&self.data, Material::PBR(p) if p.occlusion_texture.is_some())
+    }
+
+    /// Whether this material has an emissive texture, only for PBR materials.
+    #[getter]
+    fn has_emissive_texture(&self) -> bool {
+        matches!(&self.data, Material::PBR(p) if p.emissive_texture.is_some())
+    }
+
+    fn __repr__(&self) -> String {
+        let name = self.data.name();
+        let kind = match &self.data {
+            Material::Empty(_) => "empty",
+            Material::Simple(_) => "simple",
+            Material::PBR(_) => "pbr",
+        };
+        if name.is_empty() {
+            format!("Material(kind='{}')", kind)
+        } else {
+            format!("Material(name='{}', kind='{}')", name, kind)
+        }
+    }
+}
 
 // ============================================================================
 // Attribute Classes
@@ -340,24 +579,6 @@ macro_rules! cached_array {
     }};
 }
 
-macro_rules! cached_array_opt {
-    ($self:expr, $py:expr, $cache:ident, $data:expr, $cols:expr) => {{
-        $self
-            .$cache
-            .get_or_init(|| {
-                $data.as_ref().map(|d| {
-                    let flat: &[_] = bytemuck::cast_slice(d.as_slice());
-                    let nd = Array2::from_shape_vec((d.len(), $cols), flat.to_vec()).unwrap();
-                    let arr = PyArray2::from_array($py, &nd);
-                    make_readonly(&arr);
-                    arr.unbind()
-                })
-            })
-            .as_ref()
-            .map(|a| a.clone_ref($py))
-    }};
-}
-
 // ============================================================================
 // PyTrimesh
 // ============================================================================
@@ -367,9 +588,6 @@ pub struct PyTrimesh {
     data: Trimesh,
     vertices_cache: OnceCell<Py<PyArray2<f64>>>,
     faces_cache: OnceCell<Py<PyArray2<i64>>>,
-    uv_cache: OnceCell<Option<Py<PyArray2<f64>>>>,
-    vertex_normals_cache: OnceCell<Option<Py<PyArray2<f64>>>>,
-    face_colors_cache: OnceCell<Option<Py<PyArray2<u8>>>>,
     face_normals_cache: OnceCell<Py<PyArray2<f64>>>,
     edges_cache: OnceCell<Py<PyArray2<i64>>>,
     face_adjacency_cache: OnceCell<Py<PyArray2<i64>>>,
@@ -384,9 +602,6 @@ impl PyTrimesh {
             data,
             vertices_cache: OnceCell::new(),
             faces_cache: OnceCell::new(),
-            uv_cache: OnceCell::new(),
-            vertex_normals_cache: OnceCell::new(),
-            face_colors_cache: OnceCell::new(),
             face_normals_cache: OnceCell::new(),
             edges_cache: OnceCell::new(),
             face_adjacency_cache: OnceCell::new(),
@@ -443,33 +658,6 @@ impl PyTrimesh {
                 arr.unbind()
             })
             .clone_ref(py)
-    }
-
-    #[getter]
-    fn uv(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
-        cached_array_opt!(self, py, uv_cache, self.data.uv(), 2)
-    }
-
-    #[getter]
-    fn vertex_normals(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
-        cached_array_opt!(
-            self,
-            py,
-            vertex_normals_cache,
-            self.data.attributes_vertex.normals.first(),
-            3
-        )
-    }
-
-    #[getter]
-    fn face_colors(&self, py: Python<'_>) -> Option<Py<PyArray2<u8>>> {
-        cached_array_opt!(
-            self,
-            py,
-            face_colors_cache,
-            self.data.attributes_face.colors.first(),
-            4
-        )
     }
 
     /// Full access to vertex attributes (multiple UV sets, normals, colors).
@@ -717,6 +905,7 @@ impl PyTrimesh {
             .clone_ref(py)
     }
 
+    #[getter]
     fn face_adjacency_angles(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
         self.face_adjacency_angles_cache
             .get_or_init(|| {
@@ -831,25 +1020,22 @@ impl PyTrimesh {
         self.data.is_convex()
     }
 
-    fn material_name(&self, index: usize) -> Option<String> {
-        self.data.materials.get(index).map(|m| match m {
-            Material::Simple(s) => s.name.clone(),
-            _ => String::new(),
-        })
+    /// List of materials attached to this mesh.
+    #[getter]
+    fn materials(&self, py: Python<'_>) -> Vec<Py<PyMaterial>> {
+        self.data
+            .materials
+            .iter()
+            .map(|m| Py::new(py, PyMaterial { data: m.clone() }).unwrap())
+            .collect()
     }
 
-    fn material_has_texture(&self, index: usize) -> bool {
-        matches!(
-            self.data.materials.get(index),
-            Some(Material::Simple(s)) if s.diffuse_texture.is_some()
+    fn __repr__(&self) -> String {
+        format!(
+            "<rmesh.Trimesh vertices: ({}, 3) faces: ({}, 3)>",
+            self.data.vertices.len(),
+            self.data.faces.len()
         )
-    }
-
-    fn material_diffuse(&self, index: usize) -> Option<[f64; 3]> {
-        match self.data.materials.get(index)? {
-            Material::Simple(s) => s.diffuse.map(|d| [d.x, d.y, d.z]),
-            _ => None,
-        }
     }
 
     #[pyo3(signature = (target_faces, aggressiveness=None))]
@@ -894,7 +1080,7 @@ impl PyTrimesh {
     ///
     /// Examples
     /// --------
-    /// >>> mesh = rmesh.load_mesh("model.stl")
+    /// >>> mesh = rmesh.load("model.stl")
     /// >>> # Merge vertices at 1e-8 precision (like trimesh default)
     /// >>> cleaned = mesh.cleanup(merge_vertices=8)
     /// >>> # Full cleanup like trimesh.process(validate=True)
@@ -980,25 +1166,174 @@ impl PyTrimesh {
 }
 
 // ============================================================================
-// load_mesh
+// PyGeometryDict
 // ============================================================================
 
-#[pyfunction(name = "load_mesh")]
+/// A dict-like collection of geometry, keyed by name.
+#[pyclass(name = "GeometryDict")]
+pub struct PyGeometryDict {
+    /// Stores (name, geometry) pairs, preserving insertion order
+    items: Vec<(String, PyObject)>,
+}
+
+#[pymethods]
+impl PyGeometryDict {
+    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+        self.items
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, obj)| obj.clone_ref(py))
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("'{}'", key)))
+    }
+
+    fn __contains__(&self, key: &str) -> bool {
+        self.items.iter().any(|(name, _)| name == key)
+    }
+
+    fn __len__(&self) -> usize {
+        self.items.len()
+    }
+
+    fn __iter__(&self) -> PyGeometryDictKeysIter {
+        PyGeometryDictKeysIter {
+            keys: self.items.iter().map(|(k, _)| k.clone()).collect(),
+            index: 0,
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.items.iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    fn values(&self, py: Python<'_>) -> Vec<PyObject> {
+        self.items.iter().map(|(_, v)| v.clone_ref(py)).collect()
+    }
+
+    fn items(&self, py: Python<'_>) -> Vec<(String, PyObject)> {
+        self.items
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
+            .collect()
+    }
+
+    #[pyo3(signature = (key, default=None))]
+    fn get(&self, py: Python<'_>, key: &str, default: Option<PyObject>) -> Option<PyObject> {
+        self.items
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, obj)| obj.clone_ref(py))
+            .or(default)
+    }
+
+    fn __repr__(&self) -> String {
+        let keys: Vec<_> = self.items.iter().map(|(k, _)| format!("'{}'", k)).collect();
+        format!("GeometryDict({{{}}})", keys.join(", "))
+    }
+}
+
+#[pyclass]
+struct PyGeometryDictKeysIter {
+    keys: Vec<String>,
+    index: usize,
+}
+
+#[pymethods]
+impl PyGeometryDictKeysIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> Option<String> {
+        if self.index < self.keys.len() {
+            let key = self.keys[self.index].clone();
+            self.index += 1;
+            Some(key)
+        } else {
+            None
+        }
+    }
+}
+
+// ============================================================================
+// PyScene
+// ============================================================================
+
+/// A scene containing geometry loaded from a file.
+#[pyclass(name = "Scene")]
+pub struct PyScene {
+    data: rmesh::scene::Scene,
+    geometry_cache: OnceCell<Py<PyGeometryDict>>,
+}
+
+impl PyScene {
+    fn new(data: rmesh::scene::Scene) -> Self {
+        Self {
+            data,
+            geometry_cache: OnceCell::new(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyScene {
+    /// Get all geometry in the scene as a dict-like object keyed by name.
+    #[getter]
+    fn geometry(&self, py: Python<'_>) -> Py<PyGeometryDict> {
+        self.geometry_cache
+            .get_or_init(|| {
+                let items: Vec<(String, PyObject)> = self
+                    .data
+                    .geometry
+                    .iter()
+                    .filter_map(|(name, geom)| {
+                        let obj: PyObject = match geom {
+                            Geometry::Mesh(mesh) => {
+                                Py::new(py, PyTrimesh::new_from_trimesh((**mesh).clone()))
+                                    .ok()?
+                                    .into_any()
+                            }
+                            Geometry::Feature(model) => {
+                                Py::new(py, crate::feature::PyFeatureModel { inner: (**model).clone() })
+                                    .ok()?
+                                    .into_any()
+                            }
+                            // TODO: Path2D, Path3D, PointCloud bindings
+                            _ => return None,
+                        };
+                        Some((name.clone(), obj))
+                    })
+                    .collect();
+                Py::new(py, PyGeometryDict { items }).unwrap()
+            })
+            .clone_ref(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Scene(geometry={})", self.data.geometry.len())
+    }
+
+    fn __len__(&self) -> usize {
+        self.data.geometry.len()
+    }
+}
+
+// ============================================================================
+// load
+// ============================================================================
+
+#[pyfunction(name = "load")]
 #[pyo3(signature = (file_obj, file_type=None, *, resolver=None))]
-pub fn py_load_mesh(
+pub fn py_load(
     py: Python<'_>,
     file_obj: Py<PyAny>,
     file_type: Option<&str>,
     resolver: Option<Py<PyAny>>,
-) -> Result<PyTrimesh> {
+) -> Result<PyScene> {
     // Try bytes first
     if let Ok(bytes) = file_obj.extract::<Vec<u8>>(py) {
-        let fmt = MeshFormat::from_string(
-            file_type.ok_or_else(|| anyhow::anyhow!("file_type required for bytes"))?,
-        )?;
-        return Ok(PyTrimesh::new_from_trimesh(load_with_resolver(
-            &bytes, fmt, resolver, py,
-        )?));
+        let ft = file_type.map(FileType::from_extension).transpose()?;
+        let scene = load_with_resolver(&bytes, ft, resolver, py)?;
+        return Ok(PyScene::new(scene));
     }
 
     // Try path
@@ -1014,17 +1349,17 @@ pub fn py_load_mesh(
 
     let path = Path::new(&path_str);
     let bytes = std::fs::read(path)?;
-    let fmt = match file_type {
-        Some(ft) => MeshFormat::from_string(ft)?,
-        None => MeshFormat::from_string(
-            path.extension()
-                .and_then(|e| e.to_str())
-                .ok_or_else(|| anyhow::anyhow!("cannot infer file type"))?,
-        )?,
+    let ft = match file_type {
+        Some(ft_str) => Some(FileType::from_extension(ft_str)?),
+        None => path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(FileType::from_extension)
+            .transpose()?,
     };
 
-    let data = load_mesh(&bytes, fmt, Some(&FileResolver::from_file_path(path)))?;
-    Ok(PyTrimesh::new_from_trimesh(data))
+    let scene = load(&bytes, ft, Some(&FileResolver::from_file_path(path)))?;
+    Ok(PyScene::new(scene))
 }
 
 struct PyCallableResolver(Py<PyAny>);
@@ -1042,12 +1377,12 @@ impl Resolver for PyCallableResolver {
 
 fn load_with_resolver(
     bytes: &[u8],
-    fmt: MeshFormat,
+    file_type: Option<FileType>,
     resolver: Option<Py<PyAny>>,
     py: Python<'_>,
-) -> Result<Trimesh> {
+) -> Result<rmesh::scene::Scene> {
     match resolver {
-        None => load_mesh(bytes, fmt, None),
+        None => load(bytes, file_type, None),
         Some(res) => {
             let bound = res.bind(py);
             if let Ok(dict) = bound.downcast::<PyDict>() {
@@ -1055,9 +1390,9 @@ fn load_with_resolver(
                 for (k, v) in dict.iter() {
                     mem.insert(k.extract::<String>()?, v.extract::<Vec<u8>>()?);
                 }
-                load_mesh(bytes, fmt, Some(&mem))
+                load(bytes, file_type, Some(&mem))
             } else if bound.is_callable() {
-                load_mesh(bytes, fmt, Some(&PyCallableResolver(res.clone_ref(py))))
+                load(bytes, file_type, Some(&PyCallableResolver(res.clone_ref(py))))
             } else {
                 Err(anyhow::anyhow!("resolver must be dict or callable"))
             }

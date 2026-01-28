@@ -22,6 +22,26 @@ const STL_COUNT_SIZE: usize = 4; // The size of the triangle count in bytes
 const STL_DATA_START: usize = STL_HEADER_SIZE + STL_COUNT_SIZE; // the size of the header plus the triangle count
 
 impl BinaryStl {
+    /// Extract the solid name from the STL header.
+    /// For ASCII STL: parses "solid <name>" from the first line.
+    /// For binary STL: returns the header if it looks like a name, empty otherwise.
+    pub fn solid_name(&self) -> &str {
+        let header = self.header.trim();
+        // Check for ASCII STL format: "solid <name>"
+        if let Some(rest) = header.strip_prefix("solid").or_else(|| header.strip_prefix("SOLID")) {
+            return rest.trim();
+        }
+        // For binary STL, the header might contain a name or garbage
+        // Only return it if it looks like a valid name (printable ASCII, reasonable length)
+        if !header.is_empty()
+            && header.len() < 40
+            && header.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+        {
+            return header;
+        }
+        ""
+    }
+
     /// Parse a binary or ASCII STL file from the raw bytes. Note that binary STL files
     /// must exactly match the size specified in the header, or they will be parsed as
     /// ASCII STL files and error later.
@@ -156,7 +176,7 @@ impl BinaryStl {
 
         let source = LoadSource {
             header,
-            format: Some(super::MeshFormat::STL),
+            format: Some(super::FileType::STL),
         };
 
         let mut result = Trimesh::from_slice(&vertices, &faces)?;
@@ -168,24 +188,34 @@ impl BinaryStl {
 #[cfg(test)]
 mod tests {
 
-    use crate::exchange::{MeshFormat, load_mesh};
+    use crate::exchange::{FileType, load};
+    use crate::geometry::Geometry;
 
     #[test]
     fn test_mesh_binary_stl() {
         let stl_data = include_bytes!("../../../../test/data/unit_cube.STL");
 
-        let mesh = load_mesh(stl_data, MeshFormat::STL, None).unwrap();
+        let scene = load(stl_data, Some(FileType::STL), None).unwrap();
+        assert_eq!(scene.geometry.len(), 1);
 
-        assert_eq!(mesh.vertices.len(), 36);
-        assert_eq!(mesh.faces.len(), 12);
+        if let Geometry::Mesh(mesh) = scene.geometry.values().next().unwrap() {
+            assert_eq!(mesh.vertices.len(), 36);
+            assert_eq!(mesh.faces.len(), 12);
+        } else {
+            panic!("Expected Mesh geometry");
+        }
     }
 
     #[test]
     fn test_mesh_ascii_stl() {
         let stl_data = include_bytes!("../../../../test/data/two_objects_mixed_case_names.stl");
-        let mesh = load_mesh(stl_data, MeshFormat::STL, None).unwrap();
+        let scene = load(stl_data, Some(FileType::STL), None).unwrap();
 
-        //assert_eq!(mesh.vertices.len(), 36);
-        assert_eq!(mesh.faces.len(), 24);
+        assert_eq!(scene.geometry.len(), 1);
+        if let Geometry::Mesh(mesh) = scene.geometry.values().next().unwrap() {
+            assert_eq!(mesh.faces.len(), 24);
+        } else {
+            panic!("Expected Mesh geometry");
+        }
     }
 }

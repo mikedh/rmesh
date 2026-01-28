@@ -2,7 +2,7 @@
 
 ## API Coverage
 
-**34/135 trimesh.Trimesh attributes (25.2%)**
+**33/135 trimesh.Trimesh attributes (24.4%)**
 
 | Attribute | Status |
 |-----------|--------|
@@ -37,11 +37,10 @@
 | `triangles` | ✓ |
 | `triangles_center` | ✓ |
 | `vertex_attributes` | ✓ |
-| `vertex_normals` | ✓ |
 | `vertices` | ✓ |
 | `volume` | ✓ |
 
-<details><summary>Not implemented (101 attributes)</summary>
+<details><summary>Not implemented (102 attributes)</summary>
 
 - `apply_obb`
 - `apply_scale`
@@ -142,6 +141,7 @@
 - `vertex_degree`
 - `vertex_faces`
 - `vertex_neighbors`
+- `vertex_normals`
 - `visual`
 - `voxelized`
 
@@ -149,26 +149,4 @@
 
 ## Performance Comparison
 
-| Property | Calls | Equal | Speedup (avg) | Speedup (min/max) |
-|----------|-------|-------|---------------|-------------------|
-| `area` | 42 | 100.0% | 10.9x | 7.7x / 18.0x |
-| `area_faces` | 16 | 100.0% | 3.0x | 0.0x / 5.8x |
-| `center_mass` | 142 | 100.0% | 10.7x | 6.2x / 20.4x |
-| `edges` | 300 | 0.0% | 10.4x | 5.6x / 19.1x |
-| `edges_sorted` | 100 | 0.0% | 3.1x | 1.7x / 8.1x |
-| `face_normals` | 403 | 74.7% | 14.2x | 7.3x / 26.3x |
-| `faces` | 3294 | 87.0% | 1.2x | 0.6x / 2.4x |
-| `is_volume` | 100 | 0.0% | 13.2x | 10.0x / 18.5x |
-| `is_watertight` | 100 | 0.0% | 9.7x | 6.1x / 16.1x |
-| `is_winding_consistent` | 100 | 100.0% | 10.1x | 5.6x / 17.7x |
-| `mass` | 40 | 100.0% | 11.2x | 8.9x / 19.8x |
-| `moment_inertia` | 318 | 99.4% | 7.1x | 3.5x / 18.6x |
-| `triangles` | 1166 | 0.0% | 0.0x | 0.0x / 0.2x |
-| `vertices` | 3878 | 76.4% | 1.2x | 0.7x / 2.4x |
-| `volume` | 114 | 100.0% | 10.1x | 7.5x / 16.8x |
-
-## Summary
-
-- **Total comparisons:** 10113
-- **Identical results:** 6902 (68.2%)
-- **Speedup:** 2.7x avg (0.0x min, 26.3x max)
+No comparison results recorded.

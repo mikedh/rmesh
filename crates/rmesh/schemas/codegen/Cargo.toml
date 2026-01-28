@@ -1,0 +1,15 @@
+[package]
+name = "gltf-codegen"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[[bin]]
+name = "gltf-codegen"
+path = "gltf_schema.rs"
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+convert_case = "0.7"

@@ -1,21 +1,24 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub use image::DynamicImage;
 
 /// Lazily-decoded image that stores raw bytes and decodes on demand.
 /// This is useful for deferring expensive image decoding until the
 /// image is actually needed.
+///
+/// Uses `Arc<[u8]>` for the raw bytes to allow O(1) cloning - only the
+/// reference count is incremented, not the actual bytes copied.
 pub struct LazyImage {
-    /// The raw image bytes (PNG, JPEG, etc.)
-    pub bytes: Vec<u8>,
-    /// Cached decoded image
+    /// The raw image bytes (PNG, JPEG, etc.) - shared via Arc for cheap clones
+    bytes: Arc<[u8]>,
+    /// Cached decoded image (per-instance, not shared on clone)
     decoded: OnceLock<DynamicImage>,
 }
 
 impl LazyImage {
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
-            bytes,
+            bytes: bytes.into(),
             decoded: OnceLock::new(),
         }
     }
@@ -45,6 +48,11 @@ impl LazyImage {
     pub fn bytes_len(&self) -> usize {
         self.bytes.len()
     }
+
+    /// Returns a reference to the raw bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl std::fmt::Debug for LazyImage {
@@ -58,9 +66,9 @@ impl std::fmt::Debug for LazyImage {
 
 impl Clone for LazyImage {
     fn clone(&self) -> Self {
-        // Clone only the bytes, not the cached decode
+        // Clone shares the Arc bytes (O(1)), but decoded cache is per-instance
         Self {
-            bytes: self.bytes.clone(),
+            bytes: Arc::clone(&self.bytes),
             decoded: OnceLock::new(),
         }
     }

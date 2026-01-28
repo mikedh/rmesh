@@ -1,10 +1,25 @@
-A collection of schemas for mesh formats. General thought is to use something like [xsd_parser](https://docs.rs/xsd-parser/latest/xsd_parser/) with `quick-xml` for validating files before we start looking at the data.
+# Schemas
 
+Schema files for mesh formats.
 
-GLTF:
+## glTF
 
+The `glTF/` directory is a clone of the [Khronos glTF repo](https://github.com/KhronosGroup/glTF) containing JSON Schema files for glTF 2.0 and extensions.
+
+### Regenerating Rust types
+
+To regenerate `src/schemas/gltf_2/mod.rs` from the JSON Schema files:
+
+```bash
+cargo run --manifest-path crates/rmesh/schemas/codegen/Cargo.toml
 ```
-import trimesh, zstandard
-schema_json = json.dumps(trimesh.exchange.gltf.get_schema(), separators=(',', ':')
-schema_comp = zstandard.compress(schema_json, 23)
+
+Or from the codegen directory:
+
+```bash
+cd crates/rmesh/schemas/codegen && cargo run
 ```
+
+## Collada
+
+Compressed XSD schemas for Collada 1.4.1 and 1.5.
