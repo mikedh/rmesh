@@ -65,6 +65,7 @@ pub struct Trimesh {
     cache_edges_unique_inverse: OnceLock<Vec<usize>>,
     cache_mass_properties: OnceLock<MassProperties>,
     cache_manifold_status: OnceLock<ManifoldStatus>,
+    cache_vertex_mask: OnceLock<Vec<bool>>,
 }
 
 impl Default for Trimesh {
@@ -89,6 +90,7 @@ impl Default for Trimesh {
             cache_edges_unique_inverse: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
             cache_manifold_status: OnceLock::new(),
+            cache_vertex_mask: OnceLock::new(),
         }
     }
 }
@@ -116,6 +118,7 @@ impl Clone for Trimesh {
             cache_edges_unique_inverse: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
             cache_manifold_status: OnceLock::new(),
+            cache_vertex_mask: OnceLock::new(),
         }
     }
 }
@@ -522,7 +525,7 @@ impl Trimesh {
     /// - Torus: χ = 0
     /// - Double torus: χ = -2
     pub fn euler_number(&self) -> i64 {
-        let v = self.vertices.len() as i64;
+        let v = self.vertex_mask().iter().filter(|&&m| m).count() as i64;
         let f = self.faces.len() as i64;
         let e = self.edges_unique().len() as i64;
         v - e + f
@@ -652,6 +655,38 @@ impl Trimesh {
             return false;
         }
         self.face_adjacency_convex().par_iter().all(|&c| c)
+    }
+
+    /// Boolean mask of vertices referenced by at least one face.
+    /// `vertex_mask()[i]` is true if vertex `i` appears in any face.
+    pub fn vertex_mask(&self) -> &[bool] {
+        self.cache_vertex_mask.get_or_init(|| {
+            let mut mask = vec![false; self.vertices.len()];
+            for f in &self.faces {
+                mask[f[0]] = true;
+                mask[f[1]] = true;
+                mask[f[2]] = true;
+            }
+            mask
+        })
+    }
+
+    /// Compute the convex hull of the mesh vertices.
+    ///
+    /// Returns a new `Trimesh` representing the convex hull with outward-facing
+    /// CCW normals and consistent winding. The resulting mesh will be watertight
+    /// and convex.
+    pub fn convex_hull(&self) -> Result<Trimesh> {
+        let mask = self.vertex_mask();
+        let points: Vec<Point3<f64>> = self
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask[*i])
+            .map(|(_, v)| *v)
+            .collect();
+        let faces = crate::convex::convex_hull_3d(&points)?;
+        Trimesh::new(points, faces, None, None)
     }
 
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,

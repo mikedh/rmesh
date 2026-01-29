@@ -854,7 +854,7 @@ impl PyTrimesh {
         let edges = self.data.edges_sorted();
         let flat: Vec<i64> = edges
             .iter()
-            .flat_map(|e| [e[0] as i64, e[1] as i64])
+            .flat_map(|e| [e.edge[0] as i64, e.edge[1] as i64])
             .collect();
         let nd = Array2::from_shape_vec((edges.len(), 2), flat).unwrap();
         let arr = PyArray2::from_array(py, &nd);

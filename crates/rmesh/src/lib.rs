@@ -1,5 +1,6 @@
 pub mod attributes;
 pub mod cleanup;
+pub mod convex;
 pub mod creation;
 pub mod exchange;
 pub mod geometry;
@@ -13,4 +14,5 @@ pub mod schemas;
 pub mod serialize;
 pub mod simplify;
 pub mod subdivide;
+pub mod timer;
 pub mod triangles;

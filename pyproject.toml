@@ -33,7 +33,7 @@ dev = [
 
 
 [tool.pytest.ini_options]
-addopts = "-p rmesh._compatibility.conftest --rmesh-compat=compare"
+addopts = "-p rmesh.compatibility.conftest --rmesh-compat=compare"
 testpaths = ["test/trimesh/tests"]
 
 [tool.ruff]
