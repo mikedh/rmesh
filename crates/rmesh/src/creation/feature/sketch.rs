@@ -276,9 +276,9 @@ impl Sketch {
     ///
     /// Returns an error if the entity doesn't exist or has no endpoints.
     pub fn entity_endpoints(&self, id: EntityId) -> Result<(usize, usize)> {
-        let entity = self.get(id).ok_or_else(|| {
-            FeatureError::InvalidSketch(format!("Entity {} not found", id))
-        })?;
+        let entity = self
+            .get(id)
+            .ok_or_else(|| FeatureError::InvalidSketch(format!("Entity {} not found", id)))?;
 
         // Try to get endpoints using the Curve trait
         match entity.segment.end_indices() {
@@ -293,9 +293,9 @@ impl Sketch {
     ///
     /// Returns an error if the entity doesn't exist or isn't a circle.
     pub fn entity_center(&self, id: EntityId) -> Result<usize> {
-        let entity = self.get(id).ok_or_else(|| {
-            FeatureError::InvalidSketch(format!("Entity {} not found", id))
-        })?;
+        let entity = self
+            .get(id)
+            .ok_or_else(|| FeatureError::InvalidSketch(format!("Entity {} not found", id)))?;
 
         match &entity.segment {
             Segment2D::Circle(circle) => Ok(circle.center),

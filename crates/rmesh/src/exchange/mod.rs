@@ -5,16 +5,16 @@ mod stl;
 
 use anyhow::Result;
 
-use crate::creation::feature::exchange::{load_feature_model, FeatureFormat};
 use crate::creation::feature::FeatureModel;
+use crate::creation::feature::exchange::{FeatureFormat, load_feature_model};
 use crate::geometry::Geometry;
 use crate::resolvers::Resolver;
 use crate::scene::{Scene, SceneNode, SceneNodeKind};
 use crate::serialize::RmeshSerializable;
 
+pub use crate::exchange::gltf::GltfLoader;
 use crate::exchange::obj::ObjMesh;
 use crate::exchange::stl::BinaryStl;
-pub use crate::exchange::gltf::GltfLoader;
 
 // Re-export resolvers for convenience
 pub use crate::resolvers::{FileResolver, InMemoryResolver};
@@ -75,8 +75,8 @@ impl FileType {
         // Check if it's a valid binary STL by verifying the triangle count
         if data.len() >= 84 {
             // Make sure it doesn't start with "solid" (ASCII STL marker)
-            let starts_with_solid = data.len() >= 5
-                && (data[0..5] == *b"solid" || data[0..5] == *b"SOLID");
+            let starts_with_solid =
+                data.len() >= 5 && (data[0..5] == *b"solid" || data[0..5] == *b"SOLID");
 
             if !starts_with_solid {
                 let triangle_count =
@@ -222,9 +222,18 @@ mod tests {
         assert_eq!(FileType::from_extension(".gltf").unwrap(), FileType::GLTF);
 
         // SLDPRT variations
-        assert_eq!(FileType::from_extension("sldprt").unwrap(), FileType::SLDPRT);
-        assert_eq!(FileType::from_extension("SLDPRT").unwrap(), FileType::SLDPRT);
-        assert_eq!(FileType::from_extension(".sldprt").unwrap(), FileType::SLDPRT);
+        assert_eq!(
+            FileType::from_extension("sldprt").unwrap(),
+            FileType::SLDPRT
+        );
+        assert_eq!(
+            FileType::from_extension("SLDPRT").unwrap(),
+            FileType::SLDPRT
+        );
+        assert_eq!(
+            FileType::from_extension(".sldprt").unwrap(),
+            FileType::SLDPRT
+        );
 
         // RCAD variations
         assert_eq!(FileType::from_extension("rcad").unwrap(), FileType::RCAD);

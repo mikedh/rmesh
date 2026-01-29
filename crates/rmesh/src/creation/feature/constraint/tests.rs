@@ -30,7 +30,9 @@ fn make_triangle_sketch(v0: (f64, f64), v1: (f64, f64), v2: (f64, f64)) -> Sketc
 fn test_fixed_constraint_only() {
     let mut sketch = Sketch::new();
     sketch.vertices.push(Point2::new(5.0, 5.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
+    sketch
+        .constraints
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
 
     let result = sketch.solve(&Environment::default()).unwrap();
 
@@ -45,10 +47,14 @@ fn test_distance_constraint_simple() {
     let mut sketch = Sketch::new();
     sketch.vertices.push(Point2::new(0.0, 0.0));
     sketch.vertices.push(Point2::new(3.0, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(0), PointRef::vertex(1), 5.0));
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(0),
+        PointRef::vertex(1),
+        5.0,
+    ));
 
     let result = sketch.solve(&Environment::default()).unwrap();
 
@@ -56,7 +62,11 @@ fn test_distance_constraint_simple() {
     let (x0, y0) = result.vertex(0).unwrap();
     let (x1, y1) = result.vertex(1).unwrap();
     let dist = distance(x0, y0, x1, y1);
-    assert!((dist - 5.0).abs() < 1e-6, "Distance should be 5, got {}", dist);
+    assert!(
+        (dist - 5.0).abs() < 1e-6,
+        "Distance should be 5, got {}",
+        dist
+    );
 }
 
 #[test]
@@ -65,7 +75,9 @@ fn test_horizontal_constraint() {
     sketch.vertices.push(Point2::new(0.0, 0.0));
     sketch.vertices.push(Point2::new(5.0, 3.0));
     sketch.add(Segment2D::Line(Line::new(0, 1)));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
+    sketch
+        .constraints
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
     sketch.constraints.push(Constraint::horizontal(EntityId(1)));
 
     let result = sketch.solve(&Environment::default()).unwrap();
@@ -73,7 +85,12 @@ fn test_horizontal_constraint() {
     assert!(result.is_success());
     let (_, y0) = result.vertex(0).unwrap();
     let (_, y1) = result.vertex(1).unwrap();
-    assert!((y1 - y0).abs() < 1e-6, "Line should be horizontal: y0={}, y1={}", y0, y1);
+    assert!(
+        (y1 - y0).abs() < 1e-6,
+        "Line should be horizontal: y0={}, y1={}",
+        y0,
+        y1
+    );
 }
 
 #[test]
@@ -82,7 +99,9 @@ fn test_vertical_constraint() {
     sketch.vertices.push(Point2::new(0.0, 0.0));
     sketch.vertices.push(Point2::new(3.0, 5.0));
     sketch.add(Segment2D::Line(Line::new(0, 1)));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
+    sketch
+        .constraints
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
     sketch.constraints.push(Constraint::vertical(EntityId(1)));
 
     let result = sketch.solve(&Environment::default()).unwrap();
@@ -90,7 +109,12 @@ fn test_vertical_constraint() {
     assert!(result.is_success());
     let (x0, _) = result.vertex(0).unwrap();
     let (x1, _) = result.vertex(1).unwrap();
-    assert!((x1 - x0).abs() < 1e-6, "Line should be vertical: x0={}, x1={}", x0, x1);
+    assert!(
+        (x1 - x0).abs() < 1e-6,
+        "Line should be vertical: x0={}, x1={}",
+        x0,
+        x1
+    );
 }
 
 #[test]
@@ -98,10 +122,13 @@ fn test_coincident_constraint() {
     let mut sketch = Sketch::new();
     sketch.vertices.push(Point2::new(0.0, 0.0));
     sketch.vertices.push(Point2::new(5.0, 5.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
     sketch
         .constraints
-        .push(Constraint::coincident(PointRef::vertex(0), PointRef::vertex(1)));
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
+    sketch.constraints.push(Constraint::coincident(
+        PointRef::vertex(0),
+        PointRef::vertex(1),
+    ));
 
     let result = sketch.solve(&Environment::default()).unwrap();
 
@@ -125,33 +152,62 @@ fn test_two_segment_triangle_equilateral() {
     let l1 = 10.0;
 
     let mut sketch = make_triangle_sketch((0.0, 0.0), (5.0, 5.0), (lx, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(0), PointRef::vertex(1), l0));
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(1), PointRef::vertex(2), l1));
+        .push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(0),
+        PointRef::vertex(1),
+        l0,
+    ));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(1),
+        PointRef::vertex(2),
+        l1,
+    ));
 
     let result = sketch.solve(&Environment::default()).unwrap();
 
     assert!(result.is_success(), "Solver should converge");
-    assert!(result.residual_norm < 1e-6, "Residual {} should be < 1e-6", result.residual_norm);
+    assert!(
+        result.residual_norm < 1e-6,
+        "Residual {} should be < 1e-6",
+        result.residual_norm
+    );
 
     let (x0, y0) = result.vertex(0).unwrap();
     let (x1, y1) = result.vertex(1).unwrap();
     let (x2, y2) = result.vertex(2).unwrap();
 
     // Fixed points
-    assert!((x0).abs() < 1e-6 && (y0).abs() < 1e-6, "v0 should be at origin");
-    assert!((x2 - lx).abs() < 1e-6 && (y2).abs() < 1e-6, "v2 should be at ({}, 0)", lx);
+    assert!(
+        (x0).abs() < 1e-6 && (y0).abs() < 1e-6,
+        "v0 should be at origin"
+    );
+    assert!(
+        (x2 - lx).abs() < 1e-6 && (y2).abs() < 1e-6,
+        "v2 should be at ({}, 0)",
+        lx
+    );
 
     // Distance constraints
     let dist_01 = distance(x0, y0, x1, y1);
     let dist_12 = distance(x1, y1, x2, y2);
-    assert!((dist_01 - l0).abs() < 1e-6, "dist(v0,v1)={} should be {}", dist_01, l0);
-    assert!((dist_12 - l1).abs() < 1e-6, "dist(v1,v2)={} should be {}", dist_12, l1);
+    assert!(
+        (dist_01 - l0).abs() < 1e-6,
+        "dist(v0,v1)={} should be {}",
+        dist_01,
+        l0
+    );
+    assert!(
+        (dist_12 - l1).abs() < 1e-6,
+        "dist(v1,v2)={} should be {}",
+        dist_12,
+        l1
+    );
 
     // Hinge above x-axis (equilateral has positive y)
     assert!(y1 > 0.0, "v1.y={} should be positive", y1);
@@ -165,19 +221,32 @@ fn test_two_segment_triangle_sweep_l1() {
 
     for l1 in [8.0, 10.0, 15.0, 19.9] {
         let mut sketch = make_triangle_sketch((0.0, 0.0), (5.0, 5.0), (lx, 0.0));
-        sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
-        sketch.constraints.push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
         sketch
             .constraints
-            .push(Constraint::distance(PointRef::vertex(0), PointRef::vertex(1), l0));
+            .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
         sketch
             .constraints
-            .push(Constraint::distance(PointRef::vertex(1), PointRef::vertex(2), l1));
+            .push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
+        sketch.constraints.push(Constraint::distance(
+            PointRef::vertex(0),
+            PointRef::vertex(1),
+            l0,
+        ));
+        sketch.constraints.push(Constraint::distance(
+            PointRef::vertex(1),
+            PointRef::vertex(2),
+            l1,
+        ));
 
         let result = sketch.solve(&Environment::default()).unwrap();
 
         // Triangle inequality: |L0 - L1| <= Lx <= L0 + L1
-        assert!(result.residual_norm < 1e-4, "L1={}: residual={:.2e}", l1, result.residual_norm);
+        assert!(
+            result.residual_norm < 1e-4,
+            "L1={}: residual={:.2e}",
+            l1,
+            result.residual_norm
+        );
 
         let (x0, y0) = result.vertex(0).unwrap();
         let (x1, y1) = result.vertex(1).unwrap();
@@ -185,8 +254,20 @@ fn test_two_segment_triangle_sweep_l1() {
         let dist_01 = distance(x0, y0, x1, y1);
         let dist_12 = distance(x1, y1, x2, y2);
 
-        assert!((dist_01 - l0).abs() < 1e-4, "L1={}: dist_01={} != {}", l1, dist_01, l0);
-        assert!((dist_12 - l1).abs() < 1e-4, "L1={}: dist_12={} != {}", l1, dist_12, l1);
+        assert!(
+            (dist_01 - l0).abs() < 1e-4,
+            "L1={}: dist_01={} != {}",
+            l1,
+            dist_01,
+            l0
+        );
+        assert!(
+            (dist_12 - l1).abs() < 1e-4,
+            "L1={}: dist_12={} != {}",
+            l1,
+            dist_12,
+            l1
+        );
     }
 }
 
@@ -197,14 +278,22 @@ fn test_impossible_constraints_detected() {
     let l1 = 25.0; // Impossible: L0 + Lx = 20 < 25
 
     let mut sketch = make_triangle_sketch((0.0, 0.0), (5.0, 5.0), (lx, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(0), PointRef::vertex(1), l0));
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(1), PointRef::vertex(2), l1));
+        .push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(0),
+        PointRef::vertex(1),
+        l0,
+    ));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(1),
+        PointRef::vertex(2),
+        l1,
+    ));
 
     let result = sketch.solve(&Environment::default()).unwrap();
 
@@ -228,14 +317,22 @@ fn test_constraints_with_expressions() {
         .with_variable("arm", 8.0);
 
     let mut sketch = make_triangle_sketch((0.0, 0.0), (5.0, 5.0), (10.0, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(2), "base", 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(0), PointRef::vertex(1), "arm"));
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(1), PointRef::vertex(2), "arm"));
+        .push(Constraint::fixed(PointRef::vertex(2), "base", 0.0));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(0),
+        PointRef::vertex(1),
+        "arm",
+    ));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(1),
+        PointRef::vertex(2),
+        "arm",
+    ));
 
     let result = sketch.solve(&env).unwrap();
 
@@ -243,7 +340,11 @@ fn test_constraints_with_expressions() {
     assert!(result.residual_norm < 1e-6);
 
     let (x2, _) = result.vertex(2).unwrap();
-    assert!((x2 - 10.0).abs() < 1e-6, "v2.x should be base=10, got {}", x2);
+    assert!(
+        (x2 - 10.0).abs() < 1e-6,
+        "v2.x should be base=10, got {}",
+        x2
+    );
 }
 
 #[test]
@@ -257,7 +358,14 @@ fn test_dim_resolve_with_starlark_expression() {
     assert!((Dim::expr("d0 + d1").resolve(&env).unwrap() - 80.0).abs() < 1e-10);
 
     let expected = (50.0_f64.powi(2) + 30.0_f64.powi(2)).sqrt();
-    assert!((Dim::expr("math.sqrt(d0 * d0 + d1 * d1)").resolve(&env).unwrap() - expected).abs() < 1e-10);
+    assert!(
+        (Dim::expr("math.sqrt(d0 * d0 + d1 * d1)")
+            .resolve(&env)
+            .unwrap()
+            - expected)
+            .abs()
+            < 1e-10
+    );
 }
 
 #[test]
@@ -294,14 +402,22 @@ fn test_sweep_l1_1000_samples() {
         let l1 = l1_min + t * (l1_max - l1_min);
 
         let mut sketch = make_triangle_sketch((0.0, 0.0), (5.0, 5.0), (lx, 0.0));
-        sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
-        sketch.constraints.push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
         sketch
             .constraints
-            .push(Constraint::distance(PointRef::vertex(0), PointRef::vertex(1), l0));
+            .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
         sketch
             .constraints
-            .push(Constraint::distance(PointRef::vertex(1), PointRef::vertex(2), l1));
+            .push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
+        sketch.constraints.push(Constraint::distance(
+            PointRef::vertex(0),
+            PointRef::vertex(1),
+            l0,
+        ));
+        sketch.constraints.push(Constraint::distance(
+            PointRef::vertex(1),
+            PointRef::vertex(2),
+            l1,
+        ));
 
         let result = sketch.solve(&Environment::default()).unwrap();
         total_iters += result.iterations;
@@ -328,15 +444,23 @@ fn test_sweep_l1_1000_samples_warm_start() {
     let (l1_min, l1_max) = (10.0, 19.9);
 
     let mut sketch = make_triangle_sketch((0.0, 0.0), (5.0, 5.0), (lx, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
-    sketch.constraints.push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
     sketch
         .constraints
-        .push(Constraint::distance(PointRef::vertex(0), PointRef::vertex(1), l0));
+        .push(Constraint::fixed(PointRef::vertex(0), 0.0, 0.0));
+    sketch
+        .constraints
+        .push(Constraint::fixed(PointRef::vertex(2), lx, 0.0));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(0),
+        PointRef::vertex(1),
+        l0,
+    ));
     let l1_idx = sketch.constraints.len();
-    sketch
-        .constraints
-        .push(Constraint::distance(PointRef::vertex(1), PointRef::vertex(2), l1_min));
+    sketch.constraints.push(Constraint::distance(
+        PointRef::vertex(1),
+        PointRef::vertex(2),
+        l1_min,
+    ));
 
     let env = Environment::default();
     let start = std::time::Instant::now();
@@ -371,7 +495,10 @@ fn test_sweep_l1_1000_samples_warm_start() {
 /// Verifies O(n) complexity with sparse solver.
 #[test]
 fn test_scaling_many_vertices() {
-    eprintln!("\n{:>6} {:>10} {:>6} {:>12} {:>12}", "N", "Time", "Iters", "Residual", "Per-vertex");
+    eprintln!(
+        "\n{:>6} {:>10} {:>6} {:>12} {:>12}",
+        "N", "Time", "Iters", "Residual", "Per-vertex"
+    );
 
     for n in [10, 50, 100, 200] {
         let mut sketch = Sketch::new();
@@ -381,11 +508,15 @@ fn test_scaling_many_vertices() {
         for i in 0..n {
             let angle = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
             let r = radius * (1.0 + 0.1 * (i as f64 * 0.7).sin());
-            sketch.vertices.push(Point2::new(r * angle.cos(), r * angle.sin()));
+            sketch
+                .vertices
+                .push(Point2::new(r * angle.cos(), r * angle.sin()));
         }
 
         // Fix first vertex, add distance constraints for regular N-gon
-        sketch.constraints.push(Constraint::fixed(PointRef::vertex(0), radius, 0.0));
+        sketch
+            .constraints
+            .push(Constraint::fixed(PointRef::vertex(0), radius, 0.0));
         let edge_len = 2.0 * radius * (std::f64::consts::PI / n as f64).sin();
         for i in 0..n {
             sketch.constraints.push(Constraint::distance(
@@ -401,13 +532,19 @@ fn test_scaling_many_vertices() {
 
         eprintln!(
             "{:>6} {:>10.2?} {:>6} {:>12.2e} {:>12.2?}",
-            n, elapsed, result.iterations, result.residual_norm, elapsed / n as u32
+            n,
+            elapsed,
+            result.iterations,
+            result.residual_norm,
+            elapsed / n as u32
         );
 
         assert!(
             result.is_success(),
             "N={} failed: {:?}, residual={:.2e}",
-            n, result.status, result.residual_norm
+            n,
+            result.status,
+            result.residual_norm
         );
     }
 }

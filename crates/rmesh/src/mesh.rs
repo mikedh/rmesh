@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::{
     attributes::{Attributes, LoadSource, Material},
-    graph::adjacency,
+    graph::{EdgeGroups, ManifoldStatus, SortedEdge, adjacency},
     simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
     triangles::inertia::{self, MassProperties},
 };
@@ -24,7 +24,7 @@ use rayon::prelude::*;
 /// 1. Add a `cache_foo: OnceLock<T>` field to the struct
 /// 2. Initialize it in `Default` and `Clone` impls
 /// 3. Create accessor: `fn foo(&self) -> &T { self.cache_foo.get_or_init(|| ...) }`
-/// 4. **Important**: Expensive compute functions (e.g., `adjacency::check_topology`)
+/// 4. **Important**: Expensive compute functions (e.g., `ManifoldStatus::new`)
 ///    should ONLY be called inside `get_or_init` closures, never directly.
 ///
 /// # Mutation Warning
@@ -60,10 +60,11 @@ pub struct Trimesh {
     cache_edges: OnceLock<Vec<[usize; 2]>>,
     cache_face_adjacency: OnceLock<Vec<(usize, usize)>>,
     cache_edges_unique: OnceLock<Vec<[usize; 2]>>,
-    cache_edges_sorted: OnceLock<Vec<[usize; 2]>>,
+    cache_edges_sorted: OnceLock<Vec<SortedEdge>>,
+    cache_edges_grouped: OnceLock<EdgeGroups>,
     cache_edges_unique_inverse: OnceLock<Vec<usize>>,
     cache_mass_properties: OnceLock<MassProperties>,
-    cache_topology: OnceLock<(bool, bool)>, // (is_watertight, is_winding_consistent)
+    cache_manifold_status: OnceLock<ManifoldStatus>,
 }
 
 impl Default for Trimesh {
@@ -84,9 +85,10 @@ impl Default for Trimesh {
             cache_face_adjacency: OnceLock::new(),
             cache_edges_unique: OnceLock::new(),
             cache_edges_sorted: OnceLock::new(),
+            cache_edges_grouped: OnceLock::new(),
             cache_edges_unique_inverse: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
-            cache_topology: OnceLock::new(),
+            cache_manifold_status: OnceLock::new(),
         }
     }
 }
@@ -110,9 +112,10 @@ impl Clone for Trimesh {
             cache_face_adjacency: OnceLock::new(),
             cache_edges_unique: OnceLock::new(),
             cache_edges_sorted: OnceLock::new(),
+            cache_edges_grouped: OnceLock::new(),
             cache_edges_unique_inverse: OnceLock::new(),
             cache_mass_properties: OnceLock::new(),
-            cache_topology: OnceLock::new(),
+            cache_manifold_status: OnceLock::new(),
         }
     }
 }
@@ -307,9 +310,14 @@ impl Trimesh {
     /// What are the pairs of face indices that share an edge?
     ///
     /// Cached on first access. Uses sort-based algorithm for cache efficiency.
+    ///
+    /// # Assumptions
+    /// - **Manifold meshes**: Assumes at most 2 faces share any edge. For non-manifold
+    ///   meshes (3+ faces sharing an edge), only the first pair is returned.
+    /// - **Boundary edges**: Edges with only one adjacent face are silently ignored.
     pub fn face_adjacency(&self) -> &[(usize, usize)] {
         self.cache_face_adjacency
-            .get_or_init(|| adjacency::face_adjacency(&self.faces))
+            .get_or_init(|| adjacency::face_adjacency(self.edges_sorted(), self.edges_grouped()))
     }
 
     /// Calculate the angles between adjacent faces.
@@ -378,16 +386,15 @@ impl Trimesh {
         self.mass_properties().principal_inertia().map(|(_, m)| m)
     }
 
-    /// Get cached topology info: (is_watertight, is_winding_consistent).
-    fn topology(&self) -> (bool, bool) {
-        *self
-            .cache_topology
-            .get_or_init(|| adjacency::check_topology(&self.faces))
+    /// Get cached manifold status (computed once from edges_sorted).
+    pub fn manifold_status(&self) -> &ManifoldStatus {
+        self.cache_manifold_status
+            .get_or_init(|| ManifoldStatus::from_grouped(self.edges_sorted(), self.edges_grouped()))
     }
 
     /// Check if the mesh is watertight (all edges shared by exactly 2 faces).
     pub fn is_watertight(&self) -> bool {
-        self.topology().0
+        self.manifold_status().is_watertight
     }
 
     /// Check if face winding is consistent across the mesh.
@@ -395,7 +402,7 @@ impl Trimesh {
     /// For consistent winding, adjacent faces must traverse their shared edge
     /// in opposite directions. If face A has edge (v0→v1), face B must have (v1→v0).
     pub fn is_winding_consistent(&self) -> bool {
-        self.topology().1
+        self.manifold_status().is_winding_consistent
     }
 
     /// Check if the mesh represents a valid volume.
@@ -403,8 +410,8 @@ impl Trimesh {
     /// A mesh is a volume if it is watertight, has consistent winding,
     /// and has positive volume (outward-facing normals).
     pub fn is_volume(&self) -> bool {
-        let (watertight, consistent) = self.topology();
-        watertight && consistent && self.volume() > 0.0
+        let status = self.manifold_status();
+        status.is_watertight && status.is_winding_consistent && self.volume() > 0.0
     }
 
     /// Get unique edges (each undirected edge once, sorted as [min, max]).
@@ -413,44 +420,70 @@ impl Trimesh {
     /// (lexicographically sorted by edge). Cached on first access.
     pub fn edges_unique(&self) -> &[[usize; 2]] {
         self.cache_edges_unique.get_or_init(|| {
-            // Build sorted edges
-            let mut edges: Vec<[usize; 2]> = self
-                .faces
-                .par_iter()
-                .flat_map(|&[i0, i1, i2]| {
-                    [
-                        [i0.min(i1), i0.max(i1)],
-                        [i1.min(i2), i1.max(i2)],
-                        [i2.min(i0), i2.max(i0)],
-                    ]
-                })
-                .collect();
-
-            // Sort for deduplication
-            edges.par_sort_unstable();
-
-            // Deduplicate (sequential but fast after sort)
-            edges.dedup();
-            edges
+            let edges = self.edges_sorted();
+            let groups = self.edges_grouped();
+            let mut unique = Vec::with_capacity(groups.starts.len().saturating_sub(1));
+            for w in groups.starts.windows(2) {
+                unique.push(edges[groups.order[w[0]]].edge);
+            }
+            unique
         })
     }
 
-    /// Get all edges with each pair sorted [min, max].
+    /// Get all edges with direction info and source face, 3 per face.
     ///
+    /// Each edge stores `[min_vertex, max_vertex]`, winding direction, and face index.
     /// Returns 3 edges per face, unlike `edges_unique` which deduplicates.
     /// Cached on first access.
-    pub fn edges_sorted(&self) -> &[[usize; 2]] {
+    pub fn edges_sorted(&self) -> &[SortedEdge] {
         self.cache_edges_sorted.get_or_init(|| {
             self.faces
                 .par_iter()
-                .flat_map(|&[i0, i1, i2]| {
+                .enumerate()
+                .flat_map(|(face, &[i0, i1, i2])| {
                     [
-                        [i0.min(i1), i0.max(i1)],
-                        [i1.min(i2), i1.max(i2)],
-                        [i2.min(i0), i2.max(i0)],
+                        SortedEdge {
+                            edge: [i0.min(i1), i0.max(i1)],
+                            forward: i0 < i1,
+                            face,
+                        },
+                        SortedEdge {
+                            edge: [i1.min(i2), i1.max(i2)],
+                            forward: i1 < i2,
+                            face,
+                        },
+                        SortedEdge {
+                            edge: [i2.min(i0), i2.max(i0)],
+                            forward: i2 < i0,
+                            face,
+                        },
                     ]
                 })
                 .collect()
+        })
+    }
+
+    /// Get the index order and group boundaries that group `edges_sorted()` by edge value.
+    ///
+    /// Sorted once and shared by `face_adjacency`, `manifold_status`,
+    /// `edges_unique`, and `edges_unique_inverse`.
+    /// Cached on first access.
+    fn edges_grouped(&self) -> &EdgeGroups {
+        self.cache_edges_grouped.get_or_init(|| {
+            let edges = self.edges_sorted();
+            let mut order: Vec<usize> = (0..edges.len()).collect();
+            order.par_sort_unstable_by_key(|&i| edges[i].edge);
+
+            let mut starts = Vec::new();
+            starts.push(0);
+            for i in 1..order.len() {
+                if edges[order[i]].edge != edges[order[i - 1]].edge {
+                    starts.push(i);
+                }
+            }
+            starts.push(order.len());
+
+            EdgeGroups { order, starts }
         })
     }
 
@@ -470,33 +503,13 @@ impl Trimesh {
     /// Cached on first access.
     pub fn edges_unique_inverse(&self) -> &[usize] {
         self.cache_edges_unique_inverse.get_or_init(|| {
-            let edges_unique = self.edges_unique();
-
-            // Build edges with original positions
-            let mut edges_with_pos: Vec<([usize; 2], usize)> = self
-                .faces
-                .par_iter()
-                .enumerate()
-                .flat_map_iter(|(face_idx, &[i0, i1, i2])| {
-                    let base = face_idx * 3;
-                    [
-                        ([i0.min(i1), i0.max(i1)], base),
-                        ([i1.min(i2), i1.max(i2)], base + 1),
-                        ([i2.min(i0), i2.max(i0)], base + 2),
-                    ]
-                })
-                .collect();
-
-            // Parallel sort by edge
-            edges_with_pos.par_sort_unstable_by_key(|(e, _)| *e);
-
-            // Binary search into edges_unique to find the actual index
-            let mut inverse = vec![0usize; edges_with_pos.len()];
-            for (edge, original_pos) in edges_with_pos {
-                // Binary search since edges_unique is sorted
-                // Use unwrap_or(0) to avoid panic - edge should always exist
-                let unique_idx = edges_unique.binary_search(&edge).unwrap_or(0);
-                inverse[original_pos] = unique_idx;
+            let edges = self.edges_sorted();
+            let groups = self.edges_grouped();
+            let mut inverse = vec![0usize; edges.len()];
+            for (unique_idx, w) in groups.starts.windows(2).enumerate() {
+                for &j in &groups.order[w[0]..w[1]] {
+                    inverse[j] = unique_idx;
+                }
             }
             inverse
         })

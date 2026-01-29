@@ -28,7 +28,10 @@ impl BinaryStl {
     pub fn solid_name(&self) -> &str {
         let header = self.header.trim();
         // Check for ASCII STL format: "solid <name>"
-        if let Some(rest) = header.strip_prefix("solid").or_else(|| header.strip_prefix("SOLID")) {
+        if let Some(rest) = header
+            .strip_prefix("solid")
+            .or_else(|| header.strip_prefix("SOLID"))
+        {
             return rest.trim();
         }
         // For binary STL, the header might contain a name or garbage

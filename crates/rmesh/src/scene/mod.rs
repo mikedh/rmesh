@@ -278,7 +278,9 @@ mod tests {
 
         let child = SceneNode {
             name: "child".to_string(),
-            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(1.0, 0.0, 0.0))),
+            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(
+                1.0, 0.0, 0.0,
+            ))),
             ..Default::default()
         };
         let child_idx = graph.add_node(child);
@@ -286,7 +288,9 @@ mod tests {
         let root = SceneNode {
             name: "root".to_string(),
             children: vec![child_idx],
-            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 1.0, 0.0))),
+            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(
+                0.0, 1.0, 0.0,
+            ))),
             ..Default::default()
         };
         graph.add_node(root);
@@ -337,7 +341,9 @@ mod tests {
         let child = SceneNode {
             name: "child".to_string(),
             children: vec![grandchild_idx],
-            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(5.0, 0.0, 0.0))),
+            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(
+                5.0, 0.0, 0.0,
+            ))),
             ..Default::default()
         };
         let child_idx = graph.add_node(child);
@@ -345,7 +351,9 @@ mod tests {
         let root = SceneNode {
             name: "root".to_string(),
             children: vec![child_idx],
-            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 10.0, 0.0))),
+            transform: Some(Matrix4::new_translation(&nalgebra::Vector3::new(
+                0.0, 10.0, 0.0,
+            ))),
             ..Default::default()
         };
         graph.add_node(root);

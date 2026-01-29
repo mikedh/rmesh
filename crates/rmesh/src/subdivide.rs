@@ -188,7 +188,7 @@ fn subdivide_once(
 mod tests {
     use super::*;
     use crate::creation::create_box;
-    use crate::graph::adjacency::is_watertight;
+    use crate::mesh::Trimesh;
     use crate::triangles::inertia::volume;
     use approx::assert_relative_eq;
 
@@ -222,12 +222,13 @@ mod tests {
     #[test]
     fn test_subdivide_preserves_watertight() {
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        assert!(is_watertight(&cube.faces));
+        assert!(cube.is_watertight());
 
         for iterations in 1..=3 {
-            let (_, faces) = subdivide(&cube.vertices, &cube.faces, iterations);
+            let (verts, faces) = subdivide(&cube.vertices, &cube.faces, iterations);
+            let mesh = Trimesh::new(verts, faces, None, None).unwrap();
             assert!(
-                is_watertight(&faces),
+                mesh.is_watertight(),
                 "Lost watertight at iteration {}",
                 iterations
             );

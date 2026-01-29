@@ -5,4 +5,4 @@
 
 pub mod adjacency;
 
-pub use adjacency::*;
+pub use adjacency::{EdgeGroups, ManifoldStatus, SortedEdge};

@@ -62,7 +62,11 @@ impl ExtensionRegistry {
         );
 
         // Register EXT_texture_webp handler
-        registry.register("EXT_texture_webp", Scope::TextureSource, handle_texture_webp);
+        registry.register(
+            "EXT_texture_webp",
+            Scope::TextureSource,
+            handle_texture_webp,
+        );
 
         registry
     }

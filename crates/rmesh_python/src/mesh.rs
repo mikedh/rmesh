@@ -7,7 +7,9 @@ use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use rmesh::attributes::{AlphaMode, Attributes, GroupingKind, Material, PBRMaterial, SimpleMaterial};
+use rmesh::attributes::{
+    AlphaMode, Attributes, GroupingKind, Material, PBRMaterial, SimpleMaterial,
+};
 use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
 use rmesh::geometry::Geometry;
 use rmesh::mesh::Trimesh;
@@ -48,7 +50,10 @@ impl PyMaterial {
     /// Diffuse color (RGB), only for simple materials.
     #[getter]
     fn diffuse(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        if let Material::Simple(SimpleMaterial { diffuse: Some(d), .. }) = &self.data {
+        if let Material::Simple(SimpleMaterial {
+            diffuse: Some(d), ..
+        }) = &self.data
+        {
             let arr = PyArray1::from_vec(py, vec![d.x, d.y, d.z]);
             make_readonly(&arr);
             Some(arr.unbind())
@@ -60,7 +65,10 @@ impl PyMaterial {
     /// Specular color (RGB), only for simple materials.
     #[getter]
     fn specular(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        if let Material::Simple(SimpleMaterial { specular: Some(s), .. }) = &self.data {
+        if let Material::Simple(SimpleMaterial {
+            specular: Some(s), ..
+        }) = &self.data
+        {
             let arr = PyArray1::from_vec(py, vec![s.x, s.y, s.z]);
             make_readonly(&arr);
             Some(arr.unbind())
@@ -102,13 +110,19 @@ impl PyMaterial {
     /// Base color factor (RGBA), only for PBR materials.
     #[getter]
     fn base_color_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        if let Material::PBR(PBRMaterial { base_color_factor, .. }) = &self.data {
-            let arr = PyArray1::from_vec(py, vec![
-                base_color_factor.x,
-                base_color_factor.y,
-                base_color_factor.z,
-                base_color_factor.w,
-            ]);
+        if let Material::PBR(PBRMaterial {
+            base_color_factor, ..
+        }) = &self.data
+        {
+            let arr = PyArray1::from_vec(
+                py,
+                vec![
+                    base_color_factor.x,
+                    base_color_factor.y,
+                    base_color_factor.z,
+                    base_color_factor.w,
+                ],
+            );
             make_readonly(&arr);
             Some(arr.unbind())
         } else {
@@ -119,7 +133,10 @@ impl PyMaterial {
     /// Metallic factor (0.0 = dielectric, 1.0 = metal), only for PBR materials.
     #[getter]
     fn metallic_factor(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial { metallic_factor, .. }) = &self.data {
+        if let Material::PBR(PBRMaterial {
+            metallic_factor, ..
+        }) = &self.data
+        {
             Some(*metallic_factor)
         } else {
             None
@@ -129,7 +146,10 @@ impl PyMaterial {
     /// Roughness factor (0.0 = smooth, 1.0 = rough), only for PBR materials.
     #[getter]
     fn roughness_factor(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial { roughness_factor, .. }) = &self.data {
+        if let Material::PBR(PBRMaterial {
+            roughness_factor, ..
+        }) = &self.data
+        {
             Some(*roughness_factor)
         } else {
             None
@@ -149,7 +169,10 @@ impl PyMaterial {
     /// Occlusion strength, only for PBR materials.
     #[getter]
     fn occlusion_strength(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial { occlusion_strength, .. }) = &self.data {
+        if let Material::PBR(PBRMaterial {
+            occlusion_strength, ..
+        }) = &self.data
+        {
             Some(*occlusion_strength)
         } else {
             None
@@ -159,12 +182,14 @@ impl PyMaterial {
     /// Emissive color factor (RGB), only for PBR materials.
     #[getter]
     fn emissive_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        if let Material::PBR(PBRMaterial { emissive_factor, .. }) = &self.data {
-            let arr = PyArray1::from_vec(py, vec![
-                emissive_factor.x,
-                emissive_factor.y,
-                emissive_factor.z,
-            ]);
+        if let Material::PBR(PBRMaterial {
+            emissive_factor, ..
+        }) = &self.data
+        {
+            let arr = PyArray1::from_vec(
+                py,
+                vec![emissive_factor.x, emissive_factor.y, emissive_factor.z],
+            );
             make_readonly(&arr);
             Some(arr.unbind())
         } else {
@@ -1292,11 +1317,14 @@ impl PyScene {
                                     .ok()?
                                     .into_any()
                             }
-                            Geometry::Feature(model) => {
-                                Py::new(py, crate::feature::PyFeatureModel { inner: (**model).clone() })
-                                    .ok()?
-                                    .into_any()
-                            }
+                            Geometry::Feature(model) => Py::new(
+                                py,
+                                crate::feature::PyFeatureModel {
+                                    inner: (**model).clone(),
+                                },
+                            )
+                            .ok()?
+                            .into_any(),
                             // TODO: Path2D, Path3D, PointCloud bindings
                             _ => return None,
                         };
@@ -1392,7 +1420,11 @@ fn load_with_resolver(
                 }
                 load(bytes, file_type, Some(&mem))
             } else if bound.is_callable() {
-                load(bytes, file_type, Some(&PyCallableResolver(res.clone_ref(py))))
+                load(
+                    bytes,
+                    file_type,
+                    Some(&PyCallableResolver(res.clone_ref(py))),
+                )
             } else {
                 Err(anyhow::anyhow!("resolver must be dict or callable"))
             }

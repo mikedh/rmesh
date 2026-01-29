@@ -90,10 +90,22 @@ impl Camera {
                 let nf = 1.0 / (znear - zfar);
 
                 Matrix4::new(
-                    f / aspect, 0.0, 0.0, 0.0,
-                    0.0, f, 0.0, 0.0,
-                    0.0, 0.0, (zfar + znear) * nf, 2.0 * zfar * znear * nf,
-                    0.0, 0.0, -1.0, 0.0,
+                    f / aspect,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    f,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    (zfar + znear) * nf,
+                    2.0 * zfar * znear * nf,
+                    0.0,
+                    0.0,
+                    -1.0,
+                    0.0,
                 )
             }
             CameraProjection::Orthographic {
@@ -105,10 +117,22 @@ impl Camera {
                 let nf = 1.0 / (znear - zfar);
 
                 Matrix4::new(
-                    1.0 / xmag, 0.0, 0.0, 0.0,
-                    0.0, 1.0 / ymag, 0.0, 0.0,
-                    0.0, 0.0, 2.0 * nf, (zfar + znear) * nf,
-                    0.0, 0.0, 0.0, 1.0,
+                    1.0 / xmag,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0 / ymag,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    2.0 * nf,
+                    (zfar + znear) * nf,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
                 )
             }
         }

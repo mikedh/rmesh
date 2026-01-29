@@ -234,16 +234,20 @@ impl Solver2D {
                 let (start, end) = sketch.entity_endpoints(*entity)?;
                 Ok(ResolvedConstraint::Vertical { start, end })
             }
-            Constraint::HorizontalDistance { a, b, value } => Ok(ResolvedConstraint::HorizontalDistance {
-                a: Self::resolve_point_ref(a, sketch)?,
-                b: Self::resolve_point_ref(b, sketch)?,
-                target: value.resolve(env)?,
-            }),
-            Constraint::VerticalDistance { a, b, value } => Ok(ResolvedConstraint::VerticalDistance {
-                a: Self::resolve_point_ref(a, sketch)?,
-                b: Self::resolve_point_ref(b, sketch)?,
-                target: value.resolve(env)?,
-            }),
+            Constraint::HorizontalDistance { a, b, value } => {
+                Ok(ResolvedConstraint::HorizontalDistance {
+                    a: Self::resolve_point_ref(a, sketch)?,
+                    b: Self::resolve_point_ref(b, sketch)?,
+                    target: value.resolve(env)?,
+                })
+            }
+            Constraint::VerticalDistance { a, b, value } => {
+                Ok(ResolvedConstraint::VerticalDistance {
+                    a: Self::resolve_point_ref(a, sketch)?,
+                    b: Self::resolve_point_ref(b, sketch)?,
+                    target: value.resolve(env)?,
+                })
+            }
             _ => Err(FeatureError::InvalidOperation(format!(
                 "Constraint type not yet implemented: {:?}",
                 constraint
@@ -382,7 +386,8 @@ impl Solver2D {
 
             // Check step size convergence
             if delta.norm() < STEP_TOL {
-                let final_cost = self.compute_residuals_into(self.positions.as_slice(), &mut residuals);
+                let final_cost =
+                    self.compute_residuals_into(self.positions.as_slice(), &mut residuals);
                 let final_norm = final_cost.sqrt();
                 return Ok(SolveResult {
                     positions: self.positions.as_slice().to_vec(),

@@ -50,10 +50,22 @@ impl Trackball {
         let u = s.cross(&f);
 
         Matrix4::new(
-            s.x, s.y, s.z, -s.dot(&eye.coords),
-            u.x, u.y, u.z, -u.dot(&eye.coords),
-            -f.x, -f.y, -f.z, f.dot(&eye.coords),
-            0.0, 0.0, 0.0, 1.0,
+            s.x,
+            s.y,
+            s.z,
+            -s.dot(&eye.coords),
+            u.x,
+            u.y,
+            u.z,
+            -u.dot(&eye.coords),
+            -f.x,
+            -f.y,
+            -f.z,
+            f.dot(&eye.coords),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
         )
     }
 
@@ -67,8 +79,10 @@ impl Trackball {
 
         // Rotate around local X axis (pitch)
         let right = self.rotation * Vector3::x();
-        let pitch =
-            UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(right), -delta.y * sensitivity);
+        let pitch = UnitQuaternion::from_axis_angle(
+            &nalgebra::Unit::new_normalize(right),
+            -delta.y * sensitivity,
+        );
 
         self.rotation = yaw * pitch * self.rotation;
     }
@@ -141,10 +155,7 @@ mod tests {
     #[test]
     fn test_trackball_fit() {
         let mut tb = Trackball::default();
-        tb.fit(
-            Point3::new(-1.0, -1.0, -1.0),
-            Point3::new(1.0, 1.0, 1.0),
-        );
+        tb.fit(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
         assert_eq!(tb.center, Point3::origin());
         // Size is sqrt(12) ≈ 3.46, distance should be ~5.2
         assert!(tb.distance > 3.0 && tb.distance < 10.0);

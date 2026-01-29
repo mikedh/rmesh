@@ -7,11 +7,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use rmesh::creation::feature::{
+    Chamfer, EdgeSelection, Environment, Extrude, FeatureBackend, FeatureModel, Fillet, Loft,
+    Operation, Revolve, Sign, Sketch, SketchPlane, Sweep, Units,
     backends::fidget::{FidgetBackend, FidgetSettings},
     evaluator,
     exchange::load_feature_model_from_path,
-    Chamfer, EdgeSelection, Environment, Extrude, FeatureBackend, FeatureModel, Fillet, Loft,
-    Operation, Revolve, Sign, Sketch, SketchPlane, Sweep, Units,
 };
 use rmesh::path::{Line, Path2D, Path3D, Segment3D};
 use rmesh::serialize::RmeshSerializable;
@@ -646,7 +646,8 @@ impl PySweep {
         let line_segment = Segment3D::Line(Line::from_points(indices));
         let path3d = Path3D::from_vertices_and_segments(vertices, vec![line_segment]);
 
-        let inner = Sweep::new(profile.inner, path3d, sign).with_fixed_orientation(fixed_orientation);
+        let inner =
+            Sweep::new(profile.inner, path3d, sign).with_fixed_orientation(fixed_orientation);
         Self { inner }
     }
 
@@ -800,7 +801,10 @@ impl PyChamfer {
 
     fn __repr__(&self) -> String {
         match self.inner.distance2 {
-            Some(d2) => format!("Chamfer(distance={:.3}, distance2={:.3})", self.inner.distance, d2),
+            Some(d2) => format!(
+                "Chamfer(distance={:.3}, distance2={:.3})",
+                self.inner.distance, d2
+            ),
             None => format!("Chamfer(distance={:.3})", self.inner.distance),
         }
     }
@@ -966,8 +970,7 @@ impl PyFeatureModel {
             .inner
             .to_bytes(None, true) // as_json=true
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        String::from_utf8(bytes)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        String::from_utf8(bytes).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Serialize the model to compressed binary format.
@@ -985,7 +988,11 @@ impl PyFeatureModel {
     /// bytes
     ///     Compressed binary data with 128-byte header.
     #[pyo3(signature = (compress_level=None))]
-    fn to_bytes<'py>(&self, py: Python<'py>, compress_level: Option<i32>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    fn to_bytes<'py>(
+        &self,
+        py: Python<'py>,
+        compress_level: Option<i32>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         let bytes = self
             .inner
             .to_bytes(compress_level, false) // as_json=false

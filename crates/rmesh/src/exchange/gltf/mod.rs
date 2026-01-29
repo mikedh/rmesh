@@ -16,8 +16,8 @@ use crate::scene::{
     Interpolation, Light, LightType, Scene, SceneGraph, SceneNode, SceneNodeKind,
 };
 use crate::schemas::gltf_2::{
-    self, Gltf, GltfIndex, KhrLightsPunctual, COMPONENT_U16, COMPONENT_U32, COMPONENT_U8,
-    GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP,
+    self, COMPONENT_U8, COMPONENT_U16, COMPONENT_U32, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP,
+    GL_TRIANGLES, Gltf, GltfIndex, KhrLightsPunctual,
 };
 
 use self::extensions::ExtensionRegistry;
@@ -68,9 +68,12 @@ impl GltfLoader {
 
         // Read chunks
         while offset + 8 <= data.len() {
-            let chunk_length =
-                u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                    as usize;
+            let chunk_length = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             let chunk_type = u32::from_le_bytes([
                 data[offset + 4],
                 data[offset + 5],
@@ -94,7 +97,8 @@ impl GltfLoader {
         }
 
         let json_data = json_data.context("GLB missing JSON chunk")?;
-        let header: Gltf = serde_json::from_slice(json_data).context("Failed to parse GLTF JSON")?;
+        let header: Gltf =
+            serde_json::from_slice(json_data).context("Failed to parse GLTF JSON")?;
 
         let mut buffers = Vec::new();
         if let Some(bin) = bin_data {
@@ -249,7 +253,9 @@ impl GltfLoader {
         // Load lights from KHR_lights_punctual extension
         if let Some(exts) = &self.header.extensions {
             if let Some(lights_ext) = exts.get("KHR_lights_punctual") {
-                if let Ok(lights_data) = serde_json::from_value::<KhrLightsPunctual>(lights_ext.clone()) {
+                if let Ok(lights_data) =
+                    serde_json::from_value::<KhrLightsPunctual>(lights_ext.clone())
+                {
                     for gltf_light in lights_data.lights {
                         let light = self.convert_light(&gltf_light);
                         scene.add_light(light);
@@ -292,11 +298,7 @@ impl GltfLoader {
             .primitives
             .iter()
             .enumerate()
-            .filter_map(|(idx, prim)| {
-                self.load_primitive(prim, materials)
-                    .ok()
-                    .map(|m| (idx, m))
-            })
+            .filter_map(|(idx, prim)| self.load_primitive(prim, materials).ok().map(|m| (idx, m)))
             .collect();
 
         if loaded_primitives.is_empty() {
@@ -346,7 +348,8 @@ impl GltfLoader {
                 // Find or add the material
                 let mat = &prim_mesh.materials[0];
                 let mat_name = mat.name().to_string();
-                let mat_idx = if let Some(idx) = material_names.iter().position(|n| n == &mat_name) {
+                let mat_idx = if let Some(idx) = material_names.iter().position(|n| n == &mat_name)
+                {
                     idx
                 } else {
                     let idx = material_names.len();
@@ -358,13 +361,14 @@ impl GltfLoader {
             } else {
                 // No material - use a placeholder index
                 let no_mat_name = "".to_string();
-                let mat_idx = if let Some(idx) = material_names.iter().position(|n| n == &no_mat_name) {
-                    idx
-                } else {
-                    let idx = material_names.len();
-                    material_names.push(no_mat_name);
-                    idx
-                };
+                let mat_idx =
+                    if let Some(idx) = material_names.iter().position(|n| n == &no_mat_name) {
+                        idx
+                    } else {
+                        let idx = material_names.len();
+                        material_names.push(no_mat_name);
+                        idx
+                    };
                 material_indices.extend(std::iter::repeat(mat_idx).take(num_faces));
             }
         }
@@ -471,8 +475,14 @@ impl GltfLoader {
 
         // Load all UV sets (TEXCOORD_0, TEXCOORD_1, etc.)
         const TEXCOORD_NAMES: [&str; 8] = [
-            "TEXCOORD_0", "TEXCOORD_1", "TEXCOORD_2", "TEXCOORD_3",
-            "TEXCOORD_4", "TEXCOORD_5", "TEXCOORD_6", "TEXCOORD_7",
+            "TEXCOORD_0",
+            "TEXCOORD_1",
+            "TEXCOORD_2",
+            "TEXCOORD_3",
+            "TEXCOORD_4",
+            "TEXCOORD_5",
+            "TEXCOORD_6",
+            "TEXCOORD_7",
         ];
         for attr_name in TEXCOORD_NAMES {
             if let Some(&uv_idx) = primitive.attributes.get(attr_name) {
@@ -546,8 +556,17 @@ impl GltfLoader {
     }
 
     /// Resolve an accessor to buffer data and metadata.
-    fn resolve_accessor(&self, index: GltfIndex, expected_type: Option<&str>, element_size: usize) -> Result<AccessorReader<'_>> {
-        let accessors = self.header.accessors.as_ref().context("No accessors in file")?;
+    fn resolve_accessor(
+        &self,
+        index: GltfIndex,
+        expected_type: Option<&str>,
+        element_size: usize,
+    ) -> Result<AccessorReader<'_>> {
+        let accessors = self
+            .header
+            .accessors
+            .as_ref()
+            .context("No accessors in file")?;
         let accessor = accessors.get(index).context("Invalid accessor index")?;
 
         if let Some(expected) = expected_type {
@@ -557,13 +576,28 @@ impl GltfLoader {
             }
         }
 
-        let buffer_view_idx = accessor.buffer_view.context("Accessor missing buffer view")?;
-        let buffer_views = self.header.buffer_views.as_ref().context("No buffer views")?;
-        let buffer_view = buffer_views.get(buffer_view_idx).context("Invalid buffer view index")?;
-        let buffer = self.buffers.get(buffer_view.buffer).context("Invalid buffer index")?;
+        let buffer_view_idx = accessor
+            .buffer_view
+            .context("Accessor missing buffer view")?;
+        let buffer_views = self
+            .header
+            .buffer_views
+            .as_ref()
+            .context("No buffer views")?;
+        let buffer_view = buffer_views
+            .get(buffer_view_idx)
+            .context("Invalid buffer view index")?;
+        let buffer = self
+            .buffers
+            .get(buffer_view.buffer)
+            .context("Invalid buffer index")?;
 
-        let start = buffer_view.byte_offset.unwrap_or(0) as usize + accessor.byte_offset.unwrap_or(0) as usize;
-        let stride = buffer_view.byte_stride.map(|s| s as usize).unwrap_or(element_size);
+        let start = buffer_view.byte_offset.unwrap_or(0) as usize
+            + accessor.byte_offset.unwrap_or(0) as usize;
+        let stride = buffer_view
+            .byte_stride
+            .map(|s| s as usize)
+            .unwrap_or(element_size);
 
         Ok(AccessorReader {
             buffer,
@@ -574,7 +608,13 @@ impl GltfLoader {
     }
 
     /// Read accessor data with a custom element parser.
-    fn read_accessor_with<T, F>(&self, index: GltfIndex, expected_type: Option<&str>, element_size: usize, parse: F) -> Result<Vec<T>>
+    fn read_accessor_with<T, F>(
+        &self,
+        index: GltfIndex,
+        expected_type: Option<&str>,
+        element_size: usize,
+        parse: F,
+    ) -> Result<Vec<T>>
     where
         F: Fn(&[u8]) -> T,
     {
@@ -634,7 +674,11 @@ impl GltfLoader {
 
     /// Read indices from an accessor (supports u8, u16, u32).
     fn read_accessor_indices(&self, index: GltfIndex) -> Result<Vec<usize>> {
-        let accessors = self.header.accessors.as_ref().context("No accessors in file")?;
+        let accessors = self
+            .header
+            .accessors
+            .as_ref()
+            .context("No accessors in file")?;
         let accessor = accessors.get(index).context("Invalid accessor index")?;
         let component_type = accessor.component_type.as_u64().unwrap_or(0) as u32;
 
@@ -675,7 +719,9 @@ impl GltfLoader {
             CameraProjection::default()
         };
 
-        let name = gltf_cam.name.as_ref()
+        let name = gltf_cam
+            .name
+            .as_ref()
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -703,18 +749,24 @@ impl GltfLoader {
             _ => LightType::Point,
         };
 
-        let name = gltf_light.name.as_ref()
+        let name = gltf_light
+            .name
+            .as_ref()
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         // Extract color from Option<Vec<f64>>
-        let color = gltf_light.color.as_ref()
-            .map(|c| [
-                c.first().copied().unwrap_or(1.0),
-                c.get(1).copied().unwrap_or(1.0),
-                c.get(2).copied().unwrap_or(1.0),
-            ])
+        let color = gltf_light
+            .color
+            .as_ref()
+            .map(|c| {
+                [
+                    c.first().copied().unwrap_or(1.0),
+                    c.get(1).copied().unwrap_or(1.0),
+                    c.get(2).copied().unwrap_or(1.0),
+                ]
+            })
             .unwrap_or([1.0, 1.0, 1.0]);
 
         Light {
@@ -752,7 +804,9 @@ impl GltfLoader {
                 (SceneNodeKind::Custom, vec![])
             };
 
-            let name = gltf_node.name.as_ref()
+            let name = gltf_node
+                .name
+                .as_ref()
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -778,7 +832,9 @@ impl GltfLoader {
                         if nodes.len() == 1 {
                             graph.root = nodes[0];
                         } else {
-                            let scene_name = scene.name.as_ref()
+                            let scene_name = scene
+                                .name
+                                .as_ref()
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("root")
                                 .to_string();
@@ -813,32 +869,48 @@ impl GltfLoader {
             return None;
         }
 
-        let translation = node.translation.as_ref()
-            .map(|v| [
-                v.first().copied().unwrap_or(0.0),
-                v.get(1).copied().unwrap_or(0.0),
-                v.get(2).copied().unwrap_or(0.0),
-            ])
+        let translation = node
+            .translation
+            .as_ref()
+            .map(|v| {
+                [
+                    v.first().copied().unwrap_or(0.0),
+                    v.get(1).copied().unwrap_or(0.0),
+                    v.get(2).copied().unwrap_or(0.0),
+                ]
+            })
             .unwrap_or([0.0, 0.0, 0.0]);
 
-        let rotation = node.rotation.as_ref()
-            .map(|v| [
-                v.first().copied().unwrap_or(0.0),
-                v.get(1).copied().unwrap_or(0.0),
-                v.get(2).copied().unwrap_or(0.0),
-                v.get(3).copied().unwrap_or(1.0),
-            ])
+        let rotation = node
+            .rotation
+            .as_ref()
+            .map(|v| {
+                [
+                    v.first().copied().unwrap_or(0.0),
+                    v.get(1).copied().unwrap_or(0.0),
+                    v.get(2).copied().unwrap_or(0.0),
+                    v.get(3).copied().unwrap_or(1.0),
+                ]
+            })
             .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
-        let scale = node.scale.as_ref()
-            .map(|v| [
-                v.first().copied().unwrap_or(1.0),
-                v.get(1).copied().unwrap_or(1.0),
-                v.get(2).copied().unwrap_or(1.0),
-            ])
+        let scale = node
+            .scale
+            .as_ref()
+            .map(|v| {
+                [
+                    v.first().copied().unwrap_or(1.0),
+                    v.get(1).copied().unwrap_or(1.0),
+                    v.get(2).copied().unwrap_or(1.0),
+                ]
+            })
             .unwrap_or([1.0, 1.0, 1.0]);
 
-        let t = Matrix4::new_translation(&Vector3::new(translation[0], translation[1], translation[2]));
+        let t = Matrix4::new_translation(&Vector3::new(
+            translation[0],
+            translation[1],
+            translation[2],
+        ));
         let r = UnitQuaternion::from_quaternion(Quaternion::new(
             rotation[3],
             rotation[0],
@@ -991,7 +1063,9 @@ impl GltfLoader {
                 _ => bail!("Unsupported animation output type: {}", accessor_type),
             };
 
-            let interp_str = gltf_sampler.interpolation.as_ref()
+            let interp_str = gltf_sampler
+                .interpolation
+                .as_ref()
                 .and_then(|v| v.as_str())
                 .unwrap_or("LINEAR");
             let interpolation = match interp_str {
@@ -1009,7 +1083,10 @@ impl GltfLoader {
         }
 
         for gltf_channel in &gltf_anim.channels {
-            let node = gltf_channel.target.node.context("Animation channel missing node")?;
+            let node = gltf_channel
+                .target
+                .node
+                .context("Animation channel missing node")?;
 
             let path_str = gltf_channel.target.path.as_str().unwrap_or("");
             let path = match path_str {
@@ -1027,7 +1104,9 @@ impl GltfLoader {
             });
         }
 
-        let name = gltf_anim.name.as_ref()
+        let name = gltf_anim
+            .name
+            .as_ref()
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -1107,7 +1186,12 @@ mod tests {
             assert!(!mesh.faces.is_empty(), "Mesh should have faces");
             // A cube has 8 vertices and 12 faces (2 triangles per side * 6 sides)
             // (though vertex count may vary based on how normals are handled)
-            println!("Cube '{}': {} vertices, {} faces", name, mesh.vertices.len(), mesh.faces.len());
+            println!(
+                "Cube '{}': {} vertices, {} faces",
+                name,
+                mesh.vertices.len(),
+                mesh.faces.len()
+            );
         }
     }
 
@@ -1131,7 +1215,12 @@ mod tests {
         assert!(!scene.geometry.is_empty(), "Duck should have geometry");
         let (name, geom) = scene.geometry.iter().next().unwrap();
         if let Geometry::Mesh(mesh) = geom {
-            println!("Duck '{}': {} vertices, {} faces", name, mesh.vertices.len(), mesh.faces.len());
+            println!(
+                "Duck '{}': {} vertices, {} faces",
+                name,
+                mesh.vertices.len(),
+                mesh.faces.len()
+            );
             // Duck model has substantial geometry
             assert!(mesh.vertices.len() > 100);
             assert!(mesh.faces.len() > 100);
@@ -1195,7 +1284,10 @@ mod tests {
             }
 
             // Check that UV coordinates are loaded
-            assert!(!mesh.attributes_vertex.uv.is_empty(), "Mesh should have UV coordinates");
+            assert!(
+                !mesh.attributes_vertex.uv.is_empty(),
+                "Mesh should have UV coordinates"
+            );
             println!("UV sets: {}", mesh.attributes_vertex.uv.len());
         }
     }

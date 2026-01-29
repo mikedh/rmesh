@@ -27,11 +27,24 @@ pub const GL_TRIANGLE_STRIP: u32 = 5;
 pub const GL_TRIANGLE_FAN: u32 = 6;
 
 pub fn component_size(t: u32) -> usize {
-    match t { COMPONENT_I8 | COMPONENT_U8 => 1, COMPONENT_I16 | COMPONENT_U16 => 2, _ => 4 }
+    match t {
+        COMPONENT_I8 | COMPONENT_U8 => 1,
+        COMPONENT_I16 | COMPONENT_U16 => 2,
+        _ => 4,
+    }
 }
 
 pub fn accessor_type_count(t: &str) -> usize {
-    match t { "SCALAR" => 1, "VEC2" => 2, "VEC3" => 3, "VEC4" => 4, "MAT2" => 4, "MAT3" => 9, "MAT4" => 16, _ => 1 }
+    match t {
+        "SCALAR" => 1,
+        "VEC2" => 2,
+        "VEC3" => 3,
+        "VEC4" => 4,
+        "MAT2" => 4,
+        "MAT3" => 9,
+        "MAT4" => 16,
+        _ => 1,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -955,7 +968,9 @@ impl Default for Node {
         Self {
             camera: Default::default(),
             children: Default::default(),
-            matrix: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+            matrix: Some(vec![
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ]),
             mesh: Default::default(),
             name: Default::default(),
             rotation: Some(vec![0.0, 0.0, 0.0, 1.0]),

@@ -1481,18 +1481,20 @@ mod tests {
 
     #[test]
     fn test_simplify_watertight_stays_watertight() {
-        use crate::graph::adjacency::is_watertight;
+        use crate::mesh::Trimesh;
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
         let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 3);
 
-        assert!(is_watertight(&faces), "Original should be watertight");
-
         let result = simplify_mesh(&verts, &faces, None, None, opts(20));
 
+        let original = Trimesh::new(verts, faces, None, None).unwrap();
+        assert!(original.is_watertight(), "Original should be watertight");
+
+        let simplified = Trimesh::new(result.vertices, result.faces, None, None).unwrap();
         assert!(
-            is_watertight(&result.faces),
+            simplified.is_watertight(),
             "Simplified mesh lost watertight property"
         );
     }

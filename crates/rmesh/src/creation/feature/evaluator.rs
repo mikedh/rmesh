@@ -560,7 +560,11 @@ mod tests {
 
     #[test]
     fn test_evaluate_radians_degrees() {
-        assert_relative_eq!(eval("math.radians(180)"), std::f64::consts::PI, epsilon = 1e-10);
+        assert_relative_eq!(
+            eval("math.radians(180)"),
+            std::f64::consts::PI,
+            epsilon = 1e-10
+        );
         assert_relative_eq!(eval("math.degrees(math.pi)"), 180.0, epsilon = 1e-10);
     }
 

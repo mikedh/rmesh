@@ -144,7 +144,13 @@ impl Triangulator {
         // convert the flat result into triangles with original vertex indices
         result
             .chunks_exact(3)
-            .map(|chunk| [index_map[chunk[0]], index_map[chunk[1]], index_map[chunk[2]]])
+            .map(|chunk| {
+                [
+                    index_map[chunk[0]],
+                    index_map[chunk[1]],
+                    index_map[chunk[2]],
+                ]
+            })
             .collect()
     }
 
