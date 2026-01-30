@@ -3,7 +3,7 @@ mod mesh;
 
 pub use mesh::{
     PyFaceAttributes, PyGrouping, PyGroupingCollection, PyScene, PyTrimesh, PyVertexAttributes,
-    py_load,
+    PyVoxelGrid, py_load,
 };
 
 use pyo3::prelude::*;
@@ -19,6 +19,7 @@ fn rmesh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFaceAttributes>()?;
     m.add_class::<PyGrouping>()?;
     m.add_class::<PyGroupingCollection>()?;
+    m.add_class::<PyVoxelGrid>()?;
 
     // Starlark expression evaluation (top-level convenience function)
     m.add_function(wrap_pyfunction!(feature::py_evaluate, m)?)?;

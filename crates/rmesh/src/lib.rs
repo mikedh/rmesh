@@ -2,6 +2,8 @@ pub mod attributes;
 pub mod cleanup;
 pub mod convex;
 pub mod creation;
+#[cfg(feature = "wgpu")]
+pub mod decomposition;
 pub mod exchange;
 pub mod geometry;
 pub mod graph;
@@ -16,3 +18,5 @@ pub mod simplify;
 pub mod subdivide;
 pub mod timer;
 pub mod triangles;
+#[cfg(feature = "wgpu")]
+pub mod voxel;

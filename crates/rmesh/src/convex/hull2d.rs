@@ -23,8 +23,7 @@ pub fn convex_hull_2d(points: &[Point2<f64>]) -> Vec<[usize; 2]> {
 
     // Remove duplicates from sorted order
     idx.dedup_by(|a, b| {
-        (points[*a].x - points[*b].x).abs() < 1e-14
-            && (points[*a].y - points[*b].y).abs() < 1e-14
+        (points[*a].x - points[*b].x).abs() < 1e-14 && (points[*a].y - points[*b].y).abs() < 1e-14
     });
     let m = idx.len();
     if m < 2 {
@@ -53,8 +52,7 @@ pub fn convex_hull_2d(points: &[Point2<f64>]) -> Vec<[usize; 2]> {
     // Upper hull
     let lower_len = hull.len();
     for &i in idx.iter().rev().skip(1) {
-        while hull.len() > lower_len
-            && cross(hull[hull.len() - 2], hull[hull.len() - 1], i) <= 0.0
+        while hull.len() > lower_len && cross(hull[hull.len() - 2], hull[hull.len() - 1], i) <= 0.0
         {
             hull.pop();
         }
@@ -136,8 +134,7 @@ mod tests {
         assert_eq!(edges.len(), 4);
 
         // Verify interior point is not on hull
-        let hull_verts: std::collections::HashSet<usize> =
-            edges.iter().map(|e| e[0]).collect();
+        let hull_verts: std::collections::HashSet<usize> = edges.iter().map(|e| e[0]).collect();
         assert!(!hull_verts.contains(&4));
     }
 
@@ -203,8 +200,7 @@ mod tests {
 
         for trial in 0..1000 {
             let n = 10 + (trial % 191); // 10-200 points
-            let pts: Vec<Point2<f64>> =
-                (0..n).map(|_| p(next_f64(), next_f64())).collect();
+            let pts: Vec<Point2<f64>> = (0..n).map(|_| p(next_f64(), next_f64())).collect();
             let edges = convex_hull_2d(&pts);
 
             if edges.len() < 3 {
@@ -214,8 +210,7 @@ mod tests {
             // is_hull_valid_2d is checked inside convex_hull_2d via cfg(test)
 
             // Edge count should be consistent (closed loop)
-            let hull_verts: std::collections::HashSet<usize> =
-                edges.iter().map(|e| e[0]).collect();
+            let hull_verts: std::collections::HashSet<usize> = edges.iter().map(|e| e[0]).collect();
             assert_eq!(hull_verts.len(), edges.len());
 
             // Verify convexity: all cross products same sign

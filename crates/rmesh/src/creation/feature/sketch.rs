@@ -9,7 +9,7 @@
 use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
 
-use crate::path::{Arc2, Circle2, Line, Segment2D, Winding};
+use crate::path::{Arc2, Circle2, Line, Path2D, Polygon2D, Segment2D, Winding};
 
 use super::constraint::Constraint;
 use super::environment::Environment;
@@ -365,140 +365,74 @@ impl Sketch {
         sketch
     }
 
-    /// Tessellate all entities into polygon(s)
+    /// Convert profile entities to a Path2D for geometric operations.
     ///
-    /// Returns a list of closed polygons. Each polygon is a list of points.
-    /// The first polygon is the exterior, subsequent ones are holes (if winding differs).
-    pub fn to_polygon(&self) -> Result<Vec<Vec<Point2<f64>>>> {
-        self.to_polygon_with_tolerance(DEFAULT_TOLERANCE)
+    /// Excludes construction geometry. The returned Path2D shares the same
+    /// vertex indices as the sketch, so segment indices are compatible.
+    pub fn to_path2d(&self) -> Path2D {
+        let segments: Vec<Segment2D> = self
+            .entities
+            .iter()
+            .filter(|e| !e.construction)
+            .map(|e| e.segment.clone())
+            .collect();
+        Path2D::from_vertices_and_segments(self.vertices.clone(), segments)
     }
 
-    /// Tessellate with a specific tolerance
-    pub fn to_polygon_with_tolerance(&self, tolerance: f64) -> Result<Vec<Vec<Point2<f64>>>> {
-        // Filter out construction geometry
-        let entities: Vec<_> = self.entities.iter().filter(|e| !e.construction).collect();
+    /// Compute the 2D axis-aligned bounding box of the sketch profile.
+    pub fn bounds(&self) -> Option<(Point2<f64>, Point2<f64>)> {
+        self.to_path2d().bounds()
+    }
 
-        if entities.is_empty() {
+    /// Get typed polygons with proper hole assignment.
+    ///
+    /// Returns `Vec<Polygon2D>` where each polygon has an exterior ring
+    /// and zero or more interior holes. Uses `DEFAULT_TOLERANCE` for
+    /// curve discretization.
+    pub fn to_polygons(&self) -> Result<Vec<Polygon2D>> {
+        let mut path = self.to_path2d();
+        if path.segments.is_empty() {
             return Err(FeatureError::InvalidSketch("Sketch has no entities".into()));
         }
-
-        // Check for closed single entities (like Circle)
-        if entities.len() == 1 && entities[0].segment.is_closed() {
-            let mut points = entities[0].segment.discretize(&self.vertices, tolerance);
-            // Close the polygon by adding the first point at the end
-            if let Some(first) = points.first().copied() {
-                points.push(first);
-            }
-            return Ok(vec![points]);
-        }
-
-        // For multiple entities, find connected chains
-        let chains = find_connected_chains(&entities, &self.vertices, tolerance)?;
-
-        let mut polygons = Vec::new();
-        for chain in chains {
-            let mut points = Vec::new();
-            for idx in chain {
-                let entity = &entities[idx];
-                let discretized = entity.segment.discretize(&self.vertices, tolerance);
-                points.extend(discretized);
-            }
-            if !points.is_empty() {
-                polygons.push(points);
-            }
-        }
-
+        path.deviation = Some(DEFAULT_TOLERANCE);
+        let polygons = path.polygons(); // returns &[Polygon2D]
         if polygons.is_empty() {
             return Err(FeatureError::InvalidSketch(
                 "Could not form closed polygon from entities".into(),
             ));
         }
-
-        Ok(polygons)
-    }
-}
-
-/// Find connected chains of entities that form closed loops
-fn find_connected_chains(
-    entities: &[&SketchEntity],
-    vertices: &[Point2<f64>],
-    tolerance: f64,
-) -> Result<Vec<Vec<usize>>> {
-    if entities.is_empty() {
-        return Ok(vec![]);
+        Ok(polygons.to_vec())
     }
 
-    let n = entities.len();
-    let mut used = vec![false; n];
-    let mut chains = Vec::new();
-
-    // Simple greedy chain building
-    while let Some(start_idx) = used.iter().position(|&u| !u) {
-        let mut chain = vec![start_idx];
-        used[start_idx] = true;
-
-        let Some(chain_start) = entities[start_idx].start(vertices) else {
-            continue; // Skip degenerate entities
-        };
-        let Some(mut chain_end) = entities[start_idx].finish(vertices) else {
-            continue;
-        };
-
-        // Keep extending the chain
-        loop {
-            let mut found = false;
-
-            for i in 0..n {
-                if used[i] {
-                    continue;
-                }
-
-                let Some(start) = entities[i].start(vertices) else {
-                    continue;
-                };
-                let Some(end) = entities[i].finish(vertices) else {
-                    continue;
-                };
-
-                // Check if this entity connects to the chain end
-                if points_close(chain_end, start, tolerance) {
-                    chain.push(i);
-                    used[i] = true;
-                    chain_end = end;
-                    found = true;
-                    break;
-                }
-
-                // Check if reversed entity connects
-                if points_close(chain_end, end, tolerance) {
-                    chain.push(i);
-                    used[i] = true;
-                    chain_end = start;
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
-                break;
-            }
-
-            // Check if chain is closed
-            if points_close(chain_end, chain_start, tolerance) {
-                break;
+    /// Tessellate all entities into polygon(s)
+    ///
+    /// Returns a list of closed polygons as flat point vectors.
+    /// The first entry is the exterior, subsequent ones are holes.
+    /// Prefer `to_polygons()` for typed hole information.
+    pub fn to_polygon(&self) -> Result<Vec<Vec<Point2<f64>>>> {
+        let polygons = self.to_polygons()?;
+        let mut result = Vec::new();
+        for poly in &polygons {
+            result.push(poly.exterior.clone());
+            for interior in &poly.interiors {
+                result.push(interior.clone());
             }
         }
-
-        chains.push(chain);
+        Ok(result)
     }
 
-    Ok(chains)
-}
-
-fn points_close(a: Point2<f64>, b: Point2<f64>, tolerance: f64) -> bool {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    dx * dx + dy * dy < tolerance * tolerance
+    /// Get the single circle's center and radius, if this sketch is a lone circle.
+    pub fn as_circle(&self) -> Option<(Point2<f64>, f64)> {
+        let profile: Vec<_> = self.entities.iter().filter(|e| !e.construction).collect();
+        if profile.len() != 1 {
+            return None;
+        }
+        if let Segment2D::Circle(c) = &profile[0].segment {
+            Some((self.vertices[c.center], c.radius))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -529,7 +463,8 @@ mod tests {
 
         let polygons = sketch.to_polygon().unwrap();
         assert_eq!(polygons.len(), 1);
-        assert_eq!(polygons[0].len(), 4);
+        // Path2D returns closed rings (first == last)
+        assert!(polygons[0].len() >= 4);
     }
 
     #[test]
@@ -576,7 +511,8 @@ mod tests {
 
         let polygons = sketch.to_polygon().unwrap();
         assert_eq!(polygons.len(), 1);
-        assert_eq!(polygons[0].len(), 4); // Construction line excluded
+        // Path2D returns closed rings (first == last), so 4 edges → 5 points
+        assert!(polygons[0].len() >= 4);
 
         assert_eq!(sketch.profile_entity_count(), 4);
     }

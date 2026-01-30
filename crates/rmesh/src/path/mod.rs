@@ -95,6 +95,8 @@ use std::sync::OnceLock;
 use nalgebra::{Point2, Point3};
 use serde::{Deserialize, Serialize};
 
+use crate::creation::Triangulator;
+
 // Re-export commonly used types
 pub use entity::arc::{arc_center, arc_center_from_3_points};
 pub use entity::{
@@ -283,6 +285,10 @@ pub struct Path2D {
     cache_bounds: OnceLock<Option<(Point2<f64>, Point2<f64>)>>,
     #[serde(skip)]
     cache_extents: OnceLock<[f64; 2]>,
+    #[serde(skip)]
+    cache_polygons: OnceLock<Vec<Polygon2D>>,
+    #[serde(skip)]
+    cache_triangulation: OnceLock<(Vec<Point2<f64>>, Vec<[usize; 3]>)>,
 }
 
 impl Default for Path2D {
@@ -293,6 +299,8 @@ impl Default for Path2D {
             deviation: None,
             cache_bounds: OnceLock::new(),
             cache_extents: OnceLock::new(),
+            cache_polygons: OnceLock::new(),
+            cache_triangulation: OnceLock::new(),
         }
     }
 }
@@ -306,6 +314,8 @@ impl Clone for Path2D {
             // Fresh caches - will recompute on demand
             cache_bounds: OnceLock::new(),
             cache_extents: OnceLock::new(),
+            cache_polygons: OnceLock::new(),
+            cache_triangulation: OnceLock::new(),
         }
     }
 }
@@ -335,6 +345,8 @@ impl Path2D {
             deviation: None,
             cache_bounds: OnceLock::new(),
             cache_extents: OnceLock::new(),
+            cache_polygons: OnceLock::new(),
+            cache_triangulation: OnceLock::new(),
         }
     }
 
@@ -640,8 +652,59 @@ impl Path2D {
     /// 1. Finds all closed rings in the path
     /// 2. Uses i_overlay to determine enclosure relationships
     /// 3. Returns properly constructed polygons with holes
-    pub fn polygons(&self) -> Vec<Polygon2D> {
-        polygon::polygons_from_path(self, resolve_deviation!(self))
+    ///
+    /// Results are cached on first access.
+    pub fn polygons(&self) -> &[Polygon2D] {
+        self.cache_polygons
+            .get_or_init(|| polygon::polygons_from_path(self, resolve_deviation!(self)))
+    }
+
+    /// Triangulate the path's polygons into a flat triangle mesh.
+    ///
+    /// Returns `(vertices, triangles)` where triangles index into vertices.
+    /// Handles non-convex polygons and holes via earcut. Results are cached.
+    pub fn triangulate(&self) -> &(Vec<Point2<f64>>, Vec<[usize; 3]>) {
+        self.cache_triangulation
+            .get_or_init(|| self.compute_triangulation())
+    }
+
+    fn compute_triangulation(&self) -> (Vec<Point2<f64>>, Vec<[usize; 3]>) {
+        let polygons = self.polygons();
+        let mut all_vertices: Vec<Point2<f64>> = Vec::new();
+        let mut all_triangles: Vec<[usize; 3]> = Vec::new();
+        let mut triangulator = Triangulator::new();
+
+        for poly in polygons {
+            let base = all_vertices.len();
+
+            // Add exterior vertices, build index list
+            let ext_indices: Vec<usize> = (0..poly.exterior.len())
+                .map(|i| {
+                    all_vertices.push(poly.exterior[i]);
+                    base + i
+                })
+                .collect();
+
+            // Add hole vertices, build hole index lists
+            let hole_indices: Vec<Vec<usize>> = poly
+                .interiors
+                .iter()
+                .map(|hole| {
+                    hole.iter()
+                        .map(|pt| {
+                            let idx = all_vertices.len();
+                            all_vertices.push(*pt);
+                            idx
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let tris = triangulator.trianglate_2d(&ext_indices, &hole_indices, &all_vertices);
+            all_triangles.extend(tris);
+        }
+
+        (all_vertices, all_triangles)
     }
 
     /// Calculate the total length of this path
@@ -1118,5 +1181,57 @@ mod tests {
         assert_eq!(idx1, idx2); // Should be same index
         assert_ne!(idx1, idx3); // Should be different
         assert_eq!(path.vertices.len(), 2);
+    }
+
+    #[test]
+    fn test_triangulate() {
+        // Rectangle should produce exactly 2 triangles
+        let mut rect = Path2D::rectangle(10.0, 5.0);
+        rect.deviation = Some(0.001);
+        let (vertices, triangles) = rect.triangulate();
+
+        assert_eq!(
+            triangles.len(),
+            2,
+            "Rectangle should triangulate to 2 triangles"
+        );
+        assert!(
+            !vertices.is_empty(),
+            "Triangulation should produce vertices"
+        );
+
+        // All triangle indices must be in-bounds
+        for tri in triangles {
+            for &idx in tri {
+                assert!(
+                    idx < vertices.len(),
+                    "Triangle index {} out of bounds (vertices: {})",
+                    idx,
+                    vertices.len()
+                );
+            }
+        }
+
+        // Circle should triangulate to many triangles with valid indices
+        let mut circle = Path2D::circle(5.0);
+        circle.deviation = Some(0.001);
+        let (c_verts, c_tris) = circle.triangulate();
+
+        assert!(
+            c_tris.len() > 4,
+            "Circle should triangulate to many triangles, got {}",
+            c_tris.len()
+        );
+
+        for tri in c_tris {
+            for &idx in tri {
+                assert!(
+                    idx < c_verts.len(),
+                    "Circle triangle index {} out of bounds (vertices: {})",
+                    idx,
+                    c_verts.len()
+                );
+            }
+        }
     }
 }

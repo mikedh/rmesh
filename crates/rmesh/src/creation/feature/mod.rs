@@ -54,6 +54,7 @@ pub use operation::{
 pub use plane::SketchPlane;
 pub use sketch::{EntityId, Sketch, SketchEntity};
 
+use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
 
 /// A feature-based CAD model
@@ -152,6 +153,76 @@ impl FeatureModel {
     pub fn clear(&mut self) {
         self.operations.clear();
     }
+
+    /// Compute conservative 3D axis-aligned bounding box from all operations.
+    ///
+    /// Returns `None` if no operations produce bounds.
+    pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
+        let mut min = [f64::MAX; 3];
+        let mut max = [f64::MIN; 3];
+        let mut found = false;
+
+        let mut update = |p: nalgebra::Point3<f64>| {
+            found = true;
+            min[0] = min[0].min(p.x);
+            min[1] = min[1].min(p.y);
+            min[2] = min[2].min(p.z);
+            max[0] = max[0].max(p.x);
+            max[1] = max[1].max(p.y);
+            max[2] = max[2].max(p.z);
+        };
+
+        for op in &self.operations {
+            let (sketch, depth) = match op {
+                Operation::Extrude(e) => (&e.sketch, e.depth),
+                Operation::Revolve(r) => (&r.sketch, 0.0),
+                Operation::Sweep(s) => (&s.profile, 0.0),
+                Operation::Loft(l) => {
+                    // Use all loft profiles
+                    for profile in &l.profiles {
+                        if let Some((lo, hi)) = profile.bounds() {
+                            let plane = &profile.plane;
+                            for corner in corners_2d(lo, hi) {
+                                update(plane.point_to_world(corner));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Fillet/chamfer don't expand bounds
+                Operation::Fillet(_) | Operation::Chamfer(_) => continue,
+            };
+
+            if let Some((lo, hi)) = sketch.bounds() {
+                let plane = &sketch.plane;
+                let normal = plane.normal();
+                let end_offset = normal * depth;
+
+                for corner in corners_2d(lo, hi) {
+                    let world = plane.point_to_world(corner);
+                    update(world);
+                    // Also include the extruded end
+                    update(nalgebra::Point3::new(
+                        world.x + end_offset.x,
+                        world.y + end_offset.y,
+                        world.z + end_offset.z,
+                    ));
+                }
+            }
+        }
+
+        if found { Some((min, max)) } else { None }
+    }
+}
+
+/// Return the 4 corners of a 2D bounding box.
+fn corners_2d(lo: Point2<f64>, hi: Point2<f64>) -> [Point2<f64>; 4] {
+    [
+        Point2::new(lo.x, lo.y),
+        Point2::new(lo.x, hi.y),
+        Point2::new(hi.x, lo.y),
+        Point2::new(hi.x, hi.y),
+    ]
 }
 
 #[cfg(test)]

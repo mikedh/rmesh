@@ -10,10 +10,7 @@ pub use qhull::convex_hull_3d;
 /// `(b - a)` rotated 90 degrees clockwise. Every point must have
 /// non-positive dot product with that outward normal (relative to `a`).
 #[cfg(test)]
-pub(crate) fn is_hull_valid_2d(
-    points: &[nalgebra::Point2<f64>],
-    edges: &[[usize; 2]],
-) -> bool {
+pub(crate) fn is_hull_valid_2d(points: &[nalgebra::Point2<f64>], edges: &[[usize; 2]]) -> bool {
     for &[a, b] in edges {
         let edge = points[b] - points[a];
         let nx = edge.y;
@@ -38,10 +35,7 @@ pub(crate) fn is_hull_valid_2d(
 /// Uses rayon to parallelize across faces and precomputes plane offsets
 /// to avoid per-point subtraction in the inner loop.
 #[cfg(test)]
-pub(crate) fn is_hull_valid_3d(
-    points: &[nalgebra::Point3<f64>],
-    faces: &[[usize; 3]],
-) -> bool {
+pub(crate) fn is_hull_valid_3d(points: &[nalgebra::Point3<f64>], faces: &[[usize; 3]]) -> bool {
     use rayon::prelude::*;
 
     // Precompute plane normals and offsets for all faces in parallel

@@ -11,10 +11,9 @@ use fidget::{
 use nalgebra::Point2;
 
 use crate::creation::feature::{
-    Extrude, FeatureBackend, FeatureError, FeatureModel, Operation, Result, Sign, Sketch,
+    Extrude, FeatureBackend, FeatureError, FeatureModel, Operation, Result, Sign, Sketch, sketch,
 };
 use crate::mesh::Trimesh;
-use crate::path::Segment2D;
 
 use super::super::backend::BackendSettings;
 
@@ -98,7 +97,10 @@ impl FidgetBackend {
         let tree = build_tree(model)?;
 
         // Calculate bounds if not provided
-        let bounds = settings.bounds.unwrap_or_else(|| calculate_bounds(model));
+        let bounds = settings
+            .bounds
+            .or_else(|| model.bounds())
+            .unwrap_or(([-1.0; 3], [1.0; 3]));
 
         // Build octree and mesh (JIT compiles SDF to native code for fast evaluation)
         let shape = JitShape::from(tree);
@@ -218,176 +220,107 @@ fn operation_to_tree(op: &Operation) -> Result<Tree> {
     }
 }
 
-/// Convert an extrusion to a Fidget Tree
+/// Convert an extrusion to a Fidget Tree.
+///
+/// Supports arbitrary sketch planes by projecting world coordinates into
+/// the plane's local coordinate system (u, v, w) via dot products.
 fn extrude_to_tree(extrude: &Extrude) -> Result<Tree> {
-    // Get 2D profile as SDF
-    let profile_2d = sketch_to_tree(&extrude.sketch)?;
+    let plane = &extrude.sketch.plane;
+    let o = plane.origin;
+    let u = plane.x_axis();
+    let v = plane.y_axis();
+    let n = plane.normal();
 
-    // Get the plane's Z offset (for now we only handle XY-parallel planes)
-    let z_offset = extrude.sketch.plane.origin.z;
+    // World coords → local coords via dot products
+    let dx = Tree::x() - o.x;
+    let dy = Tree::y() - o.y;
+    let dz = Tree::z() - o.z;
 
-    // Extrude in Z: combine 2D SDF with Z bounds
-    // For a profile f(x,y), extruded from z=z_offset to z=z_offset+depth:
-    // SDF(x,y,z) = max(f(x,y), |z - center| - half_height)
+    let local_u = dx.clone() * u.x + dy.clone() * u.y + dz.clone() * u.z;
+    let local_v = dx.clone() * v.x + dy.clone() * v.y + dz.clone() * v.z;
+    let local_w = dx * n.x + dy * n.y + dz * n.z;
+
+    // 2D profile evaluated in local (u, v) space
+    let profile_2d = sketch_to_tree_local(&extrude.sketch, local_u, local_v)?;
+
+    // Extrusion bounds in local w (normal) direction
     let depth = extrude.depth;
-    let z = Tree::z();
-    let z_center = z_offset + depth / 2.0;
-    let z_half = depth / 2.0;
+    let w_dist = (local_w - depth / 2.0).abs() - depth / 2.0;
 
-    // Z bounds: |z - center| - half_height
-    let z_dist = (z - z_center).abs() - z_half;
-
-    // Extrusion: max of 2D profile and Z bounds
-    Ok(profile_2d.max(z_dist))
+    // Extrusion: max of 2D profile and w bounds
+    Ok(profile_2d.max(w_dist))
 }
 
-/// Convert a sketch to a 2D SDF Tree (in XY plane)
-fn sketch_to_tree(sketch: &Sketch) -> Result<Tree> {
-    if sketch.entities.is_empty() {
-        return Err(FeatureError::InvalidSketch("Empty sketch".to_string()));
+/// Convert a sketch to a 2D SDF Tree using the given local coordinate Trees.
+///
+/// `local_u` and `local_v` are Fidget Trees representing the projection
+/// of world coordinates onto the sketch plane's local axes.
+///
+/// Uses triangulated polygon SDFs: each triangle is convex (3 half-planes
+/// via `max`), all triangles unioned via `min`. This handles non-convex
+/// polygons and holes correctly, unlike the previous half-plane approach
+/// which only worked for convex shapes.
+fn sketch_to_tree_local(sketch: &Sketch, local_u: Tree, local_v: Tree) -> Result<Tree> {
+    let mut path = sketch.to_path2d();
+    if path.segments.is_empty() {
+        return Err(FeatureError::InvalidSketch("Empty sketch".into()));
     }
+    path.deviation = Some(sketch::DEFAULT_TOLERANCE);
 
-    // Check if it's a single circle (simple case)
-    if sketch.entities.len() == 1 {
-        if let Segment2D::Circle(circle) = &sketch.entities[0].segment {
-            let center = sketch.vertices[circle.center];
-            return Ok(circle_sdf(center.x, center.y, circle.radius));
-        }
+    let (vertices, triangles) = path.triangulate();
+    if triangles.is_empty() {
+        return Err(FeatureError::InvalidSketch("No closed polygons".into()));
     }
-
-    // For polygons (lines), we need to compute a proper 2D polygon SDF
-    let polygons = sketch
-        .to_polygon()
-        .map_err(|e| FeatureError::InvalidSketch(e.to_string()))?;
-
-    if polygons.is_empty() {
-        return Err(FeatureError::InvalidSketch(
-            "No closed polygons".to_string(),
-        ));
-    }
-
-    // For now, handle the common case: axis-aligned rectangle
-    // We can detect this and use the optimized box SDF
-    if let Some(rect) = try_extract_rectangle(&polygons[0]) {
-        return Ok(rectangle_sdf(rect.0, rect.1, rect.2, rect.3));
-    }
-
-    // Generic polygon - use polygon SDF approximation
-    polygon_to_tree(&polygons[0])
-}
-
-/// Circle SDF: sqrt(x² + y²) - r (centered at origin, translated)
-fn circle_sdf(cx: f64, cy: f64, radius: f64) -> Tree {
-    let x = Tree::x() - cx;
-    let y = Tree::y() - cy;
-    (x.square() + y.square()).sqrt() - radius
-}
-
-/// Axis-aligned rectangle SDF
-fn rectangle_sdf(x_min: f64, y_min: f64, x_max: f64, y_max: f64) -> Tree {
-    let cx = (x_min + x_max) / 2.0;
-    let cy = (y_min + y_max) / 2.0;
-    let hx = (x_max - x_min) / 2.0;
-    let hy = (y_max - y_min) / 2.0;
-
-    let x = Tree::x() - cx;
-    let y = Tree::y() - cy;
-
-    // 2D box SDF: max(|x| - hx, |y| - hy)
-    (x.abs() - hx).max(y.abs() - hy)
-}
-
-/// Try to extract rectangle bounds from a polygon
-fn try_extract_rectangle(points: &[Point2<f64>]) -> Option<(f64, f64, f64, f64)> {
-    if points.len() < 3 {
-        return None;
-    }
-
-    let mut x_min = f64::MAX;
-    let mut x_max = f64::MIN;
-    let mut y_min = f64::MAX;
-    let mut y_max = f64::MIN;
-
-    for p in points {
-        x_min = x_min.min(p.x);
-        x_max = x_max.max(p.x);
-        y_min = y_min.min(p.y);
-        y_max = y_max.max(p.y);
-    }
-
-    // Check if it's actually a rectangle (4 corners at extremes)
-    let corners = [
-        (x_min, y_min),
-        (x_min, y_max),
-        (x_max, y_min),
-        (x_max, y_max),
-    ];
-
-    let mut found = [false; 4];
-    for p in points {
-        for (i, &(cx, cy)) in corners.iter().enumerate() {
-            if (p.x - cx).abs() < 1e-9 && (p.y - cy).abs() < 1e-9 {
-                found[i] = true;
-            }
-        }
-    }
-
-    if found.iter().all(|&f| f) {
-        Some((x_min, y_min, x_max, y_max))
-    } else {
-        // Not a perfect rectangle, but use bounds anyway for approximation
-        Some((x_min, y_min, x_max, y_max))
-    }
-}
-
-/// Convert a generic polygon to a Tree using half-plane intersection
-/// This creates an approximate SDF for convex polygons
-fn polygon_to_tree(points: &[Point2<f64>]) -> Result<Tree> {
-    if points.len() < 3 {
-        return Err(FeatureError::InvalidSketch(
-            "Polygon needs at least 3 points".to_string(),
-        ));
-    }
-
-    // For a convex polygon, the SDF is the max of all edge half-planes
-    // For each edge (p0, p1), the half-plane is: dot(normal, p - p0)
-    // where normal points inward
 
     let mut result: Option<Tree> = None;
+    for tri in triangles {
+        let Some(tri_sdf) = triangle_sdf(
+            vertices[tri[0]],
+            vertices[tri[1]],
+            vertices[tri[2]],
+            &local_u,
+            &local_v,
+        ) else {
+            continue; // skip degenerate triangles
+        };
+        result = Some(match result {
+            None => tri_sdf,
+            Some(existing) => existing.min(tri_sdf), // union
+        });
+    }
 
-    let n = points.len();
-    for i in 0..n {
-        let p0 = &points[i];
-        let p1 = &points[(i + 1) % n];
+    result.ok_or(FeatureError::InvalidSketch("Failed to build SDF".into()))
+}
 
-        // Edge vector
-        let dx = p1.x - p0.x;
-        let dy = p1.y - p0.y;
-
-        // Inward normal (rotate edge 90° CW for CCW polygon)
-        let nx = dy;
-        let ny = -dx;
-        let len = (nx * nx + ny * ny).sqrt();
+/// SDF for a single triangle via intersection of 3 half-planes.
+///
+/// Returns `None` if the triangle is degenerate (all edges have zero length).
+fn triangle_sdf(
+    p0: Point2<f64>,
+    p1: Point2<f64>,
+    p2: Point2<f64>,
+    local_u: &Tree,
+    local_v: &Tree,
+) -> Option<Tree> {
+    let mut result: Option<Tree> = None;
+    let pts = [p0, p1, p2];
+    for i in 0..3 {
+        let a = pts[i];
+        let b = pts[(i + 1) % 3];
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = (dx * dx + dy * dy).sqrt();
         if len < 1e-10 {
             continue;
         }
-        let nx = nx / len;
-        let ny = ny / len;
-
-        // Half-plane: nx*(x - p0.x) + ny*(y - p0.y)
-        let x = Tree::x();
-        let y = Tree::y();
-        let half_plane = x * nx + y * ny - (nx * p0.x + ny * p0.y);
-
+        // Inward normal (rotate edge 90° CW for CCW winding)
+        let (nx, ny) = (dy / len, -dx / len);
+        let half_plane = local_u.clone() * nx + local_v.clone() * ny - (nx * a.x + ny * a.y);
         result = Some(match result {
             None => half_plane,
             Some(existing) => existing.max(half_plane),
         });
     }
-
-    result.ok_or(FeatureError::InvalidSketch(
-        "Failed to build polygon SDF".to_string(),
-    ))
+    result
 }
 
 /// Get the sign (add/remove) from an operation
@@ -402,113 +335,11 @@ fn operation_sign(op: &Operation) -> Sign {
     }
 }
 
-/// Calculate bounds for the model
-fn calculate_bounds(model: &FeatureModel) -> ([f64; 3], [f64; 3]) {
-    let mut min = [f64::MAX; 3];
-    let mut max = [f64::MIN; 3];
-
-    for op in &model.operations {
-        if let Operation::Extrude(e) = op {
-            let vertices = &e.sketch.vertices;
-
-            // Get sketch bounds from entities
-            for entity in &e.sketch.entities {
-                match &entity.segment {
-                    Segment2D::Line(line) => {
-                        // Line now has multiple points
-                        for &idx in &line.points {
-                            let p = vertices[idx];
-                            min[0] = min[0].min(p.x);
-                            min[1] = min[1].min(p.y);
-                            max[0] = max[0].max(p.x);
-                            max[1] = max[1].max(p.y);
-                        }
-                    }
-                    Segment2D::Circle(circle) => {
-                        let center = vertices[circle.center];
-                        min[0] = min[0].min(center.x - circle.radius);
-                        min[1] = min[1].min(center.y - circle.radius);
-                        max[0] = max[0].max(center.x + circle.radius);
-                        max[1] = max[1].max(center.y + circle.radius);
-                    }
-                    Segment2D::Arc(arc) => {
-                        // Use endpoints as bounds approximation
-                        if let (Some(start), Some(finish)) =
-                            (vertices.get(arc.start), vertices.get(arc.finish))
-                        {
-                            min[0] = min[0].min(start.x).min(finish.x);
-                            min[1] = min[1].min(start.y).min(finish.y);
-                            max[0] = max[0].max(start.x).max(finish.x);
-                            max[1] = max[1].max(start.y).max(finish.y);
-                        }
-                        // Also include arc center + radius if available
-                        if let (Some(center), Some(radius)) =
-                            (arc.center(vertices), arc.radius(vertices))
-                        {
-                            min[0] = min[0].min(center.x - radius);
-                            min[1] = min[1].min(center.y - radius);
-                            max[0] = max[0].max(center.x + radius);
-                            max[1] = max[1].max(center.y + radius);
-                        }
-                    }
-                    Segment2D::Ellipse(ellipse) => {
-                        let center = vertices[ellipse.center];
-                        let r = ellipse.major.max(ellipse.minor);
-                        min[0] = min[0].min(center.x - r);
-                        min[1] = min[1].min(center.y - r);
-                        max[0] = max[0].max(center.x + r);
-                        max[1] = max[1].max(center.y + r);
-                    }
-                    Segment2D::CubicBezier(bezier) => {
-                        for &idx in &[bezier.p0, bezier.p1, bezier.p2, bezier.p3] {
-                            let p = vertices[idx];
-                            min[0] = min[0].min(p.x);
-                            min[1] = min[1].min(p.y);
-                            max[0] = max[0].max(p.x);
-                            max[1] = max[1].max(p.y);
-                        }
-                    }
-                    Segment2D::QuadraticBezier(bezier) => {
-                        for &idx in &[bezier.p0, bezier.p1, bezier.p2] {
-                            let p = vertices[idx];
-                            min[0] = min[0].min(p.x);
-                            min[1] = min[1].min(p.y);
-                            max[0] = max[0].max(p.x);
-                            max[1] = max[1].max(p.y);
-                        }
-                    }
-                    Segment2D::BSpline(spline) => {
-                        for &idx in &spline.points {
-                            let p = vertices[idx];
-                            min[0] = min[0].min(p.x);
-                            min[1] = min[1].min(p.y);
-                            max[0] = max[0].max(p.x);
-                            max[1] = max[1].max(p.y);
-                        }
-                    }
-                }
-            }
-
-            // Z bounds from extrusion depth + plane offset
-            let z_offset = e.sketch.plane.origin.z;
-            min[2] = min[2].min(z_offset);
-            max[2] = max[2].max(z_offset + e.depth);
-        }
-    }
-
-    // Fallback if nothing found
-    if min[0] == f64::MAX {
-        min = [-1.0, -1.0, -1.0];
-        max = [1.0, 1.0, 1.0];
-    }
-
-    (min, max)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::creation::feature::Sketch;
+    use crate::path::{Line, Segment2D};
 
     #[test]
     fn test_extrude_rectangle_to_box() {
@@ -648,6 +479,125 @@ mod tests {
         assert!(!backend.supports_operation("Fillet"));
     }
 
+    #[test]
+    fn test_extrude_xz_plane() {
+        // Extrude a circle on the XZ plane → should produce geometry
+        // extending along Y (the plane normal).
+        use crate::creation::feature::SketchPlane;
+
+        let mut sketch = Sketch::on_plane(SketchPlane::xz());
+        sketch.add_circle(Point2::new(0.0, 0.0), 0.5);
+
+        let extrude = Extrude::new(sketch, 2.0, Sign::Add);
+        let model = FeatureModel::new().with_operation(extrude);
+
+        let backend = FidgetBackend::new();
+        let settings = FidgetSettings::with_depth(5);
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("XZ plane extrusion failed");
+
+        assert!(!mesh.vertices.is_empty(), "Mesh should have vertices");
+        assert!(!mesh.faces.is_empty(), "Mesh should have faces");
+
+        // Bounding box should have significant Y extent (extrusion direction)
+        let mut y_min = f64::MAX;
+        let mut y_max = f64::MIN;
+        for v in &mesh.vertices {
+            y_min = y_min.min(v.y);
+            y_max = y_max.max(v.y);
+        }
+        let y_extent = y_max - y_min;
+        assert!(
+            y_extent > 1.0,
+            "XZ plane extrusion should have Y extent > 1.0, got {:.3}",
+            y_extent
+        );
+    }
+
+    #[test]
+    fn test_extrude_yz_plane() {
+        // Extrude a rectangle on the YZ plane → should produce geometry
+        // extending along X (the plane normal).
+        use crate::creation::feature::SketchPlane;
+
+        let mut sketch = Sketch::on_plane(SketchPlane::yz());
+        // Manually add a rectangle since Sketch::rectangle() uses default XY plane
+        sketch.add_line(Point2::new(-0.5, -0.5), Point2::new(0.5, -0.5));
+        sketch.add_line(Point2::new(0.5, -0.5), Point2::new(0.5, 0.5));
+        sketch.add_line(Point2::new(0.5, 0.5), Point2::new(-0.5, 0.5));
+        sketch.add_line(Point2::new(-0.5, 0.5), Point2::new(-0.5, -0.5));
+
+        let extrude = Extrude::new(sketch, 2.0, Sign::Add);
+        let model = FeatureModel::new().with_operation(extrude);
+
+        let backend = FidgetBackend::new();
+        let settings = FidgetSettings::with_depth(5);
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("YZ plane extrusion failed");
+
+        assert!(!mesh.vertices.is_empty(), "Mesh should have vertices");
+        assert!(!mesh.faces.is_empty(), "Mesh should have faces");
+
+        // Bounding box should have significant X extent (extrusion direction)
+        let mut x_min = f64::MAX;
+        let mut x_max = f64::MIN;
+        for v in &mesh.vertices {
+            x_min = x_min.min(v.x);
+            x_max = x_max.max(v.x);
+        }
+        let x_extent = x_max - x_min;
+        assert!(
+            x_extent > 1.0,
+            "YZ plane extrusion should have X extent > 1.0, got {:.3}",
+            x_extent
+        );
+    }
+
+    #[test]
+    fn test_multi_plane_cross() {
+        // Cylinder body on XY plane + perpendicular spike on XZ plane.
+        use crate::creation::feature::SketchPlane;
+
+        // Main body: circle on XY plane extruded along Z
+        let mut body_sketch = Sketch::on_plane(SketchPlane::xy());
+        body_sketch.add_circle(Point2::new(0.0, 0.0), 1.0);
+        let body = Extrude::new(body_sketch, 3.0, Sign::Add);
+
+        // Spike: small circle on XZ plane extruded along Y
+        let mut spike_sketch = Sketch::on_plane(SketchPlane::xz());
+        spike_sketch.add_circle(Point2::new(0.0, 1.5), 0.3);
+        let spike = Extrude::new(spike_sketch, 2.0, Sign::Add);
+
+        let model = FeatureModel::new()
+            .with_operation(body)
+            .with_operation(spike);
+
+        let backend = FidgetBackend::new();
+        let settings = FidgetSettings::with_depth(6);
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("Multi-plane extrusion failed");
+
+        assert!(!mesh.vertices.is_empty(), "Mesh should have vertices");
+        assert!(!mesh.faces.is_empty(), "Mesh should have faces");
+
+        // The combined shape should extend in Y (from the spike)
+        let mut y_min = f64::MAX;
+        let mut y_max = f64::MIN;
+        for v in &mesh.vertices {
+            y_min = y_min.min(v.y);
+            y_max = y_max.max(v.y);
+        }
+        let y_extent = y_max - y_min;
+        assert!(
+            y_extent > 1.5,
+            "Multi-plane shape should have Y extent > 1.5 (spike), got {:.3}",
+            y_extent
+        );
+    }
+
     /// Integration test: Load SLDPRT file → parse → mesh → verify volume
     ///
     /// The 123.2021.SLDPRT file contains:
@@ -727,6 +677,132 @@ mod tests {
             "Volume should be ~{:.2} in³, got {:.4} (error: {:.2}%)",
             expected_box_volume,
             volume,
+            relative_error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_extrude_l_shape() {
+        // L-shaped non-convex polygon (6 line segments)
+        //
+        //   (0,2)----(1,2)
+        //     |        |
+        //     |  (1,1)--(2,1)
+        //     |          |
+        //   (0,0)------(2,0)
+        //
+        // Area = 2×1 (bottom) + 1×1 (left column) = 3 sq units
+        // But the full L is: bottom 2×1 + top-left 1×1 = 3
+        let mut sketch = Sketch::new();
+        let p0 = sketch.add_vertex(Point2::new(0.0, 0.0));
+        let p1 = sketch.add_vertex(Point2::new(2.0, 0.0));
+        let p2 = sketch.add_vertex(Point2::new(2.0, 1.0));
+        let p3 = sketch.add_vertex(Point2::new(1.0, 1.0));
+        let p4 = sketch.add_vertex(Point2::new(1.0, 2.0));
+        let p5 = sketch.add_vertex(Point2::new(0.0, 2.0));
+
+        sketch.add(Segment2D::Line(Line::new(p0, p1)));
+        sketch.add(Segment2D::Line(Line::new(p1, p2)));
+        sketch.add(Segment2D::Line(Line::new(p2, p3)));
+        sketch.add(Segment2D::Line(Line::new(p3, p4)));
+        sketch.add(Segment2D::Line(Line::new(p4, p5)));
+        sketch.add(Segment2D::Line(Line::new(p5, p0)));
+
+        let depth = 1.0;
+        let model = FeatureModel::new().with_operation(Extrude::simple(sketch, depth));
+
+        let backend = FidgetBackend::new();
+        let settings = FidgetSettings::with_depth(7);
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("L-shape extrusion failed");
+
+        let expected_volume = 3.0 * depth; // L-shape area = 3
+        let actual_volume = mesh.volume();
+        let tolerance = 0.05;
+        let relative_error = (actual_volume - expected_volume).abs() / expected_volume;
+
+        assert!(
+            relative_error < tolerance,
+            "L-shape volume: expected {:.4}, got {:.4} (error: {:.2}%)",
+            expected_volume,
+            actual_volume,
+            relative_error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_extrude_circle_volume() {
+        // Circle sketch extruded to cylinder — regression test for triangulated polygon SDF
+        let radius = 0.5;
+        let depth = 2.0;
+
+        let sketch = Sketch::circle(radius);
+        let model = FeatureModel::new().with_operation(Extrude::simple(sketch, depth));
+
+        let backend = FidgetBackend::new();
+        let settings = FidgetSettings::with_depth(7);
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("Circle extrusion failed");
+
+        let expected_volume = std::f64::consts::PI * radius * radius * depth;
+        let actual_volume = mesh.volume();
+        let tolerance = 0.05;
+        let relative_error = (actual_volume - expected_volume).abs() / expected_volume;
+
+        assert!(
+            relative_error < tolerance,
+            "Cylinder volume: expected {:.4}, got {:.4} (error: {:.2}%)",
+            expected_volume,
+            actual_volume,
+            relative_error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_extrude_square_with_hole() {
+        // Square with circular hole — tests polygon hole handling in triangulation
+        let box_size = 2.0;
+        let hole_radius = 0.4;
+        let depth = 1.0;
+
+        let mut sketch = Sketch::new();
+        // Outer square
+        let hw = box_size / 2.0;
+        let p0 = sketch.add_vertex(Point2::new(-hw, -hw));
+        let p1 = sketch.add_vertex(Point2::new(hw, -hw));
+        let p2 = sketch.add_vertex(Point2::new(hw, hw));
+        let p3 = sketch.add_vertex(Point2::new(-hw, hw));
+
+        sketch.add(Segment2D::Line(Line::new(p0, p1)));
+        sketch.add(Segment2D::Line(Line::new(p1, p2)));
+        sketch.add(Segment2D::Line(Line::new(p2, p3)));
+        sketch.add(Segment2D::Line(Line::new(p3, p0)));
+
+        // Inner circle (hole)
+        sketch.add_circle(Point2::new(0.0, 0.0), hole_radius);
+
+        let model = FeatureModel::new().with_operation(Extrude::simple(sketch, depth));
+
+        let backend = FidgetBackend::new();
+        let settings = FidgetSettings::with_depth(7);
+        let mesh = backend
+            .execute(&model, &settings)
+            .expect("Square-with-hole extrusion failed");
+
+        let box_volume = box_size * box_size * depth;
+        let hole_volume = std::f64::consts::PI * hole_radius * hole_radius * depth;
+        let expected_volume = box_volume - hole_volume;
+        let actual_volume = mesh.volume();
+        let tolerance = 0.05;
+        let relative_error = (actual_volume - expected_volume).abs() / expected_volume;
+
+        assert!(
+            relative_error < tolerance,
+            "Square-with-hole volume: expected {:.4}, got {:.4} (error: {:.2}%)",
+            expected_volume,
+            actual_volume,
             relative_error * 100.0
         );
     }

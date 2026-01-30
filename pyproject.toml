@@ -25,6 +25,10 @@ manifest-path = "crates/rmesh_python/Cargo.toml"
 features = ["pyo3/extension-module"]
 python-source = "python"
 
+[tool.uv]
+# Always rebuild the local Rust extension so `uv run` picks up source changes.
+reinstall-package = ["rmesh"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

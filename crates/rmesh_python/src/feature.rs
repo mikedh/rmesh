@@ -431,12 +431,109 @@ impl PySketch {
         Ok(Self { inner: sketch })
     }
 
+    /// Create a rectangle sketch centered at origin.
+    ///
+    /// Parameters
+    /// ----------
+    /// width : float
+    ///     Width of the rectangle.
+    /// height : float
+    ///     Height of the rectangle.
+    /// plane : SketchPlane, optional
+    ///     The plane to draw the sketch on (default: XY at z=0).
+    ///
+    /// Returns
+    /// -------
+    /// Sketch
+    ///     A new sketch with a centered rectangle.
+    #[staticmethod]
+    #[pyo3(signature = (width, height, plane=None))]
+    fn rectangle(width: f64, height: f64, plane: Option<PySketchPlane>) -> Self {
+        let mut sketch = Sketch::rectangle(width, height);
+        if let Some(p) = plane {
+            sketch.plane = p.inner;
+        }
+        Self { inner: sketch }
+    }
+
+    /// Create a circle sketch centered at origin.
+    ///
+    /// Parameters
+    /// ----------
+    /// radius : float
+    ///     Radius of the circle.
+    /// plane : SketchPlane, optional
+    ///     The plane to draw the sketch on (default: XY at z=0).
+    ///
+    /// Returns
+    /// -------
+    /// Sketch
+    ///     A new sketch with a centered circle.
+    #[staticmethod]
+    #[pyo3(signature = (radius, plane=None))]
+    fn circle(radius: f64, plane: Option<PySketchPlane>) -> Self {
+        let mut sketch = Sketch::circle(radius);
+        if let Some(p) = plane {
+            sketch.plane = p.inner;
+        }
+        Self { inner: sketch }
+    }
+
     /// Get the plane this sketch is on.
     #[getter]
     fn plane(&self) -> PySketchPlane {
         PySketchPlane {
             inner: self.inner.plane.clone(),
         }
+    }
+
+    /// Get the 2D bounding box of the sketch profile.
+    ///
+    /// Returns
+    /// -------
+    /// tuple[tuple[float, float], tuple[float, float]] | None
+    ///     ((min_x, min_y), (max_x, max_y)) or None if empty.
+    #[getter]
+    fn bounds(&self) -> Option<((f64, f64), (f64, f64))> {
+        self.inner
+            .bounds()
+            .map(|(min, max)| ((min.x, min.y), (max.x, max.y)))
+    }
+
+    /// Tessellate the sketch into polygon point arrays.
+    ///
+    /// Parameters
+    /// ----------
+    /// tolerance : float, optional
+    ///     Maximum chord height error for curve discretization (default: 0.01).
+    ///
+    /// Returns
+    /// -------
+    /// list[list[tuple[float, float]]]
+    ///     List of polygon rings. First is exterior, rest are holes.
+    #[pyo3(signature = (tolerance=0.01))]
+    fn to_polygon(&self, tolerance: f64) -> PyResult<Vec<Vec<(f64, f64)>>> {
+        let mut path = self.inner.to_path2d();
+        if path.segments.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Sketch has no entities",
+            ));
+        }
+        path.deviation = Some(tolerance);
+        let polygons = path.polygons();
+        if polygons.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Could not form closed polygon from entities",
+            ));
+        }
+        let mut result = Vec::new();
+        for poly in polygons {
+            result.push(poly.exterior.iter().map(|p| (p.x, p.y)).collect());
+            for interior in &poly.interiors {
+                result.push(interior.iter().map(|p| (p.x, p.y)).collect());
+            }
+        }
+        Ok(result)
     }
 
     /// Get the number of entities in this sketch.

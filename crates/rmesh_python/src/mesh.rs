@@ -1055,6 +1055,46 @@ impl PyTrimesh {
             .collect()
     }
 
+    /// The convex hull of this mesh as a new Trimesh.
+    #[getter]
+    fn convex_hull(&self) -> Self {
+        Self::new_from_trimesh(self.data.convex_hull().clone())
+    }
+
+    /// Decompose the mesh into approximate convex parts.
+    #[pyo3(signature = (max_hulls=64, resolution=400_000))]
+    fn decompose(&self, max_hulls: u32, resolution: u32) -> Vec<Self> {
+        let params = rmesh::decomposition::DecompositionParams {
+            max_convex_hulls: max_hulls,
+            resolution,
+            ..Default::default()
+        };
+        self.data
+            .decompose(&params)
+            .into_iter()
+            .map(Self::new_from_trimesh)
+            .collect()
+    }
+
+    /// Voxelize the mesh at the given resolution.
+    #[pyo3(signature = (resolution=100_000, fill_mode="flood"))]
+    fn voxelize(&self, resolution: u32, fill_mode: &str) -> PyResult<PyVoxelGrid> {
+        let mode = match fill_mode {
+            "flood" => rmesh::voxel::FillMode::FloodFill,
+            "surface" => rmesh::voxel::FillMode::SurfaceOnly,
+            "raycast" => rmesh::voxel::FillMode::Raycast,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Unknown fill_mode: '{}'. Use 'flood', 'surface', or 'raycast'",
+                    fill_mode
+                )));
+            }
+        };
+        Ok(PyVoxelGrid {
+            data: self.data.voxelize(resolution, mode),
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<rmesh.Trimesh vertices: ({}, 3) faces: ({}, 3)>",
@@ -1187,6 +1227,50 @@ impl PyTrimesh {
             Some(attr_vertex),
             Some(attr_face),
         )?))
+    }
+}
+
+// ============================================================================
+// PyVoxelGrid
+// ============================================================================
+
+#[pyclass(name = "VoxelGrid")]
+pub struct PyVoxelGrid {
+    data: rmesh::voxel::VoxelGrid,
+}
+
+#[pymethods]
+impl PyVoxelGrid {
+    #[getter]
+    fn dims(&self) -> (u32, u32, u32) {
+        let d = self.data.dims();
+        (d[0], d[1], d[2])
+    }
+
+    #[getter]
+    fn scale(&self) -> f64 {
+        self.data.scale()
+    }
+
+    #[getter]
+    fn volume(&self) -> f64 {
+        self.data.volume()
+    }
+
+    #[getter]
+    fn area(&self) -> f64 {
+        self.data.area()
+    }
+
+    fn __repr__(&self) -> String {
+        let d = self.data.dims();
+        format!(
+            "<rmesh.VoxelGrid dims: ({}, {}, {}) scale: {:.6}>",
+            d[0],
+            d[1],
+            d[2],
+            self.data.scale()
+        )
     }
 }
 

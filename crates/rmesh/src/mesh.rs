@@ -6,7 +6,10 @@ use crate::{
     attributes::{Attributes, LoadSource, Material},
     graph::{EdgeGroups, ManifoldStatus, SortedEdge, adjacency},
     simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
-    triangles::inertia::{self, MassProperties},
+    triangles::{
+        bvh::TriangleBvh,
+        inertia::{self, MassProperties},
+    },
 };
 use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
@@ -66,6 +69,8 @@ pub struct Trimesh {
     cache_mass_properties: OnceLock<MassProperties>,
     cache_manifold_status: OnceLock<ManifoldStatus>,
     cache_vertex_mask: OnceLock<Vec<bool>>,
+    cache_bvh: OnceLock<TriangleBvh>,
+    cache_convex_hull: OnceLock<Box<Trimesh>>,
 }
 
 impl Default for Trimesh {
@@ -91,6 +96,8 @@ impl Default for Trimesh {
             cache_mass_properties: OnceLock::new(),
             cache_manifold_status: OnceLock::new(),
             cache_vertex_mask: OnceLock::new(),
+            cache_bvh: OnceLock::new(),
+            cache_convex_hull: OnceLock::new(),
         }
     }
 }
@@ -119,6 +126,8 @@ impl Clone for Trimesh {
             cache_mass_properties: OnceLock::new(),
             cache_manifold_status: OnceLock::new(),
             cache_vertex_mask: OnceLock::new(),
+            cache_bvh: OnceLock::new(),
+            cache_convex_hull: OnceLock::new(),
         }
     }
 }
@@ -657,6 +666,34 @@ impl Trimesh {
         self.face_adjacency_convex().par_iter().all(|&c| c)
     }
 
+    /// Get the triangle BVH for fast ray and closest-point queries.
+    ///
+    /// Cached on first access.
+    pub fn bvh(&self) -> &TriangleBvh {
+        self.cache_bvh
+            .get_or_init(|| TriangleBvh::build(&self.vertices, &self.faces))
+    }
+
+    /// Perform convex decomposition of this mesh.
+    ///
+    /// Returns a set of approximate convex hulls that together cover the mesh.
+    /// Requires the `wgpu` feature and a GPU.
+    #[cfg(feature = "wgpu")]
+    pub fn convex_decomposition(
+        &self,
+        params: &crate::decomposition::DecompositionParams,
+    ) -> crate::decomposition::DecompositionResult {
+        let (device, queue) =
+            crate::voxel::request_device().expect("GPU required for convex decomposition");
+        crate::decomposition::convex_decomposition(
+            &device,
+            &queue,
+            &self.vertices,
+            &self.faces,
+            params,
+        )
+    }
+
     /// Boolean mask of vertices referenced by at least one face.
     /// `vertex_mask()[i]` is true if vertex `i` appears in any face.
     pub fn vertex_mask(&self) -> &[bool] {
@@ -673,20 +710,62 @@ impl Trimesh {
 
     /// Compute the convex hull of the mesh vertices.
     ///
-    /// Returns a new `Trimesh` representing the convex hull with outward-facing
-    /// CCW normals and consistent winding. The resulting mesh will be watertight
-    /// and convex.
-    pub fn convex_hull(&self) -> Result<Trimesh> {
-        let mask = self.vertex_mask();
-        let points: Vec<Point3<f64>> = self
-            .vertices
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| mask[*i])
-            .map(|(_, v)| *v)
-            .collect();
-        let faces = crate::convex::convex_hull_3d(&points)?;
-        Trimesh::new(points, faces, None, None)
+    /// Returns a cached reference to a `Trimesh` representing the convex hull
+    /// with outward-facing CCW normals and consistent winding. The resulting
+    /// mesh will be watertight and convex.
+    ///
+    /// Cached on first access.
+    pub fn convex_hull(&self) -> &Trimesh {
+        self.cache_convex_hull.get_or_init(|| {
+            let mask = self.vertex_mask();
+            let points: Vec<Point3<f64>> = self
+                .vertices
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask[*i])
+                .map(|(_, v)| *v)
+                .collect();
+            let faces =
+                crate::convex::convex_hull_3d(&points).expect("convex hull computation failed");
+            Box::new(
+                Trimesh::new(points, faces, None, None).expect("convex hull mesh creation failed"),
+            )
+        })
+    }
+
+    /// Voxelize the mesh at the given resolution.
+    ///
+    /// Requires the `wgpu` feature and a GPU.
+    #[cfg(feature = "wgpu")]
+    pub fn voxelize(
+        &self,
+        resolution: u32,
+        fill_mode: crate::voxel::FillMode,
+    ) -> crate::voxel::VoxelGrid {
+        let (device, queue) =
+            crate::voxel::request_device().expect("GPU required for voxelization");
+        crate::voxel::VoxelGrid::from_mesh(
+            device,
+            queue,
+            &self.vertices,
+            &self.faces,
+            resolution,
+            fill_mode,
+        )
+    }
+
+    /// Decompose the mesh into approximate convex parts.
+    ///
+    /// Returns a `Vec<Trimesh>` of convex hulls covering the mesh.
+    /// Requires the `wgpu` feature and a GPU.
+    #[cfg(feature = "wgpu")]
+    pub fn decompose(&self, params: &crate::decomposition::DecompositionParams) -> Vec<Trimesh> {
+        let result = self.convex_decomposition(params);
+        result
+            .hulls
+            .into_iter()
+            .filter_map(|hull| Trimesh::new(hull.vertices, hull.faces, None, None).ok())
+            .collect()
     }
 
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,

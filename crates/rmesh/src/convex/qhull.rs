@@ -15,17 +15,18 @@ struct Tolerances {
 
 impl Tolerances {
     fn from_points(points: &[Point3<f64>]) -> Self {
-        let (max_abs, max_sum_abs) = points
-            .iter()
-            .fold((0.0_f64, 0.0_f64), |(best_abs, best_sum), point| {
-                let abs_x = point.x.abs();
-                let abs_y = point.y.abs();
-                let abs_z = point.z.abs();
-                (
-                    best_abs.max(abs_x).max(abs_y).max(abs_z),
-                    best_sum.max(abs_x + abs_y + abs_z),
-                )
-            });
+        let (max_abs, max_sum_abs) =
+            points
+                .iter()
+                .fold((0.0_f64, 0.0_f64), |(best_abs, best_sum), point| {
+                    let abs_x = point.x.abs();
+                    let abs_y = point.y.abs();
+                    let abs_z = point.z.abs();
+                    (
+                        best_abs.max(abs_x).max(abs_y).max(abs_z),
+                        best_sum.max(abs_x + abs_y + abs_z),
+                    )
+                });
 
         // qhull formula: maxdistsum = min(sqrt(dim) * max_abs, max_sum_abs)
         let max_dist_sum = (3.0_f64.sqrt() * max_abs).min(max_sum_abs);
@@ -191,13 +192,7 @@ impl<'a> QHull<'a> {
     }
 
     /// Create the initial tetrahedron with correct orientation.
-    fn create_initial_tetrahedron(
-        &mut self,
-        mut i0: usize,
-        mut i1: usize,
-        i2: usize,
-        i3: usize,
-    ) {
+    fn create_initial_tetrahedron(&mut self, mut i0: usize, mut i1: usize, i2: usize, i3: usize) {
         let points = self.points;
 
         // Check signed volume: det = (p1-p0) . ((p2-p0) x (p3-p0))
@@ -209,8 +204,7 @@ impl<'a> QHull<'a> {
 
         // Interior point = centroid of the 4 simplex vertices
         self.interior = Point3::from(
-            (points[i0].coords + points[i1].coords + points[i2].coords + points[i3].coords)
-                / 4.0,
+            (points[i0].coords + points[i1].coords + points[i2].coords + points[i3].coords) / 4.0,
         );
 
         // Face table for positive-volume tetrahedron (i0,i1,i2,i3).
@@ -220,12 +214,7 @@ impl<'a> QHull<'a> {
         //   face 1: (i0, i1, i3) opposite i2
         //   face 2: (i0, i3, i2) opposite i1
         //   face 3: (i1, i2, i3) opposite i0
-        let face_verts = [
-            [i0, i2, i1],
-            [i0, i1, i3],
-            [i0, i3, i2],
-            [i1, i2, i3],
-        ];
+        let face_verts = [[i0, i2, i1], [i0, i1, i3], [i0, i3, i2], [i1, i2, i3]];
         // Neighbor table: face_neighbors[f][i] = neighbor sharing edge opposite vertex i of face f.
         // Derived by matching shared edges between the four faces above.
         let face_neighbors = [
@@ -326,11 +315,7 @@ impl<'a> QHull<'a> {
                 .iter()
                 .enumerate()
                 .filter(|(_, f)| !f.removed && !f.outside.is_empty())
-                .max_by(|a, b| {
-                    a.1.furthest_dist
-                        .partial_cmp(&b.1.furthest_dist)
-                        .unwrap()
-                });
+                .max_by(|a, b| a.1.furthest_dist.partial_cmp(&b.1.furthest_dist).unwrap());
             let Some((start_face, _)) = best else {
                 break;
             };
@@ -373,10 +358,7 @@ impl<'a> QHull<'a> {
                     neighbor,
                     neighbor_slot,
                 );
-                if neighbor >= num_facets
-                    || is_visible[neighbor]
-                    || self.facets[neighbor].removed
-                {
+                if neighbor >= num_facets || is_visible[neighbor] || self.facets[neighbor].removed {
                     continue;
                 }
                 if self.facets[neighbor].distance(apex_point) > -self.tolerances.dist_round {
@@ -396,12 +378,7 @@ impl<'a> QHull<'a> {
     }
 
     /// Build new cone facets from apex to each horizon edge, then redistribute orphans.
-    fn build_cone(
-        &mut self,
-        apex: usize,
-        visible: &[usize],
-        horizon: &[(usize, usize, usize)],
-    ) {
+    fn build_cone(&mut self, apex: usize, visible: &[usize], horizon: &[(usize, usize, usize)]) {
         // Collect orphan points from all visible facets (excluding the apex)
         let mut orphans = Vec::new();
         for &face_index in visible {
@@ -721,14 +698,14 @@ mod tests {
     fn test_outward_normals() {
         let b = create_box(&[1.0, 1.0, 1.0]);
         let faces = convex_hull_3d(&b.vertices).unwrap();
-        let centroid: Vector3<f64> = b.vertices.iter().map(|v| v.coords).sum::<Vector3<f64>>()
-            / b.vertices.len() as f64;
+        let centroid: Vector3<f64> =
+            b.vertices.iter().map(|v| v.coords).sum::<Vector3<f64>>() / b.vertices.len() as f64;
         let center = Point3::from(centroid);
 
         for face in &faces {
             let [a, b_idx, c] = *face;
-            let normal = (b.vertices[b_idx] - b.vertices[a])
-                .cross(&(b.vertices[c] - b.vertices[a]));
+            let normal =
+                (b.vertices[b_idx] - b.vertices[a]).cross(&(b.vertices[c] - b.vertices[a]));
             let face_center = Point3::from(
                 (b.vertices[a].coords + b.vertices[b_idx].coords + b.vertices[c].coords) / 3.0,
             );
@@ -1077,11 +1054,12 @@ mod tests {
         timer.record("point generation");
 
         // Detail levels get per-phase breakdowns
-        let detail_levels: std::collections::HashSet<usize> =
-            [4, 8, 16, 32, 64, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000]
-                .iter()
-                .copied()
-                .collect();
+        let detail_levels: std::collections::HashSet<usize> = [
+            4, 8, 16, 32, 64, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000,
+        ]
+        .iter()
+        .copied()
+        .collect();
 
         let mut total_hulls = 0u64;
         let mut total_errors = 0u64;
