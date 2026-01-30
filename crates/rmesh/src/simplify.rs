@@ -2,10 +2,10 @@
 // Rewritten with per-vertex adjacency and edge priority queue for correctness
 
 use crate::attributes::Attributes;
+use ahash::{AHashMap, AHashSet};
 use nalgebra::{Point3, Vector3, Vector4};
-use smallvec::SmallVec;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
 use std::ops::{Add, AddAssign};
 
 // Type aliases for clarity
@@ -66,9 +66,9 @@ pub struct SimplifyResult {
     /// Simplified triangle faces
     pub faces: Vec<[usize; 3]>,
     /// Preserved/interpolated vertex attributes
-    pub attributes_vertex: Attributes,
+    pub attributes_vertex: Option<Attributes>,
     /// Preserved face attributes
-    pub attributes_face: Attributes,
+    pub attributes_face: Option<Attributes>,
     /// Maps original vertex indices to new indices (usize::MAX = deleted)
     pub vertex_map: Vec<usize>,
     /// Quality metrics (only computed if options.compute_quality is true)
@@ -189,7 +189,7 @@ struct Vertex {
     deleted: bool,
     normal: Option<Vector>,
     // Per-vertex triangle list - always up to date
-    triangles: SmallVec<[usize; 8]>,
+    triangles: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,7 +282,7 @@ impl Simplifier {
                 } else {
                     None
                 },
-                triangles: SmallVec::new(),
+                triangles: Vec::new(),
             })
             .collect();
 
@@ -384,7 +384,7 @@ impl Simplifier {
                 continue;
             }
 
-            let mut edge_counts: HashMap<usize, usize> = HashMap::new();
+            let mut edge_counts: AHashMap<usize, usize> = AHashMap::new();
 
             for &tid in &self.vertices[v_idx].triangles {
                 let t = &self.triangles[tid];
@@ -446,7 +446,7 @@ impl Simplifier {
     }
 
     fn build_initial_edges(&mut self) {
-        let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
+        let mut seen_edges: AHashSet<(usize, usize)> = AHashSet::new();
 
         for t in &self.triangles {
             if t.deleted {
@@ -551,8 +551,8 @@ impl Simplifier {
         None
     }
 
-    fn get_vertex_neighbors(&self, v_idx: usize) -> HashSet<usize> {
-        let mut neighbors = HashSet::new();
+    fn get_vertex_neighbors(&self, v_idx: usize) -> AHashSet<usize> {
+        let mut neighbors = AHashSet::new();
         for &tid in &self.vertices[v_idx].triangles {
             let t = &self.triangles[tid];
             if t.deleted {
@@ -708,7 +708,7 @@ impl Simplifier {
         self.vertices[v1].deleted = true;
 
         // 3. Track affected vertices
-        let mut affected_vertices = HashSet::new();
+        let mut affected_vertices = AHashSet::new();
         affected_vertices.insert(v0);
 
         // 4. Update normals for ALL of v0's triangles (v0's position changed)
@@ -721,7 +721,7 @@ impl Simplifier {
         }
 
         // 5. Process triangles of v1
-        let v1_triangles: SmallVec<[usize; 8]> = self.vertices[v1].triangles.clone();
+        let v1_triangles: Vec<usize> = self.vertices[v1].triangles.clone();
 
         for &tid in &v1_triangles {
             if self.triangles[tid].deleted {
@@ -898,15 +898,22 @@ impl Simplifier {
             .filter_map(|(_, v)| v.normal)
             .collect();
 
-        let mut attributes_vertex = Attributes::default();
-        if !vertex_normals.is_empty() && vertex_normals.len() == new_vertices.len() {
-            attributes_vertex.normals.push(vertex_normals);
-        }
+        let attributes_vertex =
+            if !vertex_normals.is_empty() && vertex_normals.len() == new_vertices.len() {
+                let mut attrs = Attributes::default();
+                attrs.normals.push(vertex_normals);
+                Some(attrs)
+            } else {
+                None
+            };
 
-        let mut attributes_face = Attributes::default();
-        if !new_face_colors.is_empty() {
-            attributes_face.colors.push(new_face_colors);
-        }
+        let attributes_face = if !new_face_colors.is_empty() {
+            let mut attrs = Attributes::default();
+            attrs.colors.push(new_face_colors);
+            Some(attrs)
+        } else {
+            None
+        };
 
         SimplifyResult {
             vertices: new_vertices,
@@ -944,8 +951,8 @@ pub fn simplify_mesh(
         return SimplifyResult {
             vertices: input_vertices.to_vec(),
             faces: input_faces.to_vec(),
-            attributes_vertex: attributes_vertex.cloned().unwrap_or_default(),
-            attributes_face: attributes_face.cloned().unwrap_or_default(),
+            attributes_vertex: attributes_vertex.cloned(),
+            attributes_face: attributes_face.cloned(),
             vertex_map: identity_map(),
             quality: None,
         };
@@ -958,8 +965,8 @@ pub fn simplify_mesh(
         return SimplifyResult {
             vertices: input_vertices.to_vec(),
             faces: input_faces.to_vec(),
-            attributes_vertex: attributes_vertex.cloned().unwrap_or_default(),
-            attributes_face: attributes_face.cloned().unwrap_or_default(),
+            attributes_vertex: attributes_vertex.cloned(),
+            attributes_face: attributes_face.cloned(),
             vertex_map: identity_map(),
             quality: None,
         };
@@ -972,8 +979,8 @@ pub fn simplify_mesh(
         return SimplifyResult {
             vertices: Vec::new(),
             faces: Vec::new(),
-            attributes_vertex: Attributes::default(),
-            attributes_face: Attributes::default(),
+            attributes_vertex: None,
+            attributes_face: None,
             vertex_map: vec![usize::MAX; input_vertices.len()],
             quality: None,
         };
@@ -1391,9 +1398,11 @@ mod tests {
         assert!(result.faces.len() <= faces.len());
         assert!(result.faces.len() >= 12); // At least the original cube faces
 
-        if !result.attributes_face.colors.is_empty() {
-            let result_colors = &result.attributes_face.colors[0];
-            assert_eq!(result_colors.len(), result.faces.len());
+        if let Some(ref attrs) = result.attributes_face {
+            if !attrs.colors.is_empty() {
+                let result_colors = &attrs.colors[0];
+                assert_eq!(result_colors.len(), result.faces.len());
+            }
         }
     }
 
@@ -1402,7 +1411,7 @@ mod tests {
     #[test]
     fn test_simplify_consistent_winding() {
         use crate::subdivide::subdivide;
-        use std::collections::HashMap;
+        use ahash::AHashMap;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
         let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 2);
@@ -1411,7 +1420,7 @@ mod tests {
 
         // For each directed edge (a, b), count occurrences
         // In a consistent mesh, edge (a,b) and (b,a) should each appear exactly once
-        let mut edge_counts: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut edge_counts: AHashMap<(usize, usize), usize> = AHashMap::new();
 
         for [v0, v1, v2] in &result.faces {
             // Edges in winding order

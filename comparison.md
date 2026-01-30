@@ -2,7 +2,7 @@
 
 ## API Coverage
 
-**33/135 trimesh.Trimesh attributes (24.4%)**
+**34/135 trimesh.Trimesh attributes (25.2%)**
 
 | Attribute                      | Status |
 |--------------------------------|--------|
@@ -11,6 +11,7 @@
 | `bounds`                       | ✓      |
 | `center_mass`                  | ✓      |
 | `centroid`                     | ✓      |
+| `convex_hull`                  | ✓      |
 | `edges`                        | ✓      |
 | `edges_sorted`                 | ✓      |
 | `edges_unique`                 | ✓      |
@@ -40,7 +41,7 @@
 | `vertices`                     | ✓      |
 | `volume`                       | ✓      |
 
-<details><summary>Not implemented (102 attributes)</summary>
+<details><summary>Not implemented (101 attributes)</summary>
 
 - `apply_obb`
 - `apply_scale`
@@ -56,7 +57,6 @@
 - `contains`
 - `convert_units`
 - `convex_decomposition`
-- `convex_hull`
 - `copy`
 - `density`
 - `difference`
@@ -149,44 +149,44 @@
 
 ## Performance Comparison
 
-| Property                       | Calls | Equal  | Speedup (avg) | Speedup (min/max) |
-|--------------------------------|-------|--------|---------------|-------------------|
-| `area`                         | 1     | 100.0% | 12.3x         | 12.3x / 12.3x     |
-| `area_faces`                   | 1     | 100.0% | 9.0x          | 9.0x / 9.0x       |
-| `bounds`                       | 1     | 100.0% | 0.1x          | 0.1x / 0.1x       |
-| `center_mass`                  | 1     | 100.0% | 7.6x          | 7.6x / 7.6x       |
-| `centroid`                     | 1     | 100.0% | 0.1x          | 0.1x / 0.1x       |
-| `edges`                        | 1     | 100.0% | 9.3x          | 9.3x / 9.3x       |
-| `edges_sorted`                 | 1     | 100.0% | 2.7x          | 2.7x / 2.7x       |
-| `edges_unique`                 | 1     | 0.0%   | 3.3x          | 3.3x / 3.3x       |
-| `edges_unique_inverse`         | 1     | 0.0%   | 4.4x          | 4.4x / 4.4x       |
-| `edges_unique_length`          | 1     | 0.0%   | 0.2x          | 0.2x / 0.2x       |
-| `euler_number`                 | 1     | 100.0% | 17.5x         | 17.5x / 17.5x     |
-| `extents`                      | 1     | 100.0% | 0.1x          | 0.1x / 0.1x       |
-| `face_adjacency`               | 1     | 100.0% | 7.0x          | 7.0x / 7.0x       |
-| `face_adjacency_angles`        | 1     | 0.0%   | 11.2x         | 11.2x / 11.2x     |
-| `face_adjacency_convex`        | 1     | 0.0%   | 0.0x          | 0.0x / 0.0x       |
-| `face_adjacency_projections`   | 1     | 0.0%   | 0.1x          | 0.1x / 0.1x       |
-| `face_adjacency_unshared`      | 1     | 0.0%   | 0.2x          | 0.2x / 0.2x       |
-| `face_attributes`              | 1     | 0.0%   | 0.7x          | 0.7x / 0.7x       |
-| `face_normals`                 | 1     | 100.0% | 15.1x         | 15.1x / 15.1x     |
-| `faces`                        | 2     | 100.0% | 1.5x          | 1.5x / 1.6x       |
-| `is_convex`                    | 1     | 100.0% | 0.0x          | 0.0x / 0.0x       |
-| `is_volume`                    | 2     | 100.0% | 12.4x         | 7.5x / 17.2x      |
-| `is_watertight`                | 1     | 100.0% | 13.2x         | 13.2x / 13.2x     |
-| `is_winding_consistent`        | 1     | 100.0% | 9.6x          | 9.6x / 9.6x       |
-| `mass`                         | 1     | 100.0% | 11.2x         | 11.2x / 11.2x     |
-| `moment_inertia`               | 1     | 100.0% | 5.6x          | 5.6x / 5.6x       |
-| `principal_inertia_components` | 1     | 0.0%   | 3.4x          | 3.4x / 3.4x       |
-| `principal_inertia_vectors`    | 1     | 0.0%   | 7.2x          | 7.2x / 7.2x       |
-| `triangles`                    | 1     | 0.0%   | 0.0x          | 0.0x / 0.0x       |
-| `triangles_center`             | 1     | 100.0% | 0.1x          | 0.1x / 0.1x       |
-| `vertex_attributes`            | 1     | 0.0%   | 1.3x          | 1.3x / 1.3x       |
-| `vertices`                     | 7     | 85.7%  | 1.4x          | 1.2x / 1.7x       |
-| `volume`                       | 5     | 100.0% | 13.6x         | 12.7x / 15.0x     |
+| Property                       | Calls   | Equal  | Speedup (avg) | Speedup (min/max) |
+|--------------------------------|---------|--------|---------------|-------------------|
+| `area`                         | 117401  | 97.1%  | 0.6x          | 0.0x / 40.4x      |
+| `area_faces`                   | 6199    | 89.3%  | 2.1x          | 0.0x / 16.7x      |
+| `bounds`                       | 251390  | 90.8%  | 0.1x          | 0.0x / 3.3x       |
+| `center_mass`                  | 5915    | 95.2%  | 1.6x          | 0.0x / 25.3x      |
+| `centroid`                     | 11207   | 16.5%  | 0.0x          | 0.0x / 0.5x       |
+| `edges`                        | 77927   | 92.6%  | 3.3x          | 0.0x / 103.6x     |
+| `edges_sorted`                 | 42984   | 91.4%  | 1.7x          | 0.0x / 29.0x      |
+| `edges_unique`                 | 3929    | 0.0%   | 1.5x          | 0.0x / 12.7x      |
+| `edges_unique_inverse`         | 40782   | 0.3%   | 0.5x          | 0.0x / 9.0x       |
+| `edges_unique_length`          | 40724   | 0.4%   | 0.2x          | 0.0x / 2.4x       |
+| `euler_number`                 | 87297   | 98.7%  | 0.1x          | 0.0x / 20.7x      |
+| `extents`                      | 9586    | 74.3%  | 0.1x          | 0.0x / 3.8x       |
+| `face_adjacency`               | 35684   | 76.8%  | 2.3x          | 0.0x / 24.6x      |
+| `face_adjacency_angles`        | 12336   | 2.3%   | 4.3x          | 0.0x / 28.3x      |
+| `face_adjacency_convex`        | 4036    | 97.2%  | 0.0x          | 0.0x / 0.2x       |
+| `face_adjacency_projections`   | 85      | 0.0%   | 0.1x          | 0.0x / 0.3x       |
+| `face_adjacency_unshared`      | 3565    | 1.0%   | 1.8x          | 0.0x / 71.2x      |
+| `face_attributes`              | 1       | 0.0%   | 0.7x          | 0.7x / 0.7x       |
+| `face_normals`                 | 256074  | 80.6%  | 7.1x          | 0.0x / 79.9x      |
+| `faces`                        | 1787165 | 70.0%  | 0.8x          | 0.0x / 98.5x      |
+| `is_convex`                    | 9923    | 94.9%  | 0.0x          | 0.0x / 7.4x       |
+| `is_volume`                    | 92703   | 97.3%  | 0.3x          | 0.0x / 18.4x      |
+| `is_watertight`                | 98117   | 93.4%  | 1.2x          | 0.0x / 28.2x      |
+| `is_winding_consistent`        | 8924    | 99.0%  | 2.9x          | 0.0x / 38.2x      |
+| `mass`                         | 1179    | 60.7%  | 5.6x          | 0.0x / 29.9x      |
+| `moment_inertia`               | 6444    | 54.1%  | 2.4x          | 0.0x / 14.0x      |
+| `principal_inertia_components` | 4103    | 11.2%  | 1.0x          | 0.0x / 7.2x       |
+| `principal_inertia_vectors`    | 4879    | 6.0%   | 3.2x          | 0.4x / 16.5x      |
+| `triangles`                    | 18532   | 0.0%   | 0.0x          | 0.0x / 3.0x       |
+| `triangles_center`             | 5897    | 100.0% | 0.1x          | 0.0x / 0.3x       |
+| `vertex_attributes`            | 1       | 0.0%   | 1.3x          | 1.3x / 1.3x       |
+| `vertices`                     | 1459560 | 79.2%  | 0.7x          | 0.0x / 157.7x     |
+| `volume`                       | 126407  | 91.8%  | 2.0x          | 0.0x / 36.0x      |
 
 ## Summary
 
-- **Total comparisons:** 45
-- **Identical results:** 32 (71.1%)
-- **Speedup:** 5.7x avg (0.0x min, 17.5x max)
+- **Total comparisons:** 4630956
+- **Identical results:** 3532159 (76.3%)
+- **Speedup:** 1.1x avg (0.0x min, 157.7x max)

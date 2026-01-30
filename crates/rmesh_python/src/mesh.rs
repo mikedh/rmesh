@@ -640,9 +640,12 @@ impl PyTrimesh {
 #[pymethods]
 impl PyTrimesh {
     #[new]
+    #[pyo3(signature = (vertices, faces, *, vertex_normals=None, face_colors=None))]
     pub fn new(
         vertices: PyReadonlyArray2<'_, f64>,
         faces: PyReadonlyArray2<'_, i64>,
+        vertex_normals: Option<PyReadonlyArray2<'_, f64>>,
+        face_colors: Option<PyReadonlyArray2<'_, u8>>,
     ) -> Result<Self> {
         let vertices: Vec<Point3<f64>> = vertices
             .as_array()
@@ -656,8 +659,34 @@ impl PyTrimesh {
             .into_iter()
             .map(|r| [r[0] as usize, r[1] as usize, r[2] as usize])
             .collect();
+
+        let mut attr_vertex = Attributes::default();
+        let mut attr_face = Attributes::default();
+
+        if let Some(n) = vertex_normals {
+            attr_vertex.normals.push(
+                n.as_array()
+                    .rows()
+                    .into_iter()
+                    .map(|r| Vector3::new(r[0], r[1], r[2]))
+                    .collect(),
+            );
+        }
+        if let Some(c) = face_colors {
+            attr_face.colors.push(
+                c.as_array()
+                    .rows()
+                    .into_iter()
+                    .map(|r| Vector4::new(r[0], r[1], r[2], r[3]))
+                    .collect(),
+            );
+        }
+
         Ok(Self::new_from_trimesh(Trimesh::new(
-            vertices, faces, None, None,
+            vertices,
+            faces,
+            Some(attr_vertex),
+            Some(attr_face),
         )?))
     }
 
@@ -788,9 +817,11 @@ impl PyTrimesh {
     }
 
     #[getter]
-    fn center_mass(&self) -> (f64, f64, f64) {
+    fn center_mass(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
         let cm = self.data.center_mass();
-        (cm.x, cm.y, cm.z)
+        let arr = PyArray1::from_vec(py, vec![cm.x, cm.y, cm.z]);
+        make_readonly(&arr);
+        arr.unbind()
     }
 
     #[getter]
@@ -1176,57 +1207,6 @@ impl PyTrimesh {
             remove_unreferenced,
         };
         Self::new_from_trimesh(self.data.cleanup(&options).into())
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (vertices, faces, vertex_normals=None, face_colors=None))]
-    fn from_arrays(
-        vertices: PyReadonlyArray2<'_, f64>,
-        faces: PyReadonlyArray2<'_, i64>,
-        vertex_normals: Option<PyReadonlyArray2<'_, f64>>,
-        face_colors: Option<PyReadonlyArray2<'_, u8>>,
-    ) -> Result<Self> {
-        let vertices: Vec<Point3<f64>> = vertices
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|r| Point3::new(r[0], r[1], r[2]))
-            .collect();
-        let faces: Vec<[usize; 3]> = faces
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|r| [r[0] as usize, r[1] as usize, r[2] as usize])
-            .collect();
-
-        let mut attr_vertex = Attributes::default();
-        let mut attr_face = Attributes::default();
-
-        if let Some(n) = vertex_normals {
-            attr_vertex.normals.push(
-                n.as_array()
-                    .rows()
-                    .into_iter()
-                    .map(|r| Vector3::new(r[0], r[1], r[2]))
-                    .collect(),
-            );
-        }
-        if let Some(c) = face_colors {
-            attr_face.colors.push(
-                c.as_array()
-                    .rows()
-                    .into_iter()
-                    .map(|r| Vector4::new(r[0], r[1], r[2], r[3]))
-                    .collect(),
-            );
-        }
-
-        Ok(Self::new_from_trimesh(Trimesh::new(
-            vertices,
-            faces,
-            Some(attr_vertex),
-            Some(attr_face),
-        )?))
     }
 }
 

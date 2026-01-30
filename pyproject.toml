@@ -18,7 +18,6 @@ dependencies = ["numpy>=2.0"]
 
 [project.optional-dependencies]
 test = ["pytest", "trimesh"]
-test-compat = ["pytest", "trimesh[all]"]
 
 [tool.maturin]
 manifest-path = "crates/rmesh_python/Cargo.toml"
@@ -29,8 +28,12 @@ python-source = "python"
 # Always rebuild the local Rust extension so `uv run` picks up source changes.
 reinstall-package = ["rmesh"]
 
+[tool.uv.sources]
+trimesh = { path = "test/trimesh", editable = true }
+
 [dependency-groups]
 dev = [
+    "trimesh[easy,recommend]",
     "pytest>=9.0.2",
     "ruff>=0.14.13",
 ]

@@ -14,7 +14,22 @@ import numpy as np
 
 @dataclass
 class ComparisonResult:
-    """Result of comparing a single attribute between trimesh and rmesh."""
+    """
+    Result of comparing a single attribute between trimesh and rmesh.
+
+    Parameters
+    ----------
+    name : str
+        The attribute name that was compared.
+    trimesh_time : float
+        Time in seconds for the trimesh evaluation.
+    rmesh_time : float
+        Time in seconds for the rmesh evaluation.
+    identical : bool or None
+        Whether the results were identical, or None if not comparable.
+    error : str or None
+        Error message if the comparison failed.
+    """
 
     name: str
     trimesh_time: float = 0.0
@@ -24,13 +39,21 @@ class ComparisonResult:
 
     @property
     def speedup(self) -> float | None:
-        """Speedup ratio (trimesh_time / rmesh_time)."""
+        """float or None : Speedup ratio (trimesh_time / rmesh_time)."""
         if self.trimesh_time > 0 and self.rmesh_time > 0:
             return self.trimesh_time / self.rmesh_time
         return None
 
     def to_row(self) -> list:
-        """Format as a table row."""
+        """
+        Format as a table row.
+
+        Returns
+        -------
+        list[str]
+            Five-element list: name, trimesh time, rmesh time, speedup,
+            identical status.
+        """
         speedup = self.speedup
         speedup_str = f"{speedup:.2f}x" if speedup else "N/A"
 
@@ -61,7 +84,23 @@ def arrays_equal(
     rtol: float = 1e-7,
     atol: float = 1e-10,
 ) -> bool:
-    """Compare two numpy arrays with tolerance."""
+    """
+    Compare two numpy arrays with tolerance.
+
+    Parameters
+    ----------
+    a, b : array-like or None
+        Arrays to compare.
+    rtol : float
+        Relative tolerance for floating-point comparison.
+    atol : float
+        Absolute tolerance for floating-point comparison.
+
+    Returns
+    -------
+    bool
+        True if the arrays are equal within tolerance.
+    """
     if a is None and b is None:
         return True
     if a is None or b is None:
@@ -92,7 +131,28 @@ def values_equal(  # noqa: C901
     rtol: float = 1e-5,
     atol: float = 1e-8,
 ) -> bool:
-    """Type-aware comparison of values within tolerance."""
+    """
+    Type-aware comparison of values within tolerance.
+
+    Dispatches on type: ndarray, float, bool, int, list/tuple, or
+    falls back to ``==``.  Each branch is required because numpy
+    scalars, Python scalars, and array-like containers all need
+    distinct handling for correct tolerance comparison.
+
+    Parameters
+    ----------
+    a, b : Any
+        Values to compare.
+    rtol : float
+        Relative tolerance for floating-point values.
+    atol : float
+        Absolute tolerance for floating-point values.
+
+    Returns
+    -------
+    bool
+        True if the values are equal within tolerance.
+    """
     if a is None and b is None:
         return True
     if a is None or b is None:
@@ -131,7 +191,14 @@ def values_equal(  # noqa: C901
 # ---------------------------------------------------------------------------
 
 def _rmesh_version() -> str:
-    """Get the installed rmesh version, or 'unknown' if unavailable."""
+    """
+    Get the installed rmesh version.
+
+    Returns
+    -------
+    str
+        Version string, or ``'unknown'`` if unavailable.
+    """
     try:
         return _pkg_version("rmesh")
     except Exception:
@@ -156,12 +223,24 @@ CREATE INDEX IF NOT EXISTS idx_comparisons_name ON comparisons(name);
 """
 
 
+_FLUSH_THRESHOLD = 500
+
+
 class TestSessionResults:
-    """Aggregate results across a test session, backed by SQLite."""
+    """
+    Aggregate comparison results across a test session, backed by SQLite.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite database file.  Use ``':memory:'`` for an
+        in-memory database.
+    """
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self._db_path = db_path
         self._version = _rmesh_version()
+        self._buffer: list[tuple] = []
         self._conn = sqlite3.connect(
             db_path, check_same_thread=False
         )
@@ -169,30 +248,59 @@ class TestSessionResults:
         self._ensure_table()
 
     def _ensure_table(self) -> None:
+        """Create the comparisons table and index if they do not exist."""
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_INDEX)
         self._conn.commit()
 
-    def add_result(self, result: ComparisonResult) -> None:
-        self._conn.execute(
-            "INSERT INTO comparisons (name, trimesh_time, rmesh_time, identical, error, rmesh_version) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                result.name,
-                result.trimesh_time,
-                result.rmesh_time,
-                (
-                    None
-                    if result.identical is None
-                    else (1 if result.identical else 0)
-                ),
-                result.error,
-                self._version,
-            ),
+    def _flush(self) -> None:
+        """Write buffered results to SQLite with a single ``executemany``."""
+        if not self._buffer:
+            return
+        self._conn.executemany(
+            "INSERT INTO comparisons"
+            " (name, trimesh_time, rmesh_time, identical, error, rmesh_version)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            self._buffer,
         )
         self._conn.commit()
+        self._buffer.clear()
+
+    def add_result(self, result: ComparisonResult) -> None:
+        """
+        Buffer a comparison result for later flush.
+
+        Parameters
+        ----------
+        result : ComparisonResult
+            The result to record.
+        """
+        self._buffer.append((
+            result.name,
+            result.trimesh_time,
+            result.rmesh_time,
+            (
+                None
+                if result.identical is None
+                else (1 if result.identical else 0)
+            ),
+            result.error,
+            self._version,
+        ))
+        if len(self._buffer) >= _FLUSH_THRESHOLD:
+            self._flush()
 
     def summary(self) -> dict:
+        """
+        Compute aggregate summary statistics.
+
+        Returns
+        -------
+        dict
+            Keys: ``total``, ``identical``, ``not_identical``, ``errors``,
+            ``speedup_avg``, ``speedup_min``, ``speedup_max``.
+        """
+        self._flush()
         row = self._conn.execute(
             """\
             SELECT
@@ -224,6 +332,18 @@ class TestSessionResults:
         }
 
     def aggregate_by_property(self) -> dict[str, dict]:
+        """
+        Aggregate results grouped by property name.
+
+        Returns
+        -------
+        dict[str, dict]
+            Mapping from property name to statistics dict with keys
+            ``total_calls``, ``identical_count``, ``identical_pct``,
+            ``trimesh_avg``, ``rmesh_avg``, ``speedup_avg``,
+            ``speedup_min``, ``speedup_max``.
+        """
+        self._flush()
         rows = self._conn.execute(
             """\
             SELECT
@@ -266,6 +386,15 @@ class TestSessionResults:
         return aggregated
 
     def to_json(self) -> str:
+        """
+        Serialize summary and per-property stats to JSON.
+
+        Returns
+        -------
+        str
+            Pretty-printed JSON string.
+        """
+        self._flush()
         return json.dumps(
             {
                 "summary": self.summary(),
@@ -275,10 +404,13 @@ class TestSessionResults:
         )
 
     def clear(self) -> None:
+        """Delete all recorded comparisons."""
         self._conn.execute("DELETE FROM comparisons")
         self._conn.commit()
 
     def close(self) -> None:
+        """Flush pending results and close the database connection."""
+        self._flush()
         self._conn.close()
 
 
@@ -290,6 +422,18 @@ _session_results: TestSessionResults | None = None
 
 
 def get_session_results(db_path: str = ":memory:") -> TestSessionResults:
+    """
+    Return the global session results singleton, creating it if needed.
+
+    Parameters
+    ----------
+    db_path : str
+        SQLite database path used only when creating a new instance.
+
+    Returns
+    -------
+    TestSessionResults
+    """
     global _session_results
     if _session_results is None:
         _session_results = TestSessionResults(db_path=db_path)
@@ -297,6 +441,14 @@ def get_session_results(db_path: str = ":memory:") -> TestSessionResults:
 
 
 def reset_session_results(db_path: str = ":memory:") -> None:
+    """
+    Close any existing session and create a fresh one.
+
+    Parameters
+    ----------
+    db_path : str
+        SQLite database path for the new session.
+    """
     global _session_results
     if _session_results is not None:
         _session_results.close()
@@ -309,24 +461,49 @@ def reset_session_results(db_path: str = ":memory:") -> None:
 
 
 def _md_table(headers: list[str], rows: list[list[str]]) -> list[str]:
-    """Render a markdown table with constant-width, padded columns."""
+    """
+    Render a markdown table with constant-width, padded columns.
+
+    Parameters
+    ----------
+    headers : list[str]
+        Column headers.
+    rows : list[list[str]]
+        Table rows, each the same length as *headers*.
+
+    Returns
+    -------
+    list[str]
+        Lines of the rendered markdown table.
+    """
     widths = [len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
     sep = "|".join("-" * (w + 2) for w in widths)
-    hdr = "| " + " | ".join(h.ljust(w) for h, w in zip(headers, widths)) + " |"
+    hdr = "| " + " | ".join(
+        h.ljust(w) for h, w in zip(headers, widths, strict=True)
+    ) + " |"
     lines = [hdr, f"|{sep}|"]
     for row in rows:
         line = "| " + " | ".join(
-            c.ljust(w) for c, w in zip(row, widths)
+            c.ljust(w) for c, w in zip(row, widths, strict=True)
         ) + " |"
         lines.append(line)
     return lines
 
 
 def _get_api_coverage() -> dict | None:
-    """Compute API coverage between rmesh.Trimesh and trimesh.Trimesh."""
+    """
+    Compute API coverage between ``rmesh.Trimesh`` and ``trimesh.Trimesh``.
+
+    Returns
+    -------
+    dict or None
+        Keys: ``both`` (list), ``trimesh_only`` (list),
+        ``trimesh_count`` (int), ``coverage_pct`` (float).
+        Returns ``None`` if either library cannot be imported.
+    """
     try:
         import trimesh
 
@@ -358,7 +535,15 @@ def _get_api_coverage() -> dict | None:
 
 
 def generate_comparison_report() -> str:
-    """Generate a full markdown comparison report."""
+    """
+    Generate a full markdown comparison report.
+
+    Returns
+    -------
+    str
+        The rendered markdown report including API coverage and
+        performance comparison sections.
+    """
     results = get_session_results()
     aggregated = results.aggregate_by_property()
     summary = results.summary()
@@ -465,7 +650,16 @@ def save_results(
     output_path: str = "comparison.md",
     json_path: str | None = None,
 ) -> None:
-    """Save comparison report to file(s)."""
+    """
+    Save comparison report to file(s).
+
+    Parameters
+    ----------
+    output_path : str
+        Path for the markdown report.
+    json_path : str or None
+        Optional path for the JSON report.
+    """
     from pathlib import Path
 
     content = generate_comparison_report()

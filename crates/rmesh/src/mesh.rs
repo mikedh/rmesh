@@ -112,6 +112,7 @@ impl Clone for Trimesh {
             source: self.source.clone(),
             materials: self.materials.clone(),
             density: self.density,
+
             // Fresh cache - will recompute on demand
             cache_faces_cross: OnceLock::new(),
             cache_face_normals: OnceLock::new(),
@@ -805,8 +806,8 @@ impl From<SimplifyResult> for Trimesh {
         Self {
             vertices: result.vertices,
             faces: result.faces,
-            attributes_vertex: result.attributes_vertex,
-            attributes_face: result.attributes_face,
+            attributes_vertex: result.attributes_vertex.unwrap_or_default(),
+            attributes_face: result.attributes_face.unwrap_or_default(),
             ..Default::default()
         }
     }

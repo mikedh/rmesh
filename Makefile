@@ -1,4 +1,4 @@
-.PHONY: test compare build clean test-local compare-local
+.PHONY: test compare build clean test-local
 
 # Build Docker image
 build:
@@ -10,20 +10,13 @@ test: build
 
 # Run comparison against trimesh test suite in Docker
 compare: build
-	docker run --rm rmesh bash -c "PYTHONPATH=. uv run pytest --compare-rmesh test/trimesh/tests/"
+	@touch comparison.md
+	docker run --rm -v $(CURDIR)/comparison.md:/app/comparison.md rmesh bash -c "PYTHONPATH=. uv run pytest --compare-rmesh test/trimesh/tests/"
 
 # Local variants (for when you know your env is good)
 test-local:
 	cargo test --package rmesh
 	uv pip install -e . && PYTHONPATH=. uv run pytest test/
-
-compare-local:
-	@if [ ! -d "test/trimesh" ]; then \
-		echo "Cloning trimesh test suite..."; \
-		git clone --depth 1 https://github.com/mikedh/trimesh test/trimesh; \
-	fi
-	uv pip install trimesh[all]
-	PYTHONPATH=. uv run pytest --compare-rmesh test/trimesh/tests/
 
 # Clean build artifacts
 clean:
