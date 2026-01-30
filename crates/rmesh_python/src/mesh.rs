@@ -1134,8 +1134,8 @@ impl PyTrimesh {
         )
     }
 
-    #[pyo3(signature = (target_faces, aggressiveness=None))]
-    fn simplify(&self, target_faces: usize, aggressiveness: Option<f64>) -> Self {
+    #[pyo3(signature = (target_faces=None, aggressiveness=None))]
+    fn simplify(&self, target_faces: Option<usize>, aggressiveness: Option<f64>) -> Self {
         let options = rmesh::simplify::SimplifyOptions {
             target_count: target_faces,
             aggressiveness: aggressiveness.unwrap_or(7.0),

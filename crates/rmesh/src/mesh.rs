@@ -182,7 +182,7 @@ impl Trimesh {
     ///
     /// let mesh = Trimesh::default();
     /// let result = mesh.simplify(&SimplifyOptions {
-    ///     target_count: 1000,
+    ///     target_count: Some(1000),
     ///     aggressiveness: 7.0,
     ///     ..Default::default()
     /// });

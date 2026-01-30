@@ -34,9 +34,11 @@ const FLIPPED_ANGLE_THRESHOLD: f64 = 2.9;
 /// Options for mesh simplification
 #[derive(Debug, Clone, Copy)]
 pub struct SimplifyOptions {
-    /// Target number of faces after simplification
-    pub target_count: usize,
-    /// Controls how aggressively to collapse edges (typically 5-8)
+    /// Target number of faces after simplification.
+    /// If `None`, simplify until the error threshold (controlled by `aggressiveness`) stops progress.
+    pub target_count: Option<usize>,
+    /// Controls how aggressively to collapse edges (typically 5-8).
+    /// Used as a dynamic error threshold: `1e-9 * (collapse_count + 3)^aggressiveness`.
     pub aggressiveness: f64,
     /// Whether to preserve and interpolate vertex attributes
     pub preserve_attributes: bool,
@@ -49,7 +51,7 @@ pub struct SimplifyOptions {
 impl Default for SimplifyOptions {
     fn default() -> Self {
         Self {
-            target_count: 0,
+            target_count: None,
             aggressiveness: 7.0,
             preserve_attributes: true,
             compute_quality: false,
@@ -805,19 +807,35 @@ impl Simplifier {
         }
     }
 
-    fn simplify(&mut self, target_count: usize, verbose: bool) {
+    fn simplify(&mut self, target_count: Option<usize>, aggressiveness: f64, verbose: bool) {
         self.initialize_quadrics();
         self.build_initial_edges();
 
         let mut collapse_count = 0;
 
-        while self.live_triangle_count > target_count {
+        while target_count.map_or(true, |t| self.live_triangle_count > t) {
             let Some(edge) = self.pop_valid_edge() else {
                 if verbose {
                     println!("No more valid edges to collapse");
                 }
                 break;
             };
+
+            // Dynamic error threshold (Forstmann-style): only applies when no
+            // explicit target count is set, so callers who specify a target get
+            // best-effort simplification down to that count.
+            if target_count.is_none() {
+                let threshold = 1e-9 * (collapse_count as f64 + 3.0).powf(aggressiveness);
+                if edge.error > threshold {
+                    if verbose {
+                        println!(
+                            "Error threshold reached at {} collapses ({} triangles remaining)",
+                            collapse_count, self.live_triangle_count
+                        );
+                    }
+                    break;
+                }
+            }
 
             if !self.can_collapse(edge.v0, edge.v1, edge.optimal_position) {
                 continue;
@@ -940,11 +958,11 @@ pub fn simplify_mesh(
     let identity_map = || (0..input_vertices.len()).collect::<Vec<_>>();
 
     // Basic checks
-    if target_count >= input_faces.len() {
+    if target_count.is_some_and(|t| t >= input_faces.len()) {
         if verbose {
             println!(
                 "Target count ({}) >= current count ({}), returning original.",
-                target_count,
+                target_count.unwrap(),
                 input_faces.len()
             );
         }
@@ -972,7 +990,7 @@ pub fn simplify_mesh(
         };
     }
 
-    if target_count == 0 {
+    if target_count == Some(0) {
         if verbose {
             println!("Target count is 0, returning empty mesh.");
         }
@@ -990,7 +1008,10 @@ pub fn simplify_mesh(
         println!("Starting simplification:");
         println!("  Input vertices: {}", input_vertices.len());
         println!("  Input faces: {}", input_faces.len());
-        println!("  Target faces: {target_count}");
+        println!(
+            "  Target faces: {}",
+            target_count.map_or("None".into(), |t| t.to_string())
+        );
     }
 
     let face_colors: Option<&Vec<Vector4<u8>>> =
@@ -1004,7 +1025,7 @@ pub fn simplify_mesh(
         options.preserve_attributes,
     );
 
-    simplifier.simplify(target_count, verbose);
+    simplifier.simplify(target_count, options.aggressiveness, verbose);
 
     let mut result = simplifier.get_result(face_colors);
 
@@ -1117,7 +1138,7 @@ mod tests {
 
     fn opts(target_count: usize) -> SimplifyOptions {
         SimplifyOptions {
-            target_count,
+            target_count: Some(target_count),
             aggressiveness: 7.0,
             ..Default::default()
         }
