@@ -68,6 +68,114 @@ pub fn create_box(extents: &[f64; 3]) -> Trimesh {
     Trimesh::new(vertices, faces, None, None).unwrap()
 }
 
+/// Create a mesh of a regular tetrahedron centered at the origin.
+///
+/// Uses the symmetric embedding where vertices are at:
+/// `(s, s, s), (s, -s, -s), (-s, s, -s), (-s, -s, s)`
+/// with `s = edge / (2 * sqrt(2))`.
+///
+/// Parameters
+/// -------------
+/// edge
+///   The edge length of the tetrahedron.
+///
+/// Returns
+/// -------------
+///  A Trimesh representing the regular tetrahedron.
+pub fn create_tetrahedron(edge: f64) -> Trimesh {
+    let s = edge / (2.0 * std::f64::consts::SQRT_2);
+
+    let vertices = vec![
+        Point3::new(s, s, s),
+        Point3::new(s, -s, -s),
+        Point3::new(-s, s, -s),
+        Point3::new(-s, -s, s),
+    ];
+
+    // CCW outward winding for each face.
+    // Each face is the triangle opposite to the vertex not included.
+    let faces = vec![
+        [0, 3, 1], // opposite vertex 2
+        [0, 1, 2], // opposite vertex 3
+        [0, 2, 3], // opposite vertex 1
+        [1, 3, 2], // opposite vertex 0
+    ];
+
+    Trimesh::new(vertices, faces, None, None).unwrap()
+}
+
+/// Create a regular icosahedron mesh centered at the origin.
+///
+/// 12 vertices, 20 faces, inscribed in a sphere of the given radius.
+pub fn create_icosahedron(radius: f64) -> Trimesh {
+    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    let len = (1.0 + phi * phi).sqrt();
+    let a = radius / len;
+    let b = radius * phi / len;
+
+    let vertices = vec![
+        Point3::new(-a, b, 0.0),
+        Point3::new(a, b, 0.0),
+        Point3::new(-a, -b, 0.0),
+        Point3::new(a, -b, 0.0),
+        Point3::new(0.0, -a, b),
+        Point3::new(0.0, a, b),
+        Point3::new(0.0, -a, -b),
+        Point3::new(0.0, a, -b),
+        Point3::new(b, 0.0, -a),
+        Point3::new(b, 0.0, a),
+        Point3::new(-b, 0.0, -a),
+        Point3::new(-b, 0.0, a),
+    ];
+
+    let faces = vec![
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+
+    Trimesh::new(vertices, faces, None, None).unwrap()
+}
+
+/// Create an icosphere mesh centered at the origin.
+///
+/// Subdivides a regular icosahedron and projects vertices onto the sphere.
+/// Face count = `20 * 4^subdivisions`.
+pub fn create_icosphere(radius: f64, subdivisions: usize) -> Trimesh {
+    let ico = create_icosahedron(radius);
+    let mut vertices = ico.vertices;
+    let mut faces = ico.faces;
+
+    for _ in 0..subdivisions {
+        (vertices, faces) = crate::subdivide::subdivide(&vertices, &faces, 1);
+        for v in &mut vertices {
+            let len = v.coords.norm();
+            if len > 0.0 {
+                v.coords *= radius / len;
+            }
+        }
+    }
+
+    Trimesh::new(vertices, faces, None, None).unwrap()
+}
+
 use earcut::Earcut;
 
 /// A wrapper object for a triangulator
@@ -98,6 +206,10 @@ impl Triangulator {
     ///   The interior holes of the polygon to triangulate.
     /// vertices
     ///   The 2D vertices of the polygon.
+    /// local_indices
+    ///   If true, return triangle indices local to the polygon
+    ///   (0..exterior.len()). If false, remap through `exterior`
+    ///   to return indices into `vertices`.
     ///
     /// Returns
     /// ------------
@@ -108,6 +220,7 @@ impl Triangulator {
         exterior: &[usize],
         interiors: &[Vec<usize>],
         vertices: &[Point2<f64>],
+        local_indices: bool,
     ) -> Vec<[usize; 3]> {
         let earcut = self.earcut.get_or_insert_with(Earcut::new);
 
@@ -134,6 +247,14 @@ impl Triangulator {
         let mut result: Vec<usize> = vec![];
         earcut.earcut(flat, &holes, &mut result);
 
+        if local_indices {
+            // return indices into the polygon (exterior then interiors)
+            return result
+                .chunks_exact(3)
+                .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+                .collect();
+        }
+
         // Build index mapping: earcut returns indices into `flat`, we need original vertex indices
         // flat[0..exterior.len()] maps to exterior, then interiors follow
         let mut index_map: Vec<usize> = exterior.to_vec();
@@ -155,8 +276,7 @@ impl Triangulator {
     }
 
     /// Triangulate a polygon in 3D space by fitting a plane to the exterior
-    /// and then triangulating the projected points in 2D space returning
-    /// the indices of the triangles in the original 3D space.
+    /// and then triangulating the projected points in 2D space.
     ///
     /// Parameters
     /// -------------
@@ -167,6 +287,10 @@ impl Triangulator {
     ///   The interior holes of the polygon to triangulate.
     /// vertices
     ///   The 3D vertices of the polygon.
+    /// local_indices
+    ///   If true, return triangle indices local to the polygon
+    ///   (0..exterior.len()). If false, remap through `exterior`
+    ///   to return indices into `vertices`.
     ///
     /// Returns
     /// ------------
@@ -177,6 +301,7 @@ impl Triangulator {
         exterior: &[usize],
         interiors: &[Vec<usize>],
         vertices: &[Point3<f64>],
+        local_indices: bool,
     ) -> Result<Vec<[usize; 3]>> {
         // find a plane for the vertices in our exterior as not every vertex may be referenced
         let fittable: Vec<Point3<f64>> = exterior.iter().map(|i| vertices[*i]).collect();
@@ -185,7 +310,7 @@ impl Triangulator {
         // project the 3D vertices into the plane so we can triangulate them in 2D
         let on_plane = plane.to_2d(vertices);
 
-        Ok(self.trianglate_2d(exterior, interiors, &on_plane))
+        Ok(self.trianglate_2d(exterior, interiors, &on_plane, local_indices))
     }
 }
 
@@ -196,16 +321,24 @@ impl Triangulator {
 /// Parameters
 /// -------------
 /// exterior
-///   The exterior of the polygon as indices of a vertex list
+///   The exterior of the polygon as indices of a vertex list.
+/// local_indices
+///   If true, return triangle indices local to the polygon
+///   (0..exterior.len()). If false, remap through `exterior`
+///   to return indices into the original vertex array.
 ///
 /// Returns
 /// ------------
 /// triangles
 ///  The triangles referencing vertex indexes.
-pub fn triangulate_fan(exterior: &[usize]) -> Vec<[usize; 3]> {
-    (1..exterior.len() - 1)
-        .map(|i| [exterior[0], exterior[i], exterior[i + 1]])
-        .collect()
+pub fn triangulate_fan(exterior: &[usize], local_indices: bool) -> Vec<[usize; 3]> {
+    if local_indices {
+        (1..exterior.len() - 1).map(|i| [0, i, i + 1]).collect()
+    } else {
+        (1..exterior.len() - 1)
+            .map(|i| [exterior[0], exterior[i], exterior[i + 1]])
+            .collect()
+    }
 }
 
 /// A plane defined by a normal vector and origin point.
@@ -538,5 +671,94 @@ mod tests {
         let bounds = box_mesh.bounds().unwrap();
         assert_eq!(bounds.0, Point3::new(-0.5, -0.5, -0.5));
         assert_eq!(bounds.1, Point3::new(0.5, 0.5, 0.5));
+    }
+
+    #[test]
+    fn test_tetrahedron_basic() {
+        let tet = create_tetrahedron(1.0);
+        assert_eq!(tet.vertices.len(), 4);
+        assert_eq!(tet.faces.len(), 4);
+        assert!(tet.is_watertight());
+        assert!(tet.is_convex());
+        assert!(tet.volume() > 0.0);
+    }
+
+    #[test]
+    fn test_tetrahedron_edge_lengths() {
+        let edge = 2.5;
+        let tet = create_tetrahedron(edge);
+        let lengths = tet.edges_unique_length();
+        assert_eq!(lengths.len(), 6);
+        for &len in &lengths {
+            assert_relative_eq!(len, edge, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_tetrahedron_volume() {
+        let edge = 3.0;
+        let tet = create_tetrahedron(edge);
+        let expected = edge.powi(3) / (6.0 * std::f64::consts::SQRT_2);
+        assert_relative_eq!(tet.volume(), expected, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_icosahedron() {
+        let ico = create_icosahedron(1.0);
+        assert_eq!(ico.vertices.len(), 12);
+        assert_eq!(ico.faces.len(), 20);
+        assert!(ico.is_watertight());
+        assert!(ico.is_convex());
+        assert!(ico.volume() > 0.0);
+        // All vertices on the unit sphere
+        for v in &ico.vertices {
+            assert_relative_eq!(v.coords.norm(), 1.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_icosphere_basic() {
+        let sphere = create_icosphere(1.0, 0);
+        assert_eq!(sphere.vertices.len(), 12);
+        assert_eq!(sphere.faces.len(), 20);
+        assert!(sphere.is_watertight());
+        assert!(sphere.is_convex());
+        assert!(sphere.volume() > 0.0);
+    }
+
+    #[test]
+    fn test_icosphere_subdivisions() {
+        for sub in 1..=4 {
+            let sphere = create_icosphere(1.0, sub);
+            let expected_faces = 20 * 4_usize.pow(sub as u32);
+            assert_eq!(sphere.faces.len(), expected_faces);
+            assert!(sphere.is_watertight());
+            assert!(sphere.volume() > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_icosphere_radius() {
+        let radius = 2.5;
+        let sphere = create_icosphere(radius, 3);
+        // All vertices should be on the sphere surface
+        for v in &sphere.vertices {
+            assert_relative_eq!(v.coords.norm(), radius, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_icosphere_volume_converges() {
+        let radius: f64 = 1.0;
+        let expected = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
+        // Volume should converge toward 4/3 pi r^3
+        let vol_3 = create_icosphere(radius, 3).volume();
+        let vol_5 = create_icosphere(radius, 5).volume();
+        // 5 subdivisions should be closer to the analytical value
+        assert!(
+            (vol_5 - expected).abs() < (vol_3 - expected).abs(),
+            "vol_3={vol_3}, vol_5={vol_5}, expected={expected}"
+        );
+        assert_relative_eq!(vol_5, expected, epsilon = 5e-3);
     }
 }

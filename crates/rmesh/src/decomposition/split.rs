@@ -126,7 +126,7 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
     let analysis_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("split_analysis_pl"),
         bind_group_layouts: &[&analysis_bgl],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
 
     let analysis_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -147,7 +147,7 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
     let update_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("region_update_pl"),
         bind_group_layouts: &[&update_bgl],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
 
     let update_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -165,6 +165,7 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
         dims[2].div_ceil(4),
     ];
 
+    #[allow(clippy::cast_possible_truncation)]
     let min_neck_depth = params.min_volume_error_pct as f32 * voxel_scale as f32;
 
     // Iterative splitting
@@ -205,6 +206,7 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
         let max_dim = dims[0].max(dims[1]).max(dims[2]);
         let analysis_params = AnalysisParams {
             dims,
+            #[allow(clippy::cast_possible_truncation)]
             num_regions: num_active as u32,
             max_dim,
             _pad1: 0,
@@ -255,7 +257,9 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
             });
             pass.set_pipeline(&analysis_pipeline);
             pass.set_bind_group(0, &analysis_bg, &[]);
-            pass.dispatch_workgroups((num_active as u32).div_ceil(64), 1, 1);
+            #[allow(clippy::cast_possible_truncation)]
+            let workgroup_count = (num_active as u32).div_ceil(64);
+            pass.dispatch_workgroups(workgroup_count, 1, 1);
         }
 
         // Readback results
@@ -277,7 +281,12 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
         // Read back split decisions
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::Maintain::Wait);
+        device
+            .poll(wgpu::PollType::Wait {
+                timeout: None,
+                submission_index: None,
+            })
+            .ok();
         let data = slice.get_mapped_range();
         let results: &[GpuSplitResult] = bytemuck::cast_slice(&data);
         let decisions: Vec<SplitDecision> = results
@@ -355,6 +364,7 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
 
         let update_params = UpdateParams {
             dims,
+            #[allow(clippy::cast_possible_truncation)]
             num_splits: splits.len() as u32,
         };
         let update_params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -431,8 +441,11 @@ fn extract_hulls(
             continue;
         }
 
+        #[allow(clippy::cast_possible_truncation)]
         let x = (idx % dx) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let y = ((idx / dx) % dy) as u32;
+        #[allow(clippy::cast_possible_truncation)]
         let z = (idx / (dx * dy)) as u32;
         let world = grid.voxel_to_world(x, y, z);
 
@@ -457,12 +470,9 @@ fn extract_hulls(
 /// Build a ConvexHull from a set of points, with vertex count limit.
 fn build_hull_from_points(points: &[Point3<f64>], max_vertices: u32) -> Option<ConvexHull> {
     // Try convex hull first
-    let faces = match crate::convex::convex_hull_3d(points) {
-        Ok(f) => f,
-        Err(_) => {
-            // Fall back to AABB as 12-triangle box hull
-            return aabb_fallback(points);
-        }
+    let Ok(faces) = crate::convex::convex_hull_3d(points) else {
+        // Fall back to AABB as 12-triangle box hull
+        return aabb_fallback(points);
     };
 
     // Collect unique vertices referenced by hull faces
@@ -608,7 +618,12 @@ fn readback_buffer(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Bu
 
     let slice = staging.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::Maintain::Wait);
+    device
+        .poll(wgpu::PollType::Wait {
+            timeout: None,
+            submission_index: None,
+        })
+        .ok();
 
     let data = slice.get_mapped_range();
     let result: Vec<u32> = data

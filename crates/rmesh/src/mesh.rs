@@ -71,6 +71,7 @@ pub struct Trimesh {
     cache_vertex_mask: OnceLock<Vec<bool>>,
     cache_bvh: OnceLock<TriangleBvh>,
     cache_convex_hull: OnceLock<Box<Trimesh>>,
+    cache_obb: OnceLock<crate::convex::OrientedBoundingBox>,
 }
 
 impl Default for Trimesh {
@@ -98,6 +99,7 @@ impl Default for Trimesh {
             cache_vertex_mask: OnceLock::new(),
             cache_bvh: OnceLock::new(),
             cache_convex_hull: OnceLock::new(),
+            cache_obb: OnceLock::new(),
         }
     }
 }
@@ -129,6 +131,7 @@ impl Clone for Trimesh {
             cache_vertex_mask: OnceLock::new(),
             cache_bvh: OnceLock::new(),
             cache_convex_hull: OnceLock::new(),
+            cache_obb: OnceLock::new(),
         }
     }
 }
@@ -535,8 +538,11 @@ impl Trimesh {
     /// - Torus: χ = 0
     /// - Double torus: χ = -2
     pub fn euler_number(&self) -> i64 {
+        #[allow(clippy::cast_possible_wrap)]
         let v = self.vertex_mask().iter().filter(|&&m| m).count() as i64;
+        #[allow(clippy::cast_possible_wrap)]
         let f = self.faces.len() as i64;
+        #[allow(clippy::cast_possible_wrap)]
         let e = self.edges_unique().len() as i64;
         v - e + f
     }
@@ -731,6 +737,19 @@ impl Trimesh {
             Box::new(
                 Trimesh::new(points, faces, None, None).expect("convex hull mesh creation failed"),
             )
+        })
+    }
+
+    /// Compute the minimum-volume oriented bounding box (OBB) of the mesh.
+    ///
+    /// Uses the convex hull's face normals and edge-pair cross products as
+    /// candidate projection directions, with 2D rotating calipers for each.
+    ///
+    /// Cached on first access.
+    pub fn oriented_bounding_box(&self) -> &crate::convex::OrientedBoundingBox {
+        self.cache_obb.get_or_init(|| {
+            let hull = self.convex_hull();
+            crate::convex::oriented_bounding_box(&hull.vertices, &hull.faces)
         })
     }
 

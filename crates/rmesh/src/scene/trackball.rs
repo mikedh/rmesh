@@ -108,9 +108,9 @@ impl Trackball {
     pub fn fit(&mut self, min: Point3<f64>, max: Point3<f64>) {
         // Set center to bounding box center
         self.center = Point3::new(
-            (min.x + max.x) / 2.0,
-            (min.y + max.y) / 2.0,
-            (min.z + max.z) / 2.0,
+            f64::midpoint(min.x, max.x),
+            f64::midpoint(min.y, max.y),
+            f64::midpoint(min.z, max.z),
         );
 
         // Set distance based on bounding box size

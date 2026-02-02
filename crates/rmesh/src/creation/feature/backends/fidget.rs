@@ -55,7 +55,7 @@ impl FidgetSettings {
 
 impl BackendSettings for FidgetSettings {
     fn resolution(&self) -> u32 {
-        self.depth as u32
+        u32::from(self.depth)
     }
 }
 
@@ -106,9 +106,13 @@ impl FidgetBackend {
         let shape = JitShape::from(tree);
 
         // Calculate the center and size of our bounding box
-        let cx = ((bounds.0[0] + bounds.1[0]) / 2.0) as f32;
-        let cy = ((bounds.0[1] + bounds.1[1]) / 2.0) as f32;
-        let cz = ((bounds.0[2] + bounds.1[2]) / 2.0) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let cx = f64::midpoint(bounds.0[0], bounds.1[0]) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let cy = f64::midpoint(bounds.0[1], bounds.1[1]) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let cz = f64::midpoint(bounds.0[2], bounds.1[2]) as f32;
+        #[allow(clippy::cast_possible_truncation)]
         let size = ((bounds.1[0] - bounds.0[0])
             .max(bounds.1[1] - bounds.0[1])
             .max(bounds.1[2] - bounds.0[2])
@@ -164,7 +168,7 @@ fn fidget_to_trimesh(mesh: &fidget::mesh::Mesh) -> Result<Trimesh> {
     let vertices: Vec<f64> = mesh
         .vertices
         .iter()
-        .flat_map(|v| [v.x as f64, v.y as f64, v.z as f64])
+        .flat_map(|v| [f64::from(v.x), f64::from(v.y), f64::from(v.z)])
         .collect();
 
     // Convert triangles to flat usize slice
@@ -260,6 +264,7 @@ fn extrude_to_tree(extrude: &Extrude) -> Result<Tree> {
 /// via `max`), all triangles unioned via `min`. This handles non-convex
 /// polygons and holes correctly, unlike the previous half-plane approach
 /// which only worked for convex shapes.
+#[allow(clippy::needless_pass_by_value)]
 fn sketch_to_tree_local(sketch: &Sketch, local_u: Tree, local_v: Tree) -> Result<Tree> {
     let mut path = sketch.to_path2d();
     if path.segments.is_empty() {
@@ -330,8 +335,7 @@ fn operation_sign(op: &Operation) -> Sign {
         Operation::Revolve(r) => r.sign,
         Operation::Sweep(s) => s.sign,
         Operation::Loft(l) => l.sign,
-        Operation::Fillet(_) => Sign::Add,
-        Operation::Chamfer(_) => Sign::Add,
+        Operation::Fillet(_) | Operation::Chamfer(_) => Sign::Add,
     }
 }
 

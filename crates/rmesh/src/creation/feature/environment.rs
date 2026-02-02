@@ -69,18 +69,21 @@ impl Environment {
     }
 
     /// Set the units
+    #[must_use]
     pub fn with_units(mut self, units: Units) -> Self {
         self.units = units;
         self
     }
 
     /// Add a variable
+    #[must_use]
     pub fn with_variable(mut self, name: impl Into<String>, value: f64) -> Self {
         self.variables.insert(name.into(), value);
         self
     }
 
     /// Add an equation
+    #[must_use]
     pub fn with_equation(mut self, name: impl Into<String>, expr: impl Into<String>) -> Self {
         self.equations.insert(name.into(), expr.into());
         self

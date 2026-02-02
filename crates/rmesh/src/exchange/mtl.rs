@@ -38,51 +38,48 @@ pub fn parse_mtl(data: &str, resolver: Option<&dyn Resolver>) -> Vec<Material> {
             }
             "Kd" if parts.len() >= 4 => {
                 // Diffuse color
-                if let Some(ref mut mat) = current {
-                    if let (Ok(r), Ok(g), Ok(b)) = (
+                if let Some(ref mut mat) = current
+                    && let (Ok(r), Ok(g), Ok(b)) = (
                         parts[1].parse::<f64>(),
                         parts[2].parse::<f64>(),
                         parts[3].parse::<f64>(),
-                    ) {
-                        mat.diffuse = Some(Vector3::new(r, g, b));
-                    }
+                    )
+                {
+                    mat.diffuse = Some(Vector3::new(r, g, b));
                 }
             }
             "Ks" if parts.len() >= 4 => {
                 // Specular color
-                if let Some(ref mut mat) = current {
-                    if let (Ok(r), Ok(g), Ok(b)) = (
+                if let Some(ref mut mat) = current
+                    && let (Ok(r), Ok(g), Ok(b)) = (
                         parts[1].parse::<f64>(),
                         parts[2].parse::<f64>(),
                         parts[3].parse::<f64>(),
-                    ) {
-                        mat.specular = Some(Vector3::new(r, g, b));
-                    }
+                    )
+                {
+                    mat.specular = Some(Vector3::new(r, g, b));
                 }
             }
             "Ns" if parts.len() >= 2 => {
                 // Shininess
-                if let Some(ref mut mat) = current {
-                    if let Ok(ns) = parts[1].parse::<f64>() {
-                        mat.shininess = Some(ns);
-                    }
+                if let Some(ref mut mat) = current
+                    && let Ok(ns) = parts[1].parse::<f64>()
+                {
+                    mat.shininess = Some(ns);
                 }
             }
             "d" if parts.len() >= 2 => {
                 // Alpha/dissolve
-                if let Some(ref mut mat) = current {
-                    if let Ok(d) = parts[1].parse::<f64>() {
-                        mat.alpha = Some(d);
-                    }
+                if let Some(ref mut mat) = current
+                    && let Ok(d) = parts[1].parse::<f64>()
+                {
+                    mat.alpha = Some(d);
                 }
             }
-            "Tr" if parts.len() >= 2 => {
-                // Transparency (inverse of dissolve)
-                if let Some(ref mut mat) = current {
-                    if let Ok(tr) = parts[1].parse::<f64>() {
-                        mat.alpha = Some(1.0 - tr);
-                    }
-                }
+            "Tr" => {
+                // Non-standard: not in the official spec (paulbourke.net/dataformats/mtl).
+                // Different exporters disagree on meaning (transparency vs dissolve),
+                // so we ignore it and only honor "d".
             }
             "map_Kd" if parts.len() >= 2 => {
                 // Diffuse texture map

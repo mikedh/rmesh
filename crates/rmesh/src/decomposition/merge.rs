@@ -100,10 +100,7 @@ fn merge_cost(
         return 0.0;
     }
 
-    let combined_vol = if !aabb_a.overlaps(aabb_b) {
-        // Fast path: AABB union volume (no hull computation needed)
-        aabb_a.union(aabb_b).volume()
-    } else {
+    let combined_vol = if aabb_a.overlaps(aabb_b) {
         // Slow path: compute actual combined hull volume
         let mut combined_points = Vec::with_capacity(a.vertices.len() + b.vertices.len());
         combined_points.extend_from_slice(&a.vertices);
@@ -115,6 +112,9 @@ fn merge_cost(
                 aabb_a.union(aabb_b).volume()
             }
         }
+    } else {
+        // Fast path: AABB union volume (no hull computation needed)
+        aabb_a.union(aabb_b).volume()
     };
 
     (a.volume + b.volume - combined_vol).abs() / total_volume
@@ -126,9 +126,8 @@ fn merge_hulls(a: &ConvexHull, b: &ConvexHull) -> Option<ConvexHull> {
     combined.extend_from_slice(&a.vertices);
     combined.extend_from_slice(&b.vertices);
 
-    let faces = match crate::convex::convex_hull_3d(&combined) {
-        Ok(f) => f,
-        Err(_) => return None,
+    let Ok(faces) = crate::convex::convex_hull_3d(&combined) else {
+        return None;
     };
 
     // Re-index to only include hull vertices
@@ -253,19 +252,16 @@ pub fn greedy_merge(mut hulls: Vec<ConvexHull>, max_hulls: u32) -> Vec<ConvexHul
         aabb_map.remove(&pair.id_a);
         aabb_map.remove(&pair.id_b);
 
-        let merged = match merge_hulls(&hull_a, &hull_b) {
-            Some(m) => m,
-            None => {
-                // Can't merge, keep the larger one
-                if hull_a.volume >= hull_b.volume {
-                    hull_map.insert(pair.id_a, hull_a);
-                    aabb_map.insert(pair.id_a, Aabb::from_points(&hull_map[&pair.id_a].vertices));
-                } else {
-                    hull_map.insert(pair.id_b, hull_b);
-                    aabb_map.insert(pair.id_b, Aabb::from_points(&hull_map[&pair.id_b].vertices));
-                }
-                continue;
+        let Some(merged) = merge_hulls(&hull_a, &hull_b) else {
+            // Can't merge, keep the larger one
+            if hull_a.volume >= hull_b.volume {
+                hull_map.insert(pair.id_a, hull_a);
+                aabb_map.insert(pair.id_a, Aabb::from_points(&hull_map[&pair.id_a].vertices));
+            } else {
+                hull_map.insert(pair.id_b, hull_b);
+                aabb_map.insert(pair.id_b, Aabb::from_points(&hull_map[&pair.id_b].vertices));
             }
+            continue;
         };
 
         let new_id = next_id;

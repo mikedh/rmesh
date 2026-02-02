@@ -37,7 +37,7 @@ default = []
 wgpu = ["dep:wgpu", "dep:pollster"]
 
 [dependencies.wgpu]
-version = "24"
+workspace = true
 optional = true
 
 [dependencies.pollster]

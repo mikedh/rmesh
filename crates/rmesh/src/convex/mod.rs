@@ -1,7 +1,9 @@
 mod hull2d;
+mod oriented;
 mod qhull;
 
 pub use hull2d::convex_hull_2d;
+pub use oriented::{OrientedBoundingBox, oriented_bounding_box};
 pub use qhull::convex_hull_3d;
 
 /// Check that every input point is on or inside all hull edges.

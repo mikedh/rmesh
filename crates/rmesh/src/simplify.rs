@@ -813,7 +813,7 @@ impl Simplifier {
 
         let mut collapse_count = 0;
 
-        while target_count.map_or(true, |t| self.live_triangle_count > t) {
+        while target_count.is_none_or(|t| self.live_triangle_count > t) {
             let Some(edge) = self.pop_valid_edge() else {
                 if verbose {
                     println!("No more valid edges to collapse");
@@ -825,7 +825,7 @@ impl Simplifier {
             // explicit target count is set, so callers who specify a target get
             // best-effort simplification down to that count.
             if target_count.is_none() {
-                let threshold = 1e-9 * (collapse_count as f64 + 3.0).powf(aggressiveness);
+                let threshold = 1e-9 * (f64::from(collapse_count) + 3.0).powf(aggressiveness);
                 if edge.error > threshold {
                     if verbose {
                         println!(
@@ -925,12 +925,12 @@ impl Simplifier {
                 None
             };
 
-        let attributes_face = if !new_face_colors.is_empty() {
+        let attributes_face = if new_face_colors.is_empty() {
+            None
+        } else {
             let mut attrs = Attributes::default();
             attrs.colors.push(new_face_colors);
             Some(attrs)
-        } else {
-            None
         };
 
         SimplifyResult {

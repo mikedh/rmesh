@@ -164,11 +164,11 @@ pub fn polygons_from_path(path: &Path2D, _tolerance: f64) -> Vec<Polygon2D> {
     }
 
     // Use i_overlay to handle enclosure detection and hole assignment
-    polygons_from_rings_overlay(rings)
+    polygons_from_rings_overlay(&rings)
 }
 
 /// Use i_overlay to build polygons with proper hole assignment
-fn polygons_from_rings_overlay(rings: Vec<Vec<Point2<f64>>>) -> Vec<Polygon2D> {
+fn polygons_from_rings_overlay(rings: &[Vec<Point2<f64>>]) -> Vec<Polygon2D> {
     if rings.is_empty() {
         return Vec::new();
     }

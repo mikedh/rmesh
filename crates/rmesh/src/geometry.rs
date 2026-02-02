@@ -1,3 +1,5 @@
+use nalgebra::Point3;
+
 use crate::creation::feature::FeatureModel;
 use crate::mesh::Trimesh;
 use crate::path::{Path2D, Path3D};
@@ -6,11 +8,31 @@ use crate::path::{Path2D, Path3D};
 #[derive(Debug, Clone, Default)]
 pub struct PointCloud {
     /// 3D positions of points
-    pub points: Vec<nalgebra::Point3<f64>>,
+    pub points: Vec<Point3<f64>>,
     /// Optional per-point colors (RGBA)
     pub colors: Option<Vec<nalgebra::Vector4<u8>>>,
     /// Optional per-point normals
     pub normals: Option<Vec<nalgebra::Vector3<f64>>>,
+}
+
+impl PointCloud {
+    /// Compute the axis-aligned bounding box of the point cloud.
+    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
+        if self.points.is_empty() {
+            return None;
+        }
+        let mut min = self.points[0];
+        let mut max = self.points[0];
+        for p in &self.points[1..] {
+            min.x = min.x.min(p.x);
+            min.y = min.y.min(p.y);
+            min.z = min.z.min(p.z);
+            max.x = max.x.max(p.x);
+            max.y = max.y.max(p.y);
+            max.z = max.z.max(p.z);
+        }
+        Some((min, max))
+    }
 }
 
 /// Geometry types that can be loaded or created
@@ -26,4 +48,25 @@ pub enum Geometry {
     Feature(Box<FeatureModel>),
     /// A point cloud
     PointCloud(PointCloud),
+}
+
+impl Geometry {
+    /// Compute the 3D axis-aligned bounding box for this geometry.
+    ///
+    /// Returns `None` if the geometry is empty or the type doesn't support bounds.
+    /// For `Path2D`, the z-component is always 0.
+    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
+        match self {
+            Geometry::Mesh(mesh) => mesh.bounds(),
+            Geometry::Path2D(path) => path.bounds().map(|(min, max)| {
+                (
+                    Point3::new(min.x, min.y, 0.0),
+                    Point3::new(max.x, max.y, 0.0),
+                )
+            }),
+            Geometry::Path3D(path) => path.bounds(),
+            Geometry::PointCloud(pc) => pc.bounds(),
+            Geometry::Feature(_) => None,
+        }
+    }
 }

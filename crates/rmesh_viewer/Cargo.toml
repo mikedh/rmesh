@@ -1,0 +1,19 @@
+[package]
+name = "rmesh_viewer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rmesh = { path = "../rmesh", features = ["wgpu"] }
+wgpu = { workspace = true }
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { workspace = true }
+nalgebra = { workspace = true }
+anyhow = { workspace = true }
+image = "0.25"
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true

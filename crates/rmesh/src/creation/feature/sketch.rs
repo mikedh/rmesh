@@ -68,12 +68,14 @@ impl SketchEntity {
     }
 
     /// Set the entity name
+    #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
     /// Mark as construction geometry
+    #[must_use]
     pub fn as_construction(mut self) -> Self {
         self.construction = true;
         self
@@ -162,6 +164,7 @@ impl Sketch {
     }
 
     /// Add a constraint and return self (builder pattern)
+    #[must_use]
     pub fn with_constraint(mut self, constraint: Constraint) -> Self {
         self.constraints.push(constraint);
         self

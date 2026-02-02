@@ -288,6 +288,7 @@ pub struct Path2D {
     #[serde(skip)]
     cache_polygons: OnceLock<Vec<Polygon2D>>,
     #[serde(skip)]
+    #[allow(clippy::type_complexity)]
     cache_triangulation: OnceLock<(Vec<Point2<f64>>, Vec<[usize; 3]>)>,
 }
 
@@ -582,12 +583,11 @@ impl Path2D {
             points.extend(segment.discretize(&self.vertices, tol));
         }
         // Add the final endpoint (but not for closed shapes like circles)
-        if let Some(last) = self.segments.last() {
-            if !last.is_closed() {
-                if let Some(finish) = last.finish(&self.vertices) {
-                    points.push(finish);
-                }
-            }
+        if let Some(last) = self.segments.last()
+            && !last.is_closed()
+            && let Some(finish) = last.finish(&self.vertices)
+        {
+            points.push(finish);
         }
         points
     }
@@ -631,7 +631,7 @@ impl Path2D {
                 if let Some(&first_idx) = ring_indices.first() {
                     let first_point = self.segments.get(first_idx)?.start(&self.vertices)?;
                     // Check if already closed
-                    let already_closed = points.last().map_or(false, |last| {
+                    let already_closed = points.last().is_some_and(|last| {
                         (first_point.x - last.x).abs() < 1e-10
                             && (first_point.y - last.y).abs() < 1e-10
                     });
@@ -700,7 +700,8 @@ impl Path2D {
                 })
                 .collect();
 
-            let tris = triangulator.trianglate_2d(&ext_indices, &hole_indices, &all_vertices);
+            let tris =
+                triangulator.trianglate_2d(&ext_indices, &hole_indices, &all_vertices, false);
             all_triangles.extend(tris);
         }
 
@@ -936,12 +937,11 @@ impl Path3D {
             points.extend(segment.discretize(&self.vertices, tol));
         }
         // Add the final endpoint (but not for closed shapes like circles)
-        if let Some(last) = self.segments.last() {
-            if !last.is_closed() {
-                if let Some(finish) = last.finish(&self.vertices) {
-                    points.push(finish);
-                }
-            }
+        if let Some(last) = self.segments.last()
+            && !last.is_closed()
+            && let Some(finish) = last.finish(&self.vertices)
+        {
+            points.push(finish);
         }
         points
     }
@@ -982,7 +982,7 @@ impl Path3D {
                     let first_point = self.segments.get(first_idx)?.start(&self.vertices)?;
                     let already_closed = points
                         .last()
-                        .map_or(false, |last| (first_point - last).norm() < 1e-10);
+                        .is_some_and(|last| (first_point - last).norm() < 1e-10);
                     if !already_closed {
                         points.push(first_point);
                     }

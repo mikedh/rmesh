@@ -7,13 +7,12 @@ use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use rmesh::attributes::{
-    AlphaMode, Attributes, GroupingKind, Material, PBRMaterial, SimpleMaterial,
-};
+use rmesh::attributes::{AlphaMode, Attributes, GroupingKind, Material, SimpleMaterial};
 use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
 use rmesh::geometry::Geometry;
 use rmesh::mesh::Trimesh;
 use rmesh::resolvers::Resolver;
+use rmesh_viewer::{RenderOptions, SceneViewer, ViewerOptions};
 
 // ============================================================================
 // PyMaterial
@@ -110,19 +109,9 @@ impl PyMaterial {
     /// Base color factor (RGBA), only for PBR materials.
     #[getter]
     fn base_color_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        if let Material::PBR(PBRMaterial {
-            base_color_factor, ..
-        }) = &self.data
-        {
-            let arr = PyArray1::from_vec(
-                py,
-                vec![
-                    base_color_factor.x,
-                    base_color_factor.y,
-                    base_color_factor.z,
-                    base_color_factor.w,
-                ],
-            );
+        if let Material::PBR(pbr) = &self.data {
+            let c = &pbr.base_color_factor;
+            let arr = PyArray1::from_vec(py, vec![c.x, c.y, c.z, c.w]);
             make_readonly(&arr);
             Some(arr.unbind())
         } else {
@@ -133,11 +122,8 @@ impl PyMaterial {
     /// Metallic factor (0.0 = dielectric, 1.0 = metal), only for PBR materials.
     #[getter]
     fn metallic_factor(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial {
-            metallic_factor, ..
-        }) = &self.data
-        {
-            Some(*metallic_factor)
+        if let Material::PBR(pbr) = &self.data {
+            Some(pbr.metallic_factor)
         } else {
             None
         }
@@ -146,11 +132,8 @@ impl PyMaterial {
     /// Roughness factor (0.0 = smooth, 1.0 = rough), only for PBR materials.
     #[getter]
     fn roughness_factor(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial {
-            roughness_factor, ..
-        }) = &self.data
-        {
-            Some(*roughness_factor)
+        if let Material::PBR(pbr) = &self.data {
+            Some(pbr.roughness_factor)
         } else {
             None
         }
@@ -159,8 +142,8 @@ impl PyMaterial {
     /// Normal map scale, only for PBR materials.
     #[getter]
     fn normal_scale(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial { normal_scale, .. }) = &self.data {
-            Some(*normal_scale)
+        if let Material::PBR(pbr) = &self.data {
+            Some(pbr.normal_scale)
         } else {
             None
         }
@@ -169,11 +152,8 @@ impl PyMaterial {
     /// Occlusion strength, only for PBR materials.
     #[getter]
     fn occlusion_strength(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial {
-            occlusion_strength, ..
-        }) = &self.data
-        {
-            Some(*occlusion_strength)
+        if let Material::PBR(pbr) = &self.data {
+            Some(pbr.occlusion_strength)
         } else {
             None
         }
@@ -182,14 +162,9 @@ impl PyMaterial {
     /// Emissive color factor (RGB), only for PBR materials.
     #[getter]
     fn emissive_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        if let Material::PBR(PBRMaterial {
-            emissive_factor, ..
-        }) = &self.data
-        {
-            let arr = PyArray1::from_vec(
-                py,
-                vec![emissive_factor.x, emissive_factor.y, emissive_factor.z],
-            );
+        if let Material::PBR(pbr) = &self.data {
+            let e = &pbr.emissive_factor;
+            let arr = PyArray1::from_vec(py, vec![e.x, e.y, e.z]);
             make_readonly(&arr);
             Some(arr.unbind())
         } else {
@@ -200,8 +175,8 @@ impl PyMaterial {
     /// Alpha blending mode: "opaque", "mask", or "blend", only for PBR materials.
     #[getter]
     fn alpha_mode(&self) -> Option<&str> {
-        if let Material::PBR(PBRMaterial { alpha_mode, .. }) = &self.data {
-            Some(match alpha_mode {
+        if let Material::PBR(pbr) = &self.data {
+            Some(match pbr.alpha_mode {
                 AlphaMode::Opaque => "opaque",
                 AlphaMode::Mask => "mask",
                 AlphaMode::Blend => "blend",
@@ -214,8 +189,8 @@ impl PyMaterial {
     /// Alpha cutoff threshold for mask mode, only for PBR materials.
     #[getter]
     fn alpha_cutoff(&self) -> Option<f64> {
-        if let Material::PBR(PBRMaterial { alpha_cutoff, .. }) = &self.data {
-            Some(*alpha_cutoff)
+        if let Material::PBR(pbr) = &self.data {
+            Some(pbr.alpha_cutoff)
         } else {
             None
         }
@@ -224,8 +199,8 @@ impl PyMaterial {
     /// Whether the material is double-sided, only for PBR materials.
     #[getter]
     fn double_sided(&self) -> Option<bool> {
-        if let Material::PBR(PBRMaterial { double_sided, .. }) = &self.data {
-            Some(*double_sided)
+        if let Material::PBR(pbr) = &self.data {
+            Some(pbr.double_sided)
         } else {
             None
         }
@@ -1208,6 +1183,56 @@ impl PyTrimesh {
         };
         Self::new_from_trimesh(self.data.cleanup(&options).into())
     }
+
+    /// Open an interactive 3D viewer window displaying this mesh.
+    #[pyo3(signature = (*, title="rmesh viewer", width=1280, height=720, background=None))]
+    fn show(
+        &self,
+        py: Python<'_>,
+        title: &str,
+        width: u32,
+        height: u32,
+        background: Option<[f32; 3]>,
+    ) {
+        use rmesh::scene::Scene;
+        let mut scene = Scene::new();
+        scene.add_geometry("mesh", Geometry::Mesh(Box::new(self.data.clone())));
+        let options = ViewerOptions {
+            title: title.to_string(),
+            width,
+            height,
+            background: background.unwrap_or([0.15, 0.15, 0.18]),
+        };
+        py.detach(|| scene.show_with_options(options));
+    }
+
+    /// Render this mesh to a PNG image (headless, no window).
+    ///
+    /// Returns PNG bytes.
+    #[pyo3(signature = (*, width=1280, height=720, background=None))]
+    fn to_image<'py>(
+        &self,
+        py: Python<'py>,
+        width: u32,
+        height: u32,
+        background: Option<[f32; 3]>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        use rmesh::scene::Scene;
+        let mut scene = Scene::new();
+        scene.add_geometry("mesh", Geometry::Mesh(Box::new(self.data.clone())));
+        let options = RenderOptions {
+            width,
+            height,
+            background: background.unwrap_or([0.15, 0.15, 0.18]),
+        };
+        let rgba = py.detach(|| scene.render_to_image(&options));
+        let img = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("render failed"))?;
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(pyo3::types::PyBytes::new(py, &buf))
+    }
 }
 
 // ============================================================================
@@ -1262,12 +1287,12 @@ impl PyVoxelGrid {
 #[pyclass(name = "GeometryDict")]
 pub struct PyGeometryDict {
     /// Stores (name, geometry) pairs, preserving insertion order
-    items: Vec<(String, PyObject)>,
+    items: Vec<(String, Py<PyAny>)>,
 }
 
 #[pymethods]
 impl PyGeometryDict {
-    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         self.items
             .iter()
             .find(|(name, _)| name == key)
@@ -1294,11 +1319,11 @@ impl PyGeometryDict {
         self.items.iter().map(|(k, _)| k.clone()).collect()
     }
 
-    fn values(&self, py: Python<'_>) -> Vec<PyObject> {
+    fn values(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
         self.items.iter().map(|(_, v)| v.clone_ref(py)).collect()
     }
 
-    fn items(&self, py: Python<'_>) -> Vec<(String, PyObject)> {
+    fn items(&self, py: Python<'_>) -> Vec<(String, Py<PyAny>)> {
         self.items
             .iter()
             .map(|(k, v)| (k.clone(), v.clone_ref(py)))
@@ -1306,7 +1331,7 @@ impl PyGeometryDict {
     }
 
     #[pyo3(signature = (key, default=None))]
-    fn get(&self, py: Python<'_>, key: &str, default: Option<PyObject>) -> Option<PyObject> {
+    fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> Option<Py<PyAny>> {
         self.items
             .iter()
             .find(|(name, _)| name == key)
@@ -1370,12 +1395,12 @@ impl PyScene {
     fn geometry(&self, py: Python<'_>) -> Py<PyGeometryDict> {
         self.geometry_cache
             .get_or_init(|| {
-                let items: Vec<(String, PyObject)> = self
+                let items: Vec<(String, Py<PyAny>)> = self
                     .data
                     .geometry
                     .iter()
                     .filter_map(|(name, geom)| {
-                        let obj: PyObject = match geom {
+                        let obj: Py<PyAny> = match geom {
                             Geometry::Mesh(mesh) => {
                                 Py::new(py, PyTrimesh::new_from_trimesh((**mesh).clone()))
                                     .ok()?
@@ -1406,6 +1431,65 @@ impl PyScene {
 
     fn __len__(&self) -> usize {
         self.data.geometry.len()
+    }
+
+    /// Open an interactive 3D viewer window displaying this scene.
+    #[pyo3(signature = (*, title="rmesh viewer", width=1280, height=720, background=None))]
+    fn show(
+        &self,
+        py: Python<'_>,
+        title: &str,
+        width: u32,
+        height: u32,
+        background: Option<[f32; 3]>,
+    ) {
+        let options = ViewerOptions {
+            title: title.to_string(),
+            width,
+            height,
+            background: background.unwrap_or([0.15, 0.15, 0.18]),
+        };
+        let data = self.data.clone();
+        py.detach(|| data.show_with_options(options));
+    }
+
+    /// Axis-aligned bounding box as a (2, 3) array [[min_x, min_y, min_z], [max_x, max_y, max_z]],
+    /// or None if the scene has no geometry with valid bounds.
+    #[getter]
+    fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data.bounds().map(|(min, max)| {
+            let data = vec![min.x, min.y, min.z, max.x, max.y, max.z];
+            let nd = Array2::from_shape_vec((2, 3), data).unwrap();
+            let arr = PyArray2::from_array(py, &nd);
+            make_readonly(&arr);
+            arr.unbind()
+        })
+    }
+
+    /// Render this scene to a PNG image (headless, no window).
+    ///
+    /// Returns PNG bytes.
+    #[pyo3(signature = (*, width=1280, height=720, background=None))]
+    fn to_image<'py>(
+        &self,
+        py: Python<'py>,
+        width: u32,
+        height: u32,
+        background: Option<[f32; 3]>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let options = RenderOptions {
+            width,
+            height,
+            background: background.unwrap_or([0.15, 0.15, 0.18]),
+        };
+        let data = self.data.clone();
+        let rgba = py.detach(|| data.render_to_image(&options));
+        let img = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("render failed"))?;
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(pyo3::types::PyBytes::new(py, &buf))
     }
 }
 
@@ -1477,7 +1561,7 @@ fn load_with_resolver(
         None => load(bytes, file_type, None),
         Some(res) => {
             let bound = res.bind(py);
-            if let Ok(dict) = bound.downcast::<PyDict>() {
+            if let Ok(dict) = bound.cast::<PyDict>() {
                 let mut mem = InMemoryResolver::new();
                 for (k, v) in dict.iter() {
                     mem.insert(k.extract::<String>()?, v.extract::<Vec<u8>>()?);

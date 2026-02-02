@@ -111,13 +111,13 @@ impl Segment {
                 // Skip past the coord marker and its two f64 values
                 let after_coord = i + 18;
                 // Check if there's another f64 right after
-                if after_coord + 8 <= self.payload.len() {
-                    if let Ok(bytes) = self.payload[after_coord..after_coord + 8].try_into() {
-                        let val: f64 = f64::from_le_bytes(bytes);
-                        // Reasonable dimension: 0.1mm to 10m
-                        if val.is_finite() && val > 0.0001 && val < 10.0 {
-                            return Some(val);
-                        }
+                if after_coord + 8 <= self.payload.len()
+                    && let Ok(bytes) = self.payload[after_coord..after_coord + 8].try_into()
+                {
+                    let val: f64 = f64::from_le_bytes(bytes);
+                    // Reasonable dimension: 0.1mm to 10m
+                    if val.is_finite() && val > 0.0001 && val < 10.0 {
+                        return Some(val);
                     }
                 }
                 i += 18;
@@ -127,13 +127,9 @@ impl Segment {
         }
 
         // Fallback: find first reasonable dimension value in payload
-        for val in self.doubles() {
-            // Reasonable dimension in meters (0.1mm to 1m for typical features)
-            if val > 0.0001 && val < 1.0 {
-                return Some(val);
-            }
-        }
-        None
+        self.doubles()
+            .into_iter()
+            .find(|&val| val > 0.0001 && val < 1.0)
     }
 }
 
@@ -236,10 +232,10 @@ impl<'a> ExtractContext<'a> {
     /// Find sketch name from nearby segments (searching backward)
     fn find_sketch_name(&self) -> Option<String> {
         for seg in self.segments[..self.index].iter().rev().take(20) {
-            if let Some(ref name) = seg.name {
-                if name.starts_with("Sketch") {
-                    return Some(name.clone());
-                }
+            if let Some(ref name) = seg.name
+                && name.starts_with("Sketch")
+            {
+                return Some(name.clone());
             }
         }
         None
@@ -249,7 +245,7 @@ impl<'a> ExtractContext<'a> {
 /// Segment type handlers for entity extraction
 /// Each handler returns Some(entity) if it can extract from this segment type
 mod handlers {
-    use super::*;
+    use super::{ExtractContext, Segment, SketchEntity};
 
     /// Extract circle from sgArcHandle + adjacent sgCircleDim
     pub fn arc_handle(seg: &Segment, ctx: &ExtractContext) -> Option<SketchEntity> {
@@ -311,10 +307,10 @@ pub fn extract_sketches(segments: &[Segment]) -> SketchExtraction {
 
         // Track current sketch name from moProfileFeature_c
         if seg.type_name == "moProfileFeature_c" {
-            if let Some(ref name) = seg.name {
-                if name.starts_with("Sketch") {
-                    current_sketch_name = Some(name.clone());
-                }
+            if let Some(ref name) = seg.name
+                && name.starts_with("Sketch")
+            {
+                current_sketch_name = Some(name.clone());
             }
 
             // Try to extract polygon (rectangle) from profile feature

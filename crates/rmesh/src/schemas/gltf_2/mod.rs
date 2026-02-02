@@ -2,6 +2,8 @@
 //! Do not edit manually. Run `cargo run -p gltf-codegen` to regenerate.
 
 #![allow(unused_imports)]
+#![allow(clippy::default_trait_access)]
+#![allow(clippy::match_same_arms)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;

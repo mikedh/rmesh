@@ -166,8 +166,8 @@ impl Curve for Arc3 {
 /// - The geometry is invalid (h_sq significantly negative)
 pub fn arc_center<P: Point2Ops>(start: &P, finish: &P, sweep_angle: f64) -> Option<P> {
     // Midpoint of the chord
-    let mid_x = (start.x() + finish.x()) / 2.0;
-    let mid_y = (start.y() + finish.y()) / 2.0;
+    let mid_x = f64::midpoint(start.x(), finish.x());
+    let mid_y = f64::midpoint(start.y(), finish.y());
 
     // Half chord length
     let dx = finish.x() - start.x();

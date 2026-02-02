@@ -11,6 +11,8 @@
 //! - `to_svg()` only emits `<path d="...">` strings
 //! - All geometry is converted to SVG path commands
 
+use std::fmt::Write;
+
 use nalgebra::Point2;
 
 use super::entity::{Arc2, Circle2, CubicBezier, Ellipse2, Line, QuadraticBezier, Winding};
@@ -73,16 +75,16 @@ impl Path2D {
         }
 
         // Close path if it forms a ring (start and finish are the same)
-        if !self.segments.is_empty() {
-            if let (Some(first_start), Some(last_finish)) = (
+        if !self.segments.is_empty()
+            && let (Some(first_start), Some(last_finish)) = (
                 self.segments[0].start(&self.vertices),
                 self.segments.last().and_then(|s| s.finish(&self.vertices)),
-            ) {
-                let is_closed = (first_start.x - last_finish.x).abs() < 1e-10
-                    && (first_start.y - last_finish.y).abs() < 1e-10;
-                if is_closed && !path.is_empty() {
-                    path.push_str(" Z");
-                }
+            )
+        {
+            let is_closed = (first_start.x - last_finish.x).abs() < 1e-10
+                && (first_start.y - last_finish.y).abs() < 1e-10;
+            if is_closed && !path.is_empty() {
+                path.push_str(" Z");
             }
         }
 
@@ -136,7 +138,7 @@ fn parse_svg_element(svg: &str) -> Result<Path2D> {
     } else if svg.starts_with("<ellipse") {
         parse_ellipse_element(svg)
     } else if svg.starts_with("<line") {
-        parse_line_element(svg)
+        Ok(parse_line_element(svg))
     } else if svg.starts_with("<polyline") {
         parse_polyline_element(svg, false)
     } else if svg.starts_with("<polygon") {
@@ -267,7 +269,7 @@ fn parse_ellipse_element(svg: &str) -> Result<Path2D> {
     Ok(Path2D::from_vertices_and_segments(vertices, segments))
 }
 
-fn parse_line_element(svg: &str) -> Result<Path2D> {
+fn parse_line_element(svg: &str) -> Path2D {
     let x1: f64 = extract_attribute(svg, "x1")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
@@ -283,7 +285,7 @@ fn parse_line_element(svg: &str) -> Result<Path2D> {
 
     let vertices = vec![Point2::new(x1, y1), Point2::new(x2, y2)];
     let segments = vec![Segment2D::Line(Line::new(0, 1))];
-    Ok(Path2D::from_vertices_and_segments(vertices, segments))
+    Path2D::from_vertices_and_segments(vertices, segments)
 }
 
 fn parse_polyline_element(svg: &str, close: bool) -> Result<Path2D> {
@@ -772,12 +774,8 @@ fn parse_svg_path(path: &str) -> Result<Path2D> {
                 parser.current = parser.start;
                 parser.last_control = None;
             }
-            ' ' | ',' | '\n' | '\t' | '\r' => {
-                // Skip whitespace
-            }
-            _ => {
-                // Unknown command - skip
-            }
+            // Skip whitespace and unknown commands
+            _ => {}
         }
     }
 
@@ -797,14 +795,14 @@ fn svg_arc_to_center_arc(
 
     // For elliptical arcs where rx != ry, approximate as circular using average radius
     if (rx - ry).abs() > 1e-10 {
-        let r = (rx + ry) / 2.0;
+        let r = f64::midpoint(rx, ry);
         return svg_arc_to_center_arc(parser, p2, r, r, large_arc, sweep);
     }
 
     let r = rx;
 
     // Midpoint of chord
-    let mid = Point2::new((p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0);
+    let mid = Point2::new(f64::midpoint(p1.x, p2.x), f64::midpoint(p1.y, p2.y));
 
     // Distance from midpoint to center
     let d = ((p1.x - p2.x).powi(2) + (p1.y - p2.y).powi(2)).sqrt() / 2.0;
@@ -881,13 +879,13 @@ fn segment_to_svg(
 
             // Move to start if needed
             if needs_move(*current_pos, start) {
-                result.push_str(&format!("M{},{} ", fmt_num(start.x), fmt_num(start.y)));
+                let _ = write!(result, "M{},{} ", fmt_num(start.x), fmt_num(start.y));
             }
 
             // Draw lines to all subsequent points
             for &idx in line.points.iter().skip(1) {
                 let p = *vertices.get(idx)?;
-                result.push_str(&format!("L{},{} ", fmt_num(p.x), fmt_num(p.y)));
+                let _ = write!(result, "L{},{} ", fmt_num(p.x), fmt_num(p.y));
             }
 
             *current_pos = line.points.last().and_then(|&i| vertices.get(i).copied());
@@ -900,19 +898,16 @@ fn segment_to_svg(
             let mut result = String::new();
 
             if needs_move(*current_pos, start) {
-                result.push_str(&format!("M{},{} ", fmt_num(start.x), fmt_num(start.y)));
+                let _ = write!(result, "M{},{} ", fmt_num(start.x), fmt_num(start.y));
             }
 
             let radius = arc.radius(vertices).unwrap_or(0.0);
             let sweep_angle = arc.sweep_angle();
-            let large_arc = if sweep_angle.abs() > std::f64::consts::PI {
-                1
-            } else {
-                0
-            };
-            let sweep_flag = if sweep_angle > 0.0 { 1 } else { 0 };
+            let large_arc = i32::from(sweep_angle.abs() > std::f64::consts::PI);
+            let sweep_flag = i32::from(sweep_angle > 0.0);
 
-            result.push_str(&format!(
+            let _ = write!(
+                result,
                 "A{},{} 0 {} {} {},{}",
                 fmt_num(radius),
                 fmt_num(radius),
@@ -920,7 +915,7 @@ fn segment_to_svg(
                 sweep_flag,
                 fmt_num(finish.x),
                 fmt_num(finish.y)
-            ));
+            );
             *current_pos = Some(finish);
             Some(result)
         }
@@ -988,10 +983,11 @@ fn segment_to_svg(
             let mut result = String::new();
 
             if needs_move(*current_pos, p0) {
-                result.push_str(&format!("M{},{} ", fmt_num(p0.x), fmt_num(p0.y)));
+                let _ = write!(result, "M{},{} ", fmt_num(p0.x), fmt_num(p0.y));
             }
 
-            result.push_str(&format!(
+            let _ = write!(
+                result,
                 "C{},{} {},{} {},{}",
                 fmt_num(p1.x),
                 fmt_num(p1.y),
@@ -999,7 +995,7 @@ fn segment_to_svg(
                 fmt_num(p2.y),
                 fmt_num(p3.x),
                 fmt_num(p3.y)
-            ));
+            );
             *current_pos = Some(p3);
             Some(result)
         }
@@ -1011,16 +1007,17 @@ fn segment_to_svg(
             let mut result = String::new();
 
             if needs_move(*current_pos, p0) {
-                result.push_str(&format!("M{},{} ", fmt_num(p0.x), fmt_num(p0.y)));
+                let _ = write!(result, "M{},{} ", fmt_num(p0.x), fmt_num(p0.y));
             }
 
-            result.push_str(&format!(
+            let _ = write!(
+                result,
                 "Q{},{} {},{}",
                 fmt_num(p1.x),
                 fmt_num(p1.y),
                 fmt_num(p2.x),
                 fmt_num(p2.y)
-            ));
+            );
             *current_pos = Some(p2);
             Some(result)
         }
@@ -1035,12 +1032,12 @@ fn segment_to_svg(
             let start = *vertices.get(*spline.points.first()?)?;
 
             if needs_move(*current_pos, start) {
-                result.push_str(&format!("M{},{} ", fmt_num(start.x), fmt_num(start.y)));
+                let _ = write!(result, "M{},{} ", fmt_num(start.x), fmt_num(start.y));
             }
 
             for &idx in spline.points.iter().skip(1) {
                 let point = *vertices.get(idx)?;
-                result.push_str(&format!("L{},{} ", fmt_num(point.x), fmt_num(point.y)));
+                let _ = write!(result, "L{},{} ", fmt_num(point.x), fmt_num(point.y));
             }
 
             *current_pos = spline.points.last().and_then(|&i| vertices.get(i).copied());
@@ -1050,9 +1047,7 @@ fn segment_to_svg(
 }
 
 fn needs_move(current: Option<Point2<f64>>, target: Point2<f64>) -> bool {
-    current.map_or(true, |p| {
-        (p.x - target.x).abs() > 1e-10 || (p.y - target.y).abs() > 1e-10
-    })
+    current.is_none_or(|p| (p.x - target.x).abs() > 1e-10 || (p.y - target.y).abs() > 1e-10)
 }
 
 /// Format a number for SVG output (remove trailing zeros)
@@ -1080,10 +1075,10 @@ fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<f64>
     let mut num_str = String::new();
 
     // Handle sign
-    if let Some(&c) = chars.peek() {
-        if c == '-' || c == '+' {
-            num_str.push(chars.next().unwrap());
-        }
+    if let Some(&c) = chars.peek()
+        && (c == '-' || c == '+')
+    {
+        num_str.push(chars.next().unwrap());
     }
 
     // Collect digits, decimal point, and exponent

@@ -97,10 +97,10 @@ impl FileType {
 
         // GLTF JSON starts with '{' (possibly with whitespace)
         let trimmed = data.iter().position(|&b| !b.is_ascii_whitespace());
-        if let Some(pos) = trimmed {
-            if data[pos] == b'{' {
-                return Some(FileType::GLTF);
-            }
+        if let Some(pos) = trimmed
+            && data[pos] == b'{'
+        {
+            return Some(FileType::GLTF);
         }
 
         None

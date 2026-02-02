@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use nalgebra::{Point3, Vector2, Vector3, Vector4};
 use rayon::prelude::*;
@@ -35,7 +37,7 @@ enum ObjLine {
     MtlLib(String),
 
     // Something we don't care about
-    Ignore(String),
+    Ignore,
 }
 
 impl ObjLine {
@@ -67,7 +69,11 @@ impl ObjLine {
                 z.parse().unwrap(),
             )),
             ["vt", u, v, _garbage @ ..] => {
-                ObjLine::Vt(Vector2::new(u.parse().unwrap(), v.parse().unwrap()))
+                // OBJ has V=0 at the bottom; GPU texture coords have V=0 at the top.
+                ObjLine::Vt(Vector2::new(
+                    u.parse().unwrap(),
+                    1.0 - v.parse::<f64>().unwrap(),
+                ))
             }
             ["o", name @ ..] => ObjLine::O(name.join(" ")),
             ["s", name @ ..] => ObjLine::S(name.join(" ")),
@@ -83,17 +89,12 @@ impl ObjLine {
                     .collect(),
             ),
 
-            _ => ObjLine::Ignore(line.to_string()),
+            _ => ObjLine::Ignore,
         }
     }
 }
 
-/// A helper function to upsert a value into a vector and return its index.
-///
-/// Parameters
-/// -----------
-/// name
-///   
+/// Insert `name` into `values` if absent and return its index.
 fn upsert(name: &str, values: &mut Vec<String>) -> usize {
     if let Some(index) = values.iter().position(|m| m == name) {
         index
@@ -178,6 +179,12 @@ struct ObjFaces {
     // Face vertex indices
     pub faces: Vec<[usize; 3]>,
 
+    // Per-face-vertex UV indices from `f v/vt/vn` lines
+    pub face_uv: Vec<[Option<usize>; 3]>,
+
+    // Per-face-vertex normal indices from `f v/vt/vn` lines
+    pub face_normal: Vec<[Option<usize>; 3]>,
+
     // Per-face attribute indices (one entry per face)
     pub face_material: Vec<usize>,
     pub face_group: Vec<usize>,
@@ -214,33 +221,187 @@ impl ObjFaces {
         vertices: &[Point3<f64>],
         triangulator: &mut Triangulator,
     ) {
-        // Extract just the vertex indices from the raw data
+        // Extract vertex, UV, and normal indices from the raw data.
+        // OBJ format is `f v/vt/vn` where vt and vn are optional.
+        // Indices are 1-based in OBJ, convert to 0-based here.
         let f: Vec<usize> = raw.iter().map(|v| v[0].unwrap_or(0) - 1).collect();
+        let f_uv: Vec<Option<usize>> = raw
+            .iter()
+            .map(|v| v.get(1).copied().flatten().map(|i| i - 1))
+            .collect();
+        let f_normal: Vec<Option<usize>> = raw
+            .iter()
+            .map(|v| v.get(2).copied().flatten().map(|i| i - 1))
+            .collect();
 
-        // Triangulate the face
-        let tri: Vec<[usize; 3]> = if f.len() == 3 {
-            vec![[f[0], f[1], f[2]]]
+        // Triangulate the polygon into local indices (0..f.len()),
+        // so we can use the same indices into f_uv and f_normal.
+        let tri_indices: Vec<[usize; 3]> = if f.len() == 3 {
+            vec![[0, 1, 2]]
         } else if f.len() == 4 {
-            vec![[f[0], f[1], f[2]], [f[0], f[2], f[3]]]
+            vec![[0, 1, 2], [0, 2, 3]]
         } else if f.len() > 4 {
             triangulator
-                .triangulate_3d(&f, &[], vertices)
-                .unwrap_or_else(|_| triangulate_fan(&f))
+                .triangulate_3d(&f, &[], vertices, true)
+                .unwrap_or_else(|_| triangulate_fan(&f, true))
         } else {
             vec![]
         };
 
         // Record per-face attributes for each resulting triangle
-        let num_tris = tri.len();
-        self.faces.extend(tri);
+        let num_tris = tri_indices.len();
+        for ti in &tri_indices {
+            self.faces.push([f[ti[0]], f[ti[1]], f[ti[2]]]);
+            self.face_uv.push([f_uv[ti[0]], f_uv[ti[1]], f_uv[ti[2]]]);
+            self.face_normal
+                .push([f_normal[ti[0]], f_normal[ti[1]], f_normal[ti[2]]]);
+        }
         self.face_object
-            .extend(std::iter::repeat(self.object).take(num_tris));
+            .extend(std::iter::repeat_n(self.object, num_tris));
         self.face_group
-            .extend(std::iter::repeat(self.group).take(num_tris));
+            .extend(std::iter::repeat_n(self.group, num_tris));
         self.face_material
-            .extend(std::iter::repeat(self.material).take(num_tris));
+            .extend(std::iter::repeat_n(self.material, num_tris));
         self.face_smooth
-            .extend(std::iter::repeat(self.smooth).take(num_tris));
+            .extend(std::iter::repeat_n(self.smooth, num_tris));
+    }
+
+    /// Check if any face has UV or normal indices.
+    pub fn has_uv_or_normal(&self) -> bool {
+        self.face_uv.iter().any(|f| f.iter().any(|i| i.is_some()))
+            || self
+                .face_normal
+                .iter()
+                .any(|f| f.iter().any(|i| i.is_some()))
+    }
+
+    /// Build face-level attributes (groupings) from the recorded per-face indices.
+    pub fn to_attributes(&self) -> Option<Attributes> {
+        let mut attributes = Attributes::default();
+
+        if !self.objects.is_empty() {
+            attributes.groupings.push(Grouping {
+                kind: GroupingKind::Object,
+                names: self.objects.clone(),
+                indices: self.face_object.clone(),
+            });
+        }
+        if !self.groups.is_empty() {
+            attributes.groupings.push(Grouping {
+                kind: GroupingKind::Group,
+                names: self.groups.clone(),
+                indices: self.face_group.clone(),
+            });
+        }
+        if !self.materials.is_empty() {
+            attributes.groupings.push(Grouping {
+                kind: GroupingKind::Material,
+                names: self.materials.clone(),
+                indices: self.face_material.clone(),
+            });
+        }
+        if !self.smooths.is_empty() {
+            attributes.groupings.push(Grouping {
+                kind: GroupingKind::Smoothing,
+                names: self.smooths.clone(),
+                indices: self.face_smooth.clone(),
+            });
+        }
+
+        if attributes.groupings.is_empty() {
+            None
+        } else {
+            Some(attributes)
+        }
+    }
+}
+
+/// Unmerge vertices so that position, UV, and normal arrays are vertex-aligned.
+///
+/// OBJ files index positions, UVs, and normals independently (e.g. `f v/vt/vn`).
+/// A mesh requires all per-vertex attributes to share a single index.
+/// This function creates a new vertex for each unique `(v, vt, vn)` combination.
+struct UnmergedMesh {
+    vertices: Vec<Point3<f64>>,
+    faces: Vec<[usize; 3]>,
+    attributes: Attributes,
+}
+
+fn unmerge_vertices(verts: &ObjVertices, faces: &ObjFaces) -> UnmergedMesh {
+    // Map from (position_idx, uv_idx, normal_idx) → new vertex index
+    let mut key_map: HashMap<(usize, Option<usize>, Option<usize>), usize> = HashMap::new();
+
+    let estimated = faces.faces.len() * 3;
+    let mut new_vertices: Vec<Point3<f64>> = Vec::with_capacity(estimated);
+    let mut new_uv: Vec<Vector2<f64>> = Vec::with_capacity(estimated);
+    let mut new_normal: Vec<Vector3<f64>> = Vec::with_capacity(estimated);
+    let mut new_faces: Vec<[usize; 3]> = Vec::with_capacity(faces.faces.len());
+
+    let has_uv = !verts.uv.is_empty();
+    let has_normal = !verts.normal.is_empty();
+
+    for (fi, face) in faces.faces.iter().enumerate() {
+        let uv_face = &faces.face_uv[fi];
+        let normal_face = &faces.face_normal[fi];
+
+        let mut new_face = [0usize; 3];
+        for corner in 0..3 {
+            let v_idx = face[corner];
+            let vt_idx = uv_face[corner];
+            let vn_idx = normal_face[corner];
+
+            let key = (v_idx, vt_idx, vn_idx);
+            let new_idx = *key_map.entry(key).or_insert_with(|| {
+                let idx = new_vertices.len();
+                new_vertices.push(verts.vertices[v_idx]);
+                if has_uv {
+                    if let Some(ti) = vt_idx {
+                        new_uv.push(verts.uv[ti]);
+                    } else {
+                        new_uv.push(Vector2::zeros());
+                    }
+                }
+                if has_normal {
+                    if let Some(ni) = vn_idx {
+                        new_normal.push(verts.normal[ni]);
+                    } else {
+                        new_normal.push(Vector3::zeros());
+                    }
+                }
+                idx
+            });
+
+            new_face[corner] = new_idx;
+        }
+        new_faces.push(new_face);
+    }
+
+    // Build vertex-aligned attributes
+    let mut attributes = Attributes::default();
+
+    if !new_uv.is_empty() {
+        attributes.uv.push(new_uv);
+    }
+    if !new_normal.is_empty() {
+        attributes.normals.push(new_normal);
+    }
+
+    // Remap vertex colors to the new vertex indices
+    if !verts.color.is_empty() {
+        let mut colors = vec![DEFAULT_COLOR; new_vertices.len()];
+        let color_map: HashMap<usize, Vector4<u8>> = verts.color.iter().copied().collect();
+        for (&(v_idx, _, _), &new_idx) in &key_map {
+            if let Some(&c) = color_map.get(&v_idx) {
+                colors[new_idx] = c;
+            }
+        }
+        attributes.colors.push(colors);
+    }
+
+    UnmergedMesh {
+        vertices: new_vertices,
+        faces: new_faces,
+        attributes,
     }
 }
 
@@ -302,14 +463,14 @@ impl ObjMesh {
                 ObjLine::UseMtl(name) => faces.upsert_material(name),
                 ObjLine::MtlLib(path) => {
                     // Try to load the MTL file using the resolver (if provided)
-                    if let Some(res) = resolver {
-                        if let Ok(mtl_bytes) = res.resolve(path) {
-                            let mtl_str = String::from_utf8_lossy(&mtl_bytes);
-                            materials.extend(parse_mtl(&mtl_str, resolver));
-                        }
+                    if let Some(res) = resolver
+                        && let Ok(mtl_bytes) = res.resolve(path)
+                    {
+                        let mtl_str = String::from_utf8_lossy(&mtl_bytes);
+                        materials.extend(parse_mtl(&mtl_str, resolver));
                     }
                 }
-                ObjLine::Ignore(_) => (),
+                ObjLine::Ignore => (),
             }
         }
 
@@ -323,56 +484,32 @@ impl ObjMesh {
     /// Get the primary name for this OBJ mesh.
     /// Uses the first object name if available, otherwise returns empty string.
     pub fn primary_name(&self) -> &str {
-        self.faces.objects.first().map(|s| s.as_str()).unwrap_or("")
+        self.faces.objects.first().map_or("", |s| s.as_str())
     }
 
     pub fn into_mesh(self) -> Result<Trimesh> {
-        let attributes_vertex = self.vertices.to_attributes();
+        let attributes_face = self.faces.to_attributes();
 
-        // Build face attributes with groupings
-        let mut attributes_face = Attributes::default();
-
-        if !self.faces.objects.is_empty() {
-            attributes_face.groupings.push(Grouping {
-                kind: GroupingKind::Object,
-                names: self.faces.objects,
-                indices: self.faces.face_object,
-            });
-        }
-        if !self.faces.groups.is_empty() {
-            attributes_face.groupings.push(Grouping {
-                kind: GroupingKind::Group,
-                names: self.faces.groups,
-                indices: self.faces.face_group,
-            });
-        }
-        if !self.faces.materials.is_empty() {
-            attributes_face.groupings.push(Grouping {
-                kind: GroupingKind::Material,
-                names: self.faces.materials,
-                indices: self.faces.face_material,
-            });
-        }
-        if !self.faces.smooths.is_empty() {
-            attributes_face.groupings.push(Grouping {
-                kind: GroupingKind::Smoothing,
-                names: self.faces.smooths,
-                indices: self.faces.face_smooth,
-            });
-        }
-
-        let attributes_face = if attributes_face.groupings.is_empty() {
-            None
+        let mut mesh = if self.faces.has_uv_or_normal() {
+            // Faces reference UV/normal indices that don't align with vertex indices.
+            // Unmerge vertices so each unique (v, vt, vn) combination gets its own vertex.
+            let unmerged = unmerge_vertices(&self.vertices, &self.faces);
+            Trimesh::new(
+                unmerged.vertices,
+                unmerged.faces,
+                Some(unmerged.attributes),
+                attributes_face,
+            )?
         } else {
-            Some(attributes_face)
+            // No UV/normal indices on faces — use the original vertex data directly.
+            let attributes_vertex = self.vertices.to_attributes();
+            Trimesh::new(
+                self.vertices.vertices,
+                self.faces.faces,
+                attributes_vertex,
+                attributes_face,
+            )?
         };
-
-        let mut mesh = Trimesh::new(
-            self.vertices.vertices,
-            self.faces.faces,
-            attributes_vertex,
-            attributes_face,
-        )?;
 
         mesh.materials = self.materials;
 
@@ -453,18 +590,22 @@ mod tests {
         let scene = load(data.as_bytes(), Some(FileType::OBJ), None).unwrap();
         let mesh = get_mesh(&scene);
 
-        // should have loaded a vertex for every occurrence of 'v '
-        assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
-        // todo : implement faces
+        // after unmerging each unique (v, vt, vn) combo becomes a vertex
+        assert_eq!(mesh.vertices.len(), 664);
         // should have loaded a face for every occurrence of 'f '
         assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
 
+        // UVs are vertex-aligned after unmerging
         assert!(!mesh.attributes_vertex.uv.is_empty());
         let uv = &mesh.attributes_vertex.uv[0];
-        assert_eq!(uv.len(), data.matches("\nvt ").count());
+        assert_eq!(uv.len(), mesh.vertices.len());
+        // at least some UV coordinates should be nonzero
+        assert!(uv.iter().any(|v| v.x != 0.0 || v.y != 0.0));
 
-        // here's the big tricky TODO
-        // assert_eq!(uv.len(),mesh.vertices.len());
+        // normals should also be vertex-aligned
+        assert!(!mesh.attributes_vertex.normals.is_empty());
+        let normals = &mesh.attributes_vertex.normals[0];
+        assert_eq!(normals.len(), mesh.vertices.len());
     }
 
     #[test]
@@ -494,13 +635,10 @@ mod tests {
         let scene = load(data.as_bytes(), Some(FileType::OBJ), None).unwrap();
         let mesh = get_mesh(&scene);
 
-        // should have loaded a vertex for every occurrence of 'v '
-        assert_eq!(mesh.vertices.len(), data.matches("\nv ").count());
-        // todo : implement faces
+        // after unmerging, vertex count >= original `v` count
+        assert!(mesh.vertices.len() >= data.matches("\nv ").count());
         // should have loaded a face for every occurrence of 'f '
         assert_eq!(mesh.faces.len(), data.matches("\nf ").count());
-
-        println!("mesh: {mesh:?}");
     }
 
     #[test]
@@ -554,8 +692,8 @@ mod tests {
             Material::Simple(mat) => {
                 assert_eq!(mat.name, "material_0");
                 assert!(mat.diffuse.is_some());
-                // Alpha from Tr 1.0 -> 1.0 - 1.0 = 0.0
-                assert_eq!(mat.alpha, Some(0.0));
+                // Tr is non-standard and ignored; alpha should be None (defaults to opaque)
+                assert_eq!(mat.alpha, None);
             }
             _ => panic!("expected SimpleMaterial"),
         }

@@ -31,6 +31,7 @@ pub struct Extrude {
     pub draft_angle: f64,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if requires &T
 fn is_zero(v: &f64) -> bool {
     v.abs() < 1e-10
 }
@@ -57,6 +58,7 @@ impl Extrude {
     }
 
     /// Set the draft angle
+    #[must_use]
     pub fn with_draft(mut self, angle_radians: f64) -> Self {
         self.draft_angle = angle_radians;
         self
@@ -115,6 +117,7 @@ impl Revolve {
     }
 
     /// Set a partial revolution angle
+    #[must_use]
     pub fn with_angle(mut self, angle_radians: f64) -> Self {
         self.angle = angle_radians;
         self
@@ -148,6 +151,7 @@ impl Sweep {
     }
 
     /// Set fixed orientation mode
+    #[must_use]
     pub fn with_fixed_orientation(mut self, fixed: bool) -> Self {
         self.fixed_orientation = fixed;
         self
@@ -178,6 +182,7 @@ impl Loft {
     }
 
     /// Set closed mode
+    #[must_use]
     pub fn with_closed(mut self, closed: bool) -> Self {
         self.closed = closed;
         self
@@ -185,20 +190,15 @@ impl Loft {
 }
 
 /// Edge selection for fillet/chamfer operations
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum EdgeSelection {
     /// Apply to all edges
+    #[default]
     All,
     /// Apply to specific edge indices
     Indices(Vec<usize>),
     /// Apply to edges matching a filter (e.g., "concave", "convex")
     Filter(String),
-}
-
-impl Default for EdgeSelection {
-    fn default() -> Self {
-        EdgeSelection::All
-    }
 }
 
 /// A fillet operation - round edges
@@ -221,6 +221,7 @@ impl Fillet {
     }
 
     /// Apply to specific edges
+    #[must_use]
     pub fn with_edges(mut self, edges: EdgeSelection) -> Self {
         self.edges = edges;
         self
@@ -260,6 +261,7 @@ impl Chamfer {
     }
 
     /// Apply to specific edges
+    #[must_use]
     pub fn with_edges(mut self, edges: EdgeSelection) -> Self {
         self.edges = edges;
         self

@@ -39,7 +39,10 @@ use super::error::{FeatureError, Result};
 /// assert_eq!(evaluator::evaluate("width + height", &vars).unwrap(), 150.0);
 /// assert_eq!(evaluator::evaluate("math.sqrt(width)", &vars).unwrap(), 10.0);
 /// ```
-pub fn evaluate(expr: &str, variables: &HashMap<String, f64>) -> Result<f64> {
+pub fn evaluate<S: ::std::hash::BuildHasher>(
+    expr: &str,
+    variables: &HashMap<String, f64, S>,
+) -> Result<f64> {
     // Build globals with math functions in a `math` namespace
     let globals = GlobalsBuilder::standard()
         .with_struct("math", math_functions)

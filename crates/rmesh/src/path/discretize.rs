@@ -116,7 +116,7 @@ pub fn discretize_ellipse_2d(
     };
 
     // Use average radius for segment count calculation
-    let avg_radius = (ellipse.major + ellipse.minor) / 2.0;
+    let avg_radius = f64::midpoint(ellipse.major, ellipse.minor);
     if avg_radius < 1e-10 {
         // Degenerate ellipse - return center point
         return vec![center, center];
@@ -124,6 +124,7 @@ pub fn discretize_ellipse_2d(
     let max_angle_step = (8.0 * tolerance / avg_radius)
         .sqrt()
         .min(std::f64::consts::FRAC_PI_4);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let num_segments = (std::f64::consts::TAU / max_angle_step).ceil() as usize;
     let num_segments = num_segments.max(8);
 
@@ -291,6 +292,7 @@ pub fn discretize_arc_3d(arc: &Arc3, vertices: &[Point3<f64>], tolerance: f64) -
     let max_angle_step = (8.0 * tolerance / radius)
         .sqrt()
         .min(std::f64::consts::FRAC_PI_4);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let num_segments = (sweep.abs() / max_angle_step).ceil() as usize;
     let num_segments = num_segments.max(1);
     let angle_step = sweep / num_segments as f64;
@@ -327,6 +329,7 @@ pub fn discretize_circle_3d(
     let max_angle_step = (8.0 * tolerance / circle.radius)
         .sqrt()
         .min(std::f64::consts::FRAC_PI_4);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let num_segments = (std::f64::consts::TAU / max_angle_step).ceil() as usize;
     let num_segments = num_segments.max(8);
     let angle_step = std::f64::consts::TAU / num_segments as f64;
@@ -431,6 +434,7 @@ fn discretize_arc_internal(
     let max_angle_step = (8.0 * tolerance / radius)
         .sqrt()
         .min(std::f64::consts::FRAC_PI_4);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let num_segments = (sweep.abs() / max_angle_step).ceil() as usize;
     let num_segments = num_segments.max(1);
 
@@ -556,11 +560,15 @@ fn discretize_quadratic_recursive_3d(
 // =============================================================================
 
 fn midpoint_2d(a: Point2<f64>, b: Point2<f64>) -> Point2<f64> {
-    Point2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+    Point2::new(f64::midpoint(a.x, b.x), f64::midpoint(a.y, b.y))
 }
 
 fn midpoint_3d(a: Point3<f64>, b: Point3<f64>) -> Point3<f64> {
-    Point3::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0)
+    Point3::new(
+        f64::midpoint(a.x, b.x),
+        f64::midpoint(a.y, b.y),
+        f64::midpoint(a.z, b.z),
+    )
 }
 
 fn point_to_line_distance_2d(
@@ -604,6 +612,7 @@ fn estimate_bspline_samples(points: &[Point2<f64>], tolerance: f64) -> usize {
         .map(|w| ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt())
         .sum();
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let samples = (polygon_length / tolerance).ceil() as usize;
     samples.clamp(points.len(), 1000)
 }
@@ -611,6 +620,7 @@ fn estimate_bspline_samples(points: &[Point2<f64>], tolerance: f64) -> usize {
 fn estimate_bspline_samples_3d(points: &[Point3<f64>], tolerance: f64) -> usize {
     let polygon_length: f64 = points.windows(2).map(|w| (w[1] - w[0]).norm()).sum();
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let samples = (polygon_length / tolerance).ceil() as usize;
     samples.clamp(points.len(), 1000)
 }
@@ -662,7 +672,11 @@ fn evaluate_bspline_3d(points: &[Point3<f64>], degree: u8, t: f64) -> Point3<f64
 
 /// Bernstein polynomial basis function
 fn bernstein(n: usize, i: usize, t: f64) -> f64 {
-    binomial(n, i) * t.powi(i as i32) * (1.0 - t).powi((n - i) as i32)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let exp_i = i as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let exp_ni = (n - i) as i32;
+    binomial(n, i) * t.powi(exp_i) * (1.0 - t).powi(exp_ni)
 }
 
 /// Binomial coefficient C(n, k)

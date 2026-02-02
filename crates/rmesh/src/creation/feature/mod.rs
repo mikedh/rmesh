@@ -76,30 +76,35 @@ impl FeatureModel {
     }
 
     /// Set the units
+    #[must_use]
     pub fn with_units(mut self, units: Units) -> Self {
         self.environment.units = units;
         self
     }
 
     /// Add a variable
+    #[must_use]
     pub fn with_variable(mut self, name: impl Into<String>, value: f64) -> Self {
         self.environment.variables.insert(name.into(), value);
         self
     }
 
     /// Add an equation
+    #[must_use]
     pub fn with_equation(mut self, name: impl Into<String>, expr: impl Into<String>) -> Self {
         self.environment.equations.insert(name.into(), expr.into());
         self
     }
 
     /// Add an operation
+    #[must_use]
     pub fn with_operation(mut self, op: impl Into<Operation>) -> Self {
         self.operations.push(op.into());
         self
     }
 
     /// Add multiple operations
+    #[must_use]
     pub fn with_operations(mut self, ops: impl IntoIterator<Item = Operation>) -> Self {
         self.operations.extend(ops);
         self

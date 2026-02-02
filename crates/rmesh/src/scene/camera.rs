@@ -87,6 +87,7 @@ impl Camera {
             } => {
                 let aspect = aspect.unwrap_or(viewport_aspect);
                 let f = 1.0 / (fov_y / 2.0).tan();
+                // wgpu uses [0, 1] depth range (not OpenGL's [-1, 1])
                 let nf = 1.0 / (znear - zfar);
 
                 Matrix4::new(
@@ -100,8 +101,8 @@ impl Camera {
                     0.0,
                     0.0,
                     0.0,
-                    (zfar + znear) * nf,
-                    2.0 * zfar * znear * nf,
+                    zfar * nf,
+                    znear * zfar * nf,
                     0.0,
                     0.0,
                     -1.0,
@@ -114,6 +115,7 @@ impl Camera {
                 znear,
                 zfar,
             } => {
+                // wgpu uses [0, 1] depth range (not OpenGL's [-1, 1])
                 let nf = 1.0 / (znear - zfar);
 
                 Matrix4::new(
@@ -127,8 +129,8 @@ impl Camera {
                     0.0,
                     0.0,
                     0.0,
-                    2.0 * nf,
-                    (zfar + znear) * nf,
+                    nf,
+                    znear * nf,
                     0.0,
                     0.0,
                     0.0,

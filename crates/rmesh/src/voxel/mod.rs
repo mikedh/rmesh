@@ -84,11 +84,13 @@ impl VoxelGrid {
         let longest = extent.x.max(extent.y).max(extent.z);
 
         // Grid sizing: target dim along longest axis
-        let target_dim = 32_u32.max(((resolution as f64).cbrt() * 1.5) as u32);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let target_dim = 32_u32.max((f64::from(resolution).cbrt() * 1.5) as u32);
         // Clamp to 1023 since we pack coords into 10 bits in JFA shaders
         let target_dim = target_dim.min(1023);
         let scale = longest / f64::from(target_dim);
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let dims = [
             2.max((extent.x / scale).ceil() as u32 + 2),
             2.max((extent.y / scale).ceil() as u32 + 2),
@@ -100,7 +102,7 @@ impl VoxelGrid {
         // Offset origin by one voxel for boundary padding
         let origin = Point3::new(aabb_min.x - scale, aabb_min.y - scale, aabb_min.z - scale);
 
-        let total_voxels = dims[0] as u64 * dims[1] as u64 * dims[2] as u64;
+        let total_voxels = u64::from(dims[0]) * u64::from(dims[1]) * u64::from(dims[2]);
 
         // Create grid buffer (initialized to 0 = Undefined)
         let grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -152,7 +154,7 @@ impl VoxelGrid {
 
     /// Total number of voxels.
     pub fn total_voxels(&self) -> u64 {
-        self.dims[0] as u64 * self.dims[1] as u64 * self.dims[2] as u64
+        u64::from(self.dims[0]) * u64::from(self.dims[1]) * u64::from(self.dims[2])
     }
 
     /// Reference to the underlying GPU grid buffer.
@@ -220,6 +222,7 @@ impl VoxelGrid {
     }
 
     /// Convert world-space point to voxel coordinates (clamped to grid).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn world_to_voxel(&self, p: &Point3<f64>) -> [u32; 3] {
         let inv = 1.0 / self.scale;
         [
@@ -240,8 +243,8 @@ impl VoxelGrid {
     /// Returns `(volume, area)` in world-space units (cubed / squared).
     pub fn measure(&self) -> (f64, f64) {
         let (filled, faces) = self.run_measure_shader();
-        let volume = filled as f64 * self.scale.powi(3);
-        let area = faces as f64 * self.scale.powi(2);
+        let volume = f64::from(filled) * self.scale.powi(3);
+        let area = f64::from(faces) * self.scale.powi(2);
         (volume, area)
     }
 
@@ -263,15 +266,19 @@ impl VoxelGrid {
         }
 
         // Pack triangles as 9 f32 per triangle
-        let mut tri_data: Vec<f32> = Vec::with_capacity(faces.len() * 9);
-        for &[i0, i1, i2] in faces {
-            for &vi in &[i0, i1, i2] {
-                let v = &vertices[vi];
-                tri_data.push(v.x as f32);
-                tri_data.push(v.y as f32);
-                tri_data.push(v.z as f32);
+        #[allow(clippy::cast_possible_truncation)]
+        let tri_data: Vec<f32> = {
+            let mut data = Vec::with_capacity(faces.len() * 9);
+            for &[i0, i1, i2] in faces {
+                for &vi in &[i0, i1, i2] {
+                    let v = &vertices[vi];
+                    data.push(v.x as f32);
+                    data.push(v.y as f32);
+                    data.push(v.z as f32);
+                }
             }
-        }
+            data
+        };
 
         let tri_buffer = self
             .device
@@ -291,6 +298,7 @@ impl VoxelGrid {
             scale: f32,
         }
 
+        #[allow(clippy::cast_possible_truncation)]
         let params = VoxelizeParams {
             dims: self.dims,
             num_triangles: faces.len() as u32,
@@ -329,7 +337,7 @@ impl VoxelGrid {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("voxelize_pl"),
                 bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let pipeline = self
@@ -375,6 +383,7 @@ impl VoxelGrid {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
+            #[allow(clippy::cast_possible_truncation)]
             let workgroups = (faces.len() as u32).div_ceil(64);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
@@ -449,7 +458,7 @@ impl VoxelGrid {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("flood_pl"),
                 bind_group_layouts: &[&bgl],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let pipeline = self
@@ -548,7 +557,12 @@ impl VoxelGrid {
             let changed = {
                 let slice = readback.slice(..);
                 slice.map_async(wgpu::MapMode::Read, |_| {});
-                self.device.poll(wgpu::Maintain::Wait);
+                self.device
+                    .poll(wgpu::PollType::Wait {
+                        timeout: None,
+                        submission_index: None,
+                    })
+                    .ok();
                 let data = slice.get_mapped_range();
                 let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 drop(data);
@@ -646,14 +660,9 @@ impl VoxelGrid {
                     // Count intersections
                     let mut count = 0u32;
                     let mut origin = center;
-                    loop {
-                        match bvh.trace_ray(&origin, &dir, vertices, faces) {
-                            Some(hit) => {
-                                count += 1;
-                                origin = hit.point + dir * 1e-8;
-                            }
-                            None => break,
-                        }
+                    while let Some(hit) = bvh.trace_ray(&origin, &dir, vertices, faces) {
+                        count += 1;
+                        origin = hit.point + dir * 1e-8;
                     }
 
                     result[idx] = if count % 2 == 1 { 2 } else { 3 }; // Inside or Outside
@@ -737,7 +746,7 @@ impl VoxelGrid {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("measure_pl"),
                 bind_group_layouts: &[&bgl],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let pipeline = self
@@ -802,7 +811,12 @@ impl VoxelGrid {
 
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device
+            .poll(wgpu::PollType::Wait {
+                timeout: None,
+                submission_index: None,
+            })
+            .ok();
         let data = slice.get_mapped_range();
         let filled = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let faces = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
@@ -878,7 +892,7 @@ impl VoxelGrid {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("jfa_init_pl"),
                 bind_group_layouts: &[&init_bgl],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let init_pipeline = self
@@ -938,7 +952,7 @@ impl VoxelGrid {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("jfa_pl"),
                 bind_group_layouts: &[&jfa_bgl],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let jfa_pipeline = self
@@ -960,6 +974,7 @@ impl VoxelGrid {
             scale: f32,
         }
 
+        #[allow(clippy::cast_possible_truncation)]
         let dist_params = DistParams {
             dims: self.dims,
             scale: self.scale as f32,
@@ -993,7 +1008,7 @@ impl VoxelGrid {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("dist_pl"),
                 bind_group_layouts: &[&dist_bgl],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let dist_pipeline = self
@@ -1152,7 +1167,12 @@ impl VoxelGrid {
 
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device
+            .poll(wgpu::PollType::Wait {
+                timeout: None,
+                submission_index: None,
+            })
+            .ok();
 
         let data = slice.get_mapped_range();
         let result = data.to_vec();
@@ -1173,6 +1193,7 @@ impl VoxelGrid {
                 let x = idx % dx;
                 let y = (idx / dx) % dy;
                 let z = idx / (dx * dy);
+                #[allow(clippy::cast_possible_truncation)]
                 result.push([x as u32, y as u32, z as u32]);
             }
         }
@@ -1248,17 +1269,17 @@ pub fn request_device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
-    }))?;
+    }))
+    .ok()?;
 
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("rmesh_compute"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::default(),
-        },
-        None,
-    ))
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("rmesh_compute"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        memory_hints: wgpu::MemoryHints::default(),
+        experimental_features: wgpu::ExperimentalFeatures::default(),
+        trace: wgpu::Trace::Off,
+    }))
     .ok()?;
 
     Some((Arc::new(device), Arc::new(queue)))

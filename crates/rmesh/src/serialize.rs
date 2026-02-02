@@ -49,7 +49,9 @@ const UNIT_EPSILON: f64 = 1e-10;
 /// Use with `#[serde(with = "crate::serialize::unit_vector3")]` on fields.
 /// Returns a serde error instead of panicking if the vector is zero.
 pub mod unit_vector3 {
-    use super::*;
+    use super::{
+        Deserialize, Deserializer, Result, Serialize, Serializer, UNIT_EPSILON, Unit, Vector3,
+    };
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Unit<Vector3<f64>>, D::Error>
     where
@@ -73,7 +75,10 @@ pub mod unit_vector3 {
 /// Use with `#[serde(with = "crate::serialize::unit_quaternion")]` on fields.
 /// Returns a serde error instead of panicking if the quaternion is zero.
 pub mod unit_quaternion {
-    use super::*;
+    use super::{
+        Deserialize, Deserializer, Quaternion, Result, Serialize, Serializer, UNIT_EPSILON,
+        UnitQuaternion,
+    };
 
     #[derive(Serialize, Deserialize)]
     struct QuatComponents {
@@ -275,6 +280,7 @@ fn validate_and_extract<'a>(
         ));
     }
     let compressed_data = &data[SerializationHeader::SIZE..];
+    #[allow(clippy::cast_possible_truncation)]
     if compressed_data.len() != header.compressed_length as usize {
         return Err(anyhow!(
             "Compressed data length mismatch: expected {}, got {}",
@@ -287,6 +293,7 @@ fn validate_and_extract<'a>(
 
 /// Verify decompressed data integrity (shared by sync/async paths)
 fn verify_decompressed(decompressed: &[u8], header: &SerializationHeader) -> Result<()> {
+    #[allow(clippy::cast_possible_truncation)]
     if decompressed.len() != header.uncompressed_length as usize {
         return Err(anyhow!(
             "Uncompressed length mismatch: expected {}, got {}",

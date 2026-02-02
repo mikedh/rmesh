@@ -45,21 +45,18 @@ pub fn parse_sldprt_bytes(data: &[u8]) -> Result<SldprtImport> {
     }
 
     // Find and decompress streams
-    let streams = find_streams(data)?;
+    let streams = find_streams(data);
 
     let mut operations = Vec::new();
     let mut warnings = Vec::new();
 
     // Get ResolvedFeatures stream for sketch geometry and feature data
-    let resolved_features = match streams.get("Contents/Config-0-ResolvedFeatures") {
-        Some(rf) => rf,
-        None => {
-            warnings.push("No ResolvedFeatures stream found".to_string());
-            return Ok(SldprtImport {
-                operations,
-                warnings,
-            });
-        }
+    let Some(resolved_features) = streams.get("Contents/Config-0-ResolvedFeatures") else {
+        warnings.push("No ResolvedFeatures stream found".to_string());
+        return Ok(SldprtImport {
+            operations,
+            warnings,
+        });
     };
 
     // Tokenize the ResolvedFeatures payload into segments
@@ -186,7 +183,7 @@ fn find_extrusion_depth(data: &[u8], feature_offset: usize, is_cut: bool) -> f64
     // Common extrusion depths in meters (converted from inches)
     // 3" = 0.0762m, 0.375" = 0.009525m, 1" = 0.0254m
     let expected_depths: Vec<f64> = if is_cut {
-        vec![0.009525, 0.00635, 0.0127, 0.0254, 0.003175] // 3/8", 1/4", 1/2", 1", 1/8"
+        vec![0.009_525, 0.006_35, 0.0127, 0.0254, 0.003_175] // 3/8", 1/4", 1/2", 1", 1/8"
     } else {
         vec![0.0762, 0.0508, 0.0254, 0.0127, 0.1016] // 3", 2", 1", 0.5", 4"
     };
@@ -194,14 +191,14 @@ fn find_extrusion_depth(data: &[u8], feature_offset: usize, is_cut: bool) -> f64
     // Scan linearly through the data, looking for any expected depth
     // Return the FIRST match (closest to the feature marker)
     for i in search_start..search_end {
-        if i + 8 <= data.len() {
-            if let Ok(bytes) = data[i..i + 8].try_into() {
-                let val: f64 = f64::from_le_bytes(bytes);
-                if val.is_finite() {
-                    for &target in &expected_depths {
-                        if (val - target).abs() < 0.0001 {
-                            return val;
-                        }
+        if i + 8 <= data.len()
+            && let Ok(bytes) = data[i..i + 8].try_into()
+        {
+            let val: f64 = f64::from_le_bytes(bytes);
+            if val.is_finite() {
+                for &target in &expected_depths {
+                    if (val - target).abs() < 0.0001 {
+                        return val;
                     }
                 }
             }
@@ -209,11 +206,11 @@ fn find_extrusion_depth(data: &[u8], feature_offset: usize, is_cut: bool) -> f64
     }
 
     // Default depths if not found
-    if is_cut { 0.009525 } else { 0.0762 }
+    if is_cut { 0.009_525 } else { 0.0762 }
 }
 
 /// Find and decompress all streams in an SLDPRT file
-fn find_streams(data: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
+fn find_streams(data: &[u8]) -> HashMap<String, Vec<u8>> {
     let mut streams = HashMap::new();
     let mut offset = 0;
 
@@ -260,12 +257,11 @@ fn find_streams(data: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
 
             // Find and decompress DEFLATE data
             let data_start = name_start + name_len;
-            if data_start + comp_size <= data.len() {
-                if let Ok(decompressed) =
+            if data_start + comp_size <= data.len()
+                && let Ok(decompressed) =
                     decompress_deflate(&data[data_start..data_start + comp_size])
-                {
-                    streams.insert(stream_name.clone(), decompressed);
-                }
+            {
+                streams.insert(stream_name.clone(), decompressed);
             }
 
             offset = data_start + comp_size;
@@ -274,7 +270,7 @@ fn find_streams(data: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
         }
     }
 
-    Ok(streams)
+    streams
 }
 
 /// Find pattern in data
@@ -288,7 +284,7 @@ fn decode_stream_name(data: &[u8]) -> String {
         .take_while(|&&b| b != 0)
         .map(|&b| {
             let decoded = ((b & 0x0F) << 4) | ((b & 0xF0) >> 4);
-            if decoded >= 32 && decoded < 127 {
+            if (32..127).contains(&decoded) {
                 decoded as char
             } else {
                 '?'

@@ -105,6 +105,25 @@ pub struct PBRMaterial {
     pub double_sided: bool,
 }
 
+impl SimpleMaterial {
+    /// Convert to a PBR material, mapping diffuse → base_color.
+    pub fn to_pbr(&self) -> PBRMaterial {
+        let d = self.diffuse.unwrap_or(Vector3::new(0.4, 0.4, 0.4));
+        let a = self.alpha.unwrap_or(1.0);
+        let roughness = self
+            .shininess
+            .map_or(0.5, |s| 1.0 - (s / 100.0).clamp(0.0, 1.0));
+        PBRMaterial {
+            name: self.name.clone(),
+            base_color_factor: Vector4::new(d.x, d.y, d.z, a),
+            base_color_texture: self.diffuse_texture.clone(),
+            metallic_factor: 0.0,
+            roughness_factor: roughness,
+            ..PBRMaterial::new()
+        }
+    }
+}
+
 impl PBRMaterial {
     /// Create a new PBRMaterial with default values matching glTF spec.
     pub fn new() -> Self {
@@ -135,7 +154,7 @@ pub struct EmptyMaterial {}
 pub enum Material {
     Empty(EmptyMaterial),
     Simple(SimpleMaterial),
-    PBR(PBRMaterial),
+    PBR(Box<PBRMaterial>),
 }
 
 impl Material {
@@ -145,6 +164,15 @@ impl Material {
             Material::Empty(_) => "",
             Material::Simple(m) => &m.name,
             Material::PBR(m) => &m.name,
+        }
+    }
+
+    /// Convert any material variant to PBR.
+    pub fn to_pbr(&self) -> PBRMaterial {
+        match self {
+            Material::Empty(_) => PBRMaterial::new(),
+            Material::Simple(m) => m.to_pbr(),
+            Material::PBR(m) => m.as_ref().clone(),
         }
     }
 }

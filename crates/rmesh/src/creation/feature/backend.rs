@@ -66,6 +66,7 @@ impl DefaultSettings {
     }
 
     /// Set explicit bounds for mesh generation
+    #[must_use]
     pub fn with_bounds(mut self, min: [f64; 3], max: [f64; 3]) -> Self {
         self.bounds = Some((min, max));
         self

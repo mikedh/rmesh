@@ -83,6 +83,7 @@ impl TriangleBvh {
             })
             .collect();
 
+        #[allow(clippy::cast_possible_truncation)]
         let mut tri_indices: Vec<u32> = (0..faces.len() as u32).collect();
         let mut nodes = Vec::with_capacity(2 * faces.len());
 
@@ -236,14 +237,16 @@ impl TriangleBvh {
                             &vertices[i0],
                             &vertices[i1],
                             &vertices[i2],
-                        ) {
-                            if t > 0.0 && best.as_ref().map_or(true, |b| t < b.t) {
-                                best = Some(RayHit {
-                                    t,
-                                    face_index: fi as u32,
-                                    point: Point3::from(origin.coords + direction * t),
-                                });
-                            }
+                        ) && t > 0.0
+                            && best.as_ref().is_none_or(|b| t < b.t)
+                        {
+                            #[allow(clippy::cast_possible_truncation)]
+                            let face_idx = fi as u32;
+                            best = Some(RayHit {
+                                t,
+                                face_index: face_idx,
+                                point: Point3::from(origin.coords + direction * t),
+                            });
                         }
                     }
                 }
@@ -299,9 +302,11 @@ impl TriangleBvh {
                         let d2 = (query - cp).norm_squared();
                         if d2 < best_dist_sq {
                             best_dist_sq = d2;
+                            #[allow(clippy::cast_possible_truncation)]
+                            let face_idx = fi as u32;
                             best = Some(ClosestHit {
                                 distance_squared: d2,
-                                face_index: fi as u32,
+                                face_index: face_idx,
                                 point: cp,
                             });
                         }
@@ -412,6 +417,7 @@ impl TriangleBvh {
     ///
     /// Returns `(nodes, tri_indices)` suitable for uploading to a WGPU storage buffer.
     /// Node layout uses the MSB of `right_child_or_tri_count` as a leaf flag.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn to_gpu(&self) -> (Vec<GpuBvhNode>, Vec<u32>) {
         let gpu_nodes: Vec<GpuBvhNode> = self
             .nodes

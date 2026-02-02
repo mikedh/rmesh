@@ -90,11 +90,13 @@ pub enum PyUnits {
 #[pymethods]
 impl PyUnits {
     /// Conversion factor from this unit to meters.
+    #[allow(clippy::wrong_self_convention)]
     fn to_meters(&self) -> f64 {
         self.to_rust().to_meters()
     }
 
     /// Conversion factor from meters to this unit.
+    #[allow(clippy::wrong_self_convention)]
     fn from_meters(&self) -> f64 {
         self.to_rust().from_meters()
     }
@@ -116,6 +118,7 @@ impl PyUnits {
 }
 
 impl PyUnits {
+    #[allow(clippy::wrong_self_convention)]
     fn to_rust(&self) -> Units {
         match self {
             PyUnits::Meters => Units::Meters,
@@ -331,9 +334,8 @@ impl PySketchPlane {
 /// SketchPlane
 ///     A plane parallel to XY at the given Z height.
 #[pyfunction]
-#[pyo3(signature = (z=0.0))]
-#[allow(non_snake_case)]
-fn XY(z: f64) -> PySketchPlane {
+#[pyo3(name = "XY", signature = (z=0.0))]
+fn xy(z: f64) -> PySketchPlane {
     PySketchPlane {
         inner: SketchPlane::at_z(z),
     }
@@ -351,9 +353,8 @@ fn XY(z: f64) -> PySketchPlane {
 /// SketchPlane
 ///     A plane parallel to XZ at the given Y position.
 #[pyfunction]
-#[pyo3(signature = (y=0.0))]
-#[allow(non_snake_case)]
-fn XZ(y: f64) -> PySketchPlane {
+#[pyo3(name = "XZ", signature = (y=0.0))]
+fn xz(y: f64) -> PySketchPlane {
     let mut plane = SketchPlane::xz();
     plane.origin.y = y;
     PySketchPlane { inner: plane }
@@ -371,9 +372,8 @@ fn XZ(y: f64) -> PySketchPlane {
 /// SketchPlane
 ///     A plane parallel to YZ at the given X position.
 #[pyfunction]
-#[pyo3(signature = (x=0.0))]
-#[allow(non_snake_case)]
-fn YZ(x: f64) -> PySketchPlane {
+#[pyo3(name = "YZ", signature = (x=0.0))]
+fn yz(x: f64) -> PySketchPlane {
     let mut plane = SketchPlane::yz();
     plane.origin.x = x;
     PySketchPlane { inner: plane }
@@ -1198,9 +1198,9 @@ pub fn register_feature_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     feature.add_class::<PyChamfer>()?;
 
     // Plane helpers (flattened, no submodule)
-    feature.add_function(wrap_pyfunction!(XY, &feature)?)?;
-    feature.add_function(wrap_pyfunction!(XZ, &feature)?)?;
-    feature.add_function(wrap_pyfunction!(YZ, &feature)?)?;
+    feature.add_function(wrap_pyfunction!(xy, &feature)?)?;
+    feature.add_function(wrap_pyfunction!(xz, &feature)?)?;
+    feature.add_function(wrap_pyfunction!(yz, &feature)?)?;
 
     parent.add_submodule(&feature)?;
 

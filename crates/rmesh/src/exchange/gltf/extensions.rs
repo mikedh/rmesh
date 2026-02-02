@@ -104,6 +104,7 @@ impl ExtensionRegistry {
 
 /// Handle KHR_materials_pbrSpecularGlossiness extension.
 /// Converts specular-glossiness to metallic-roughness approximation.
+#[allow(clippy::unnecessary_wraps)] // must match Handler type signature
 fn handle_pbr_specular_glossiness(_context: &mut ExtensionContext) -> Result<Option<Value>> {
     // For now, just acknowledge the extension without conversion
     // A full implementation would convert specular-glossiness parameters
@@ -113,6 +114,7 @@ fn handle_pbr_specular_glossiness(_context: &mut ExtensionContext) -> Result<Opt
 
 /// Handle EXT_texture_webp extension.
 /// Returns the WebP texture source index.
+#[allow(clippy::unnecessary_wraps)] // must match Handler type signature
 fn handle_texture_webp(context: &mut ExtensionContext) -> Result<Option<Value>> {
     // The extension data contains { "source": index }
     if let Some(source) = context.data.get("source") {
