@@ -16,6 +16,7 @@ pub mod schemas;
 pub mod serialize;
 pub mod simplify;
 pub mod subdivide;
+pub mod formatting;
 pub mod timer;
 pub mod triangles;
 #[cfg(feature = "wgpu")]

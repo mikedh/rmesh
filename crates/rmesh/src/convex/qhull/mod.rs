@@ -6,6 +6,10 @@ use anyhow::{Result, bail};
 use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 
+/// Minimum item count before using rayon parallelism.
+/// Below this threshold the rayon scheduling overhead exceeds the gain.
+const RAYON_THRESHOLD: usize = 512;
+
 /// Entry in the active-facet max-heap, keyed on `furthest_dist`.
 #[derive(Clone, Copy)]
 struct ActiveEntry {
@@ -124,6 +128,27 @@ struct QHull<'a> {
 }
 
 impl<'a> QHull<'a> {
+    fn new(points: &'a [Point3<f64>]) -> Self {
+        let n = points.len();
+        Self {
+            points,
+            facets: Vec::new(),
+            free_list: Vec::new(),
+            tolerances: Tolerances::from_points(points),
+            interior: Point3::origin(),
+            active: BinaryHeap::with_capacity(64),
+            visible: Vec::with_capacity(64),
+            horizon: Vec::with_capacity(64),
+            queue: Vec::with_capacity(64),
+            orphans: Vec::with_capacity(n / 4),
+            new_face_indices: Vec::with_capacity(32),
+            planes_buf: Vec::with_capacity(32),
+            edge_map: AHashMap::with_capacity(32),
+            vis_stamps: Vec::with_capacity(n * 2),
+            vis_gen: 0,
+        }
+    }
+
     /// Find 4 maximally-spread non-coplanar points.
     fn build_initial_simplex(&self) -> Result<(usize, usize, usize, usize)> {
         let points = self.points;
@@ -293,29 +318,32 @@ impl<'a> QHull<'a> {
         let simplex = [i0, i1, i2, i3];
         let num_facets = self.facets.len();
 
-        // Parallel: compute best facet assignment for each point
-        let assignments: Vec<(usize, usize, f64)> = self
-            .points
-            .par_iter()
-            .enumerate()
-            .filter(|(i, _)| !simplex.contains(i))
-            .filter_map(|(point_index, point)| {
-                let mut best_face = 0;
-                let mut best_dist = f64::NEG_INFINITY;
-                for face_index in 0..num_facets {
-                    let dist = self.facets[face_index].distance(point);
-                    if dist > best_dist {
-                        best_dist = dist;
-                        best_face = face_index;
-                    }
+        // Compute best facet assignment for each point
+        let classify = |(point_index, point): (usize, &Point3<f64>)| -> Option<(usize, usize, f64)> {
+            if simplex.contains(&point_index) {
+                return None;
+            }
+            let mut best_face = 0;
+            let mut best_dist = f64::NEG_INFINITY;
+            for face_index in 0..num_facets {
+                let dist = self.facets[face_index].distance(point);
+                if dist > best_dist {
+                    best_dist = dist;
+                    best_face = face_index;
                 }
-                if best_dist > self.tolerances.outside_threshold {
-                    Some((point_index, best_face, best_dist))
-                } else {
-                    None
-                }
-            })
-            .collect();
+            }
+            if best_dist > self.tolerances.outside_threshold {
+                Some((point_index, best_face, best_dist))
+            } else {
+                None
+            }
+        };
+
+        let assignments: Vec<(usize, usize, f64)> = if self.points.len() >= RAYON_THRESHOLD {
+            self.points.par_iter().enumerate().filter_map(classify).collect()
+        } else {
+            self.points.iter().enumerate().filter_map(classify).collect()
+        };
 
         // Sequential: distribute into outside sets, keeping furthest at index 0
         for (point_index, face_index, dist) in assignments {
@@ -330,10 +358,10 @@ impl<'a> QHull<'a> {
 
         // Populate the active heap with facets that received outside points.
         self.active.clear();
-        for i in 0..self.facets.len() {
-            if !self.facets[i].outside.is_empty() {
+        for (i, facet) in self.facets.iter().enumerate() {
+            if !facet.outside.is_empty() {
                 self.active.push(ActiveEntry {
-                    dist: self.facets[i].furthest_dist,
+                    dist: facet.furthest_dist,
                     facet_index: i,
                 });
             }
@@ -532,7 +560,6 @@ impl<'a> QHull<'a> {
         for vi in 0..self.visible.len() {
             let face_index = self.visible[vi];
             self.facets[face_index].removed = true;
-            self.facets[face_index].outside.clear();
             self.free_list.push(face_index);
         }
         // No need to filter the active heap: lazy deletion in build_hull
@@ -550,6 +577,18 @@ impl<'a> QHull<'a> {
                     facet_index: idx,
                 });
             }
+        }
+    }
+
+    /// Assign a point to a new cone facet's outside set, keeping the furthest at index 0.
+    fn assign_to_facet(&mut self, local_face_idx: usize, point_index: usize, dist: f64) {
+        let face_index = self.new_face_indices[local_face_idx];
+        let facet = &mut self.facets[face_index];
+        facet.outside.push(point_index);
+        if dist > facet.furthest_dist {
+            facet.furthest_dist = dist;
+            let last = facet.outside.len() - 1;
+            facet.outside.swap(0, last);
         }
     }
 
@@ -574,7 +613,7 @@ impl<'a> QHull<'a> {
         let points = self.points;
         let threshold = self.tolerances.outside_threshold;
 
-        if self.orphans.len() > 256 {
+        if self.orphans.len() >= RAYON_THRESHOLD {
             // Parallel path: compute assignments via rayon, then apply sequentially.
             // Move planes_buf to a local so the closure can capture it without
             // borrowing all of `self`.
@@ -604,14 +643,7 @@ impl<'a> QHull<'a> {
 
             // Sequential: distribute into outside sets
             for (point_index, best_fi, best_dist) in assignments {
-                let face_index = self.new_face_indices[best_fi];
-                let facet = &mut self.facets[face_index];
-                facet.outside.push(point_index);
-                if best_dist > facet.furthest_dist {
-                    facet.furthest_dist = best_dist;
-                    let last = facet.outside.len() - 1;
-                    facet.outside.swap(0, last);
-                }
+                self.assign_to_facet(best_fi, point_index, best_dist);
             }
         } else {
             // Sequential path for small orphan counts
@@ -630,14 +662,7 @@ impl<'a> QHull<'a> {
                 }
 
                 if best_dist > threshold {
-                    let face_index = self.new_face_indices[best_face_idx];
-                    let facet = &mut self.facets[face_index];
-                    facet.outside.push(point_index);
-                    if best_dist > facet.furthest_dist {
-                        facet.furthest_dist = best_dist;
-                        let last = facet.outside.len() - 1;
-                        facet.outside.swap(0, last);
-                    }
+                    self.assign_to_facet(best_face_idx, point_index, best_dist);
                 }
             }
         }
@@ -655,15 +680,19 @@ impl<'a> QHull<'a> {
         // Safety belt: verify each face normal points away from the interior point.
         // self.interior is the centroid of the initial simplex, guaranteed strictly inside.
         let center = self.interior;
-        faces.par_iter_mut().for_each(|face| {
+        let fix_winding = |face: &mut [usize; 3]| {
             let [a, b, c] = *face;
             let normal =
                 (self.points[b] - self.points[a]).cross(&(self.points[c] - self.points[a]));
-            // Any hull vertex is on the surface; vector from interior to it aligns with outward normal
             if normal.dot(&(self.points[a] - center)) < 0.0 {
                 face.swap(1, 2);
             }
-        });
+        };
+        if faces.len() >= RAYON_THRESHOLD {
+            faces.par_iter_mut().for_each(fix_winding);
+        } else {
+            faces.iter_mut().for_each(fix_winding);
+        }
 
         faces
     }
@@ -684,54 +713,18 @@ pub fn convex_hull_3d(points: &[Point3<f64>]) -> Result<Vec<[usize; 3]>> {
         bail!("convex_hull_3d requires at least 4 points");
     }
 
-    let mut timer = crate::timer::Timer::new(&format!("convex_hull_3d ({} points)", points.len()));
-
-    let tolerances = Tolerances::from_points(points);
-    let n = points.len();
-    let mut hull = QHull {
-        points,
-        facets: Vec::new(),
-        free_list: Vec::new(),
-        tolerances,
-        interior: Point3::origin(),
-        active: BinaryHeap::with_capacity(64),
-        visible: Vec::with_capacity(64),
-        horizon: Vec::with_capacity(64),
-        queue: Vec::with_capacity(64),
-        orphans: Vec::with_capacity(n / 4),
-        new_face_indices: Vec::with_capacity(32),
-        planes_buf: Vec::with_capacity(32),
-        edge_map: AHashMap::with_capacity(32),
-        vis_stamps: Vec::with_capacity(n * 2),
-        vis_gen: 0,
-    };
-
+    let mut hull = QHull::new(points);
     let (i0, i1, i2, i3) = hull.build_initial_simplex()?;
-    timer.record("initial simplex");
-
     hull.create_initial_tetrahedron(i0, i1, i2, i3);
     hull.initial_partition(i0, i1, i2, i3);
-    timer.record("tetrahedron + partition");
-
     hull.build_hull();
-    timer.record(&format!(
-        "build hull ({} facets)",
-        hull.facets.iter().filter(|f| !f.removed).count()
-    ));
-
     let faces = hull.to_result();
-    timer.record(&format!("extract {} faces", faces.len()));
 
-    #[cfg(test)]
-    {
-        assert!(
-            super::is_hull_valid_3d(points, &faces),
-            "convex_hull_3d: internal validation failed — a point is outside the hull"
-        );
-        timer.record("validation");
-    }
-
-    timer.print_conditionally();
+    #[cfg(all(test, not(feature = "bench")))]
+    assert!(
+        super::is_hull_valid_3d(points, &faces),
+        "convex_hull_3d: internal validation failed"
+    );
 
     Ok(faces)
 }
@@ -739,14 +732,10 @@ pub fn convex_hull_3d(points: &[Point3<f64>]) -> Result<Vec<[usize; 3]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::convex::{convex_hull_2d, is_hull_valid_3d};
+    use crate::convex::convex_hull_2d;
     use crate::creation::create_box;
     use crate::mesh::Trimesh;
     use nalgebra::Point2;
-
-    fn p(x: f64, y: f64, z: f64) -> Point3<f64> {
-        Point3::new(x, y, z)
-    }
 
     /// Drop Z to produce 2D points.
     fn to_2d(pts: &[Point3<f64>]) -> Vec<Point2<f64>> {
@@ -812,10 +801,10 @@ mod tests {
     #[test]
     fn test_tetrahedron() {
         let pts = [
-            p(0.0, 0.0, 0.0),
-            p(1.0, 0.0, 0.0),
-            p(0.5, 1.0, 0.0),
-            p(0.5, 0.5, 1.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.5, 1.0, 0.0),
+            Point3::new(0.5, 0.5, 1.0),
         ];
         let faces = convex_hull_3d(&pts).unwrap();
         verify_hull(&pts, &faces);
@@ -826,9 +815,9 @@ mod tests {
     fn test_box_with_interior() {
         let mut pts = create_box(&[2.0, 2.0, 2.0]).vertices;
         // Add interior points
-        pts.push(p(0.0, 0.0, 0.0));
-        pts.push(p(0.1, 0.2, 0.3));
-        pts.push(p(-0.3, 0.1, -0.1));
+        pts.push(Point3::new(0.0, 0.0, 0.0));
+        pts.push(Point3::new(0.1, 0.2, 0.3));
+        pts.push(Point3::new(-0.3, 0.1, -0.1));
         let faces = convex_hull_3d(&pts).unwrap();
         verify_hull(&pts, &faces);
         assert_eq!(faces.len(), 12, "interior points shouldn't add faces");
@@ -873,7 +862,7 @@ mod tests {
         for i in 0..n {
             let theta = 2.0 * std::f64::consts::PI * i as f64 / golden;
             let phi = (1.0 - 2.0 * (i as f64 + 0.5) / n as f64).acos();
-            pts.push(p(
+            pts.push(Point3::new(
                 phi.sin() * theta.cos(),
                 phi.sin() * theta.sin(),
                 phi.cos(),
@@ -894,17 +883,21 @@ mod tests {
 
     #[test]
     fn test_error_too_few() {
-        let pts = [p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0)];
+        let pts = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
         assert!(convex_hull_3d(&pts).is_err());
     }
 
     #[test]
     fn test_error_coplanar() {
         let pts = [
-            p(0.0, 0.0, 0.0),
-            p(1.0, 0.0, 0.0),
-            p(0.0, 1.0, 0.0),
-            p(1.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
         ];
         assert!(convex_hull_3d(&pts).is_err());
     }
@@ -912,10 +905,10 @@ mod tests {
     #[test]
     fn test_error_collinear() {
         let pts = [
-            p(0.0, 0.0, 0.0),
-            p(1.0, 0.0, 0.0),
-            p(2.0, 0.0, 0.0),
-            p(3.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(3.0, 0.0, 0.0),
         ];
         assert!(convex_hull_3d(&pts).is_err());
     }
@@ -923,12 +916,12 @@ mod tests {
     #[test]
     fn test_duplicates() {
         let pts = [
-            p(0.0, 0.0, 0.0),
-            p(0.0, 0.0, 0.0),
-            p(1.0, 0.0, 0.0),
-            p(1.0, 0.0, 0.0),
-            p(0.0, 1.0, 0.0),
-            p(0.0, 0.0, 1.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
         ];
         let faces = convex_hull_3d(&pts).unwrap();
         verify_hull(&pts, &faces);
@@ -938,14 +931,14 @@ mod tests {
     fn test_large_coordinates() {
         let s = 1e6;
         let pts = [
-            p(s, s, s),
-            p(-s, s, s),
-            p(s, -s, s),
-            p(s, s, -s),
-            p(-s, -s, s),
-            p(-s, s, -s),
-            p(s, -s, -s),
-            p(-s, -s, -s),
+            Point3::new(s, s, s),
+            Point3::new(-s, s, s),
+            Point3::new(s, -s, s),
+            Point3::new(s, s, -s),
+            Point3::new(-s, -s, s),
+            Point3::new(-s, s, -s),
+            Point3::new(s, -s, -s),
+            Point3::new(-s, -s, -s),
         ];
         let faces = convex_hull_3d(&pts).unwrap();
         verify_hull(&pts, &faces);
@@ -956,14 +949,14 @@ mod tests {
     fn test_small_coordinates() {
         let s = 1e-6;
         let pts = [
-            p(s, s, s),
-            p(-s, s, s),
-            p(s, -s, s),
-            p(s, s, -s),
-            p(-s, -s, s),
-            p(-s, s, -s),
-            p(s, -s, -s),
-            p(-s, -s, -s),
+            Point3::new(s, s, s),
+            Point3::new(-s, s, s),
+            Point3::new(s, -s, s),
+            Point3::new(s, s, -s),
+            Point3::new(-s, -s, s),
+            Point3::new(-s, s, -s),
+            Point3::new(s, -s, -s),
+            Point3::new(-s, -s, -s),
         ];
         let faces = convex_hull_3d(&pts).unwrap();
         verify_hull(&pts, &faces);
@@ -1004,7 +997,7 @@ mod tests {
             let n = 10 + (trial % 491); // 10-500 points
             let pts: Vec<Point3<f64>> = (0..n)
                 .map(|_| {
-                    p(
+                    Point3::new(
                         rng.next_range(-1.0, 1.0),
                         rng.next_range(-1.0, 1.0),
                         rng.next_range(-1.0, 1.0),
@@ -1037,7 +1030,7 @@ mod tests {
                         let z = rng.next_range(-1.0, 1.0);
                         let r = (x * x + y * y + z * z).sqrt();
                         if r > 0.01 {
-                            return p(x / r, y / r, z / r);
+                            return Point3::new(x / r, y / r, z / r);
                         }
                     }
                 })
@@ -1076,14 +1069,14 @@ mod tests {
         let mut rng = Lcg::new(54321);
         // Cluster centers at cube corners
         let centers = [
-            p(1.0, 1.0, 1.0),
-            p(-1.0, 1.0, 1.0),
-            p(1.0, -1.0, 1.0),
-            p(1.0, 1.0, -1.0),
-            p(-1.0, -1.0, 1.0),
-            p(-1.0, 1.0, -1.0),
-            p(1.0, -1.0, -1.0),
-            p(-1.0, -1.0, -1.0),
+            Point3::new(1.0, 1.0, 1.0),
+            Point3::new(-1.0, 1.0, 1.0),
+            Point3::new(1.0, -1.0, 1.0),
+            Point3::new(1.0, 1.0, -1.0),
+            Point3::new(-1.0, -1.0, 1.0),
+            Point3::new(-1.0, 1.0, -1.0),
+            Point3::new(1.0, -1.0, -1.0),
+            Point3::new(-1.0, -1.0, -1.0),
         ];
 
         for trial in 0..100 {
@@ -1092,7 +1085,7 @@ mod tests {
                 .map(|i| {
                     let c = &centers[i % 8];
                     let spread = 0.01;
-                    p(
+                    Point3::new(
                         c.x + rng.next_range(-spread, spread),
                         c.y + rng.next_range(-spread, spread),
                         c.z + rng.next_range(-spread, spread),
@@ -1122,7 +1115,7 @@ mod tests {
             let eps = 1e-8;
             let pts: Vec<Point3<f64>> = (0..n)
                 .map(|_| {
-                    p(
+                    Point3::new(
                         rng.next_range(-1.0, 1.0),
                         rng.next_range(-1.0, 1.0),
                         rng.next_range(-eps, eps),
@@ -1146,177 +1139,7 @@ mod tests {
         );
     }
 
-    /// Sweep point counts with varying hulls per level and print timing breakdown.
-    ///
-    /// Levels: n=1..=100 (every integer), 200..=1000 (step 100),
-    /// then 2000, 5000, 10000, 50000, 100000 with fewer hulls.
-    /// Run with: `cargo test -p rmesh --release bench_sweep -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn bench_sweep() {
-        use crate::timer::Timer;
-        use std::time::Instant;
-
-        // Scale down hulls per level for large point counts
-        let hulls_for_level = |n: usize| -> usize {
-            match n {
-                0..=1000 => 100,
-                1001..=10000 => 10,
-                _ => 3,
-            }
-        };
-
-        // Build the list of point counts to test
-        let levels: Vec<usize> = (1..=100)
-            .chain((200..=1000).step_by(100))
-            .chain([2000, 5000, 10000, 50000, 100000])
-            .collect();
-
-        let total_hulls_planned: usize = levels.iter().map(|&n| hulls_for_level(n)).sum();
-        let mut timer = Timer::new(&format!(
-            "convex_hull_3d sweep {} levels, {total_hulls_planned} total hulls",
-            levels.len()
-        ));
-
-        // Pre-generate all point clouds so generation time isn't measured
-        let mut rng = Lcg::new(42424242);
-        let all_clouds: Vec<(usize, Vec<Vec<Point3<f64>>>)> = levels
-            .iter()
-            .map(|&n| {
-                let hulls_per_level = hulls_for_level(n);
-                let clouds: Vec<Vec<Point3<f64>>> = (0..hulls_per_level)
-                    .map(|_| {
-                        (0..n)
-                            .map(|_| {
-                                p(
-                                    rng.next_range(-1.0, 1.0),
-                                    rng.next_range(-1.0, 1.0),
-                                    rng.next_range(-1.0, 1.0),
-                                )
-                            })
-                            .collect()
-                    })
-                    .collect();
-                (n, clouds)
-            })
-            .collect();
-        timer.record("point generation");
-
-        // Detail levels get per-phase breakdowns
-        let detail_levels: std::collections::HashSet<usize> = [
-            4, 8, 16, 32, 64, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000,
-        ]
-        .iter()
-        .copied()
-        .collect();
-
-        let mut total_hulls = 0u64;
-        let mut total_errors = 0u64;
-
-        for (n, clouds) in &all_clouds {
-            let n = *n;
-
-            if detail_levels.contains(&n) {
-                let mut t_tol = 0.0_f64;
-                let mut t_simplex = 0.0_f64;
-                let mut t_partition = 0.0_f64;
-                let mut t_loop = 0.0_f64;
-                let mut t_extract = 0.0_f64;
-                let mut t_validate = 0.0_f64;
-                let mut ok_count = 0u64;
-                let mut err_count = 0u64;
-
-                for pts in clouds {
-                    if pts.len() < 4 {
-                        err_count += 1;
-                        continue;
-                    }
-
-                    let t0 = Instant::now();
-                    let tolerances = Tolerances::from_points(pts);
-                    t_tol += t0.elapsed().as_secs_f64();
-
-                    let t1 = Instant::now();
-                    let bn = pts.len();
-                    let mut hull = QHull {
-                        points: pts,
-                        facets: Vec::new(),
-                        free_list: Vec::new(),
-                        tolerances,
-                        interior: Point3::origin(),
-                        active: BinaryHeap::with_capacity(64),
-                        visible: Vec::with_capacity(64),
-                        horizon: Vec::with_capacity(64),
-                        queue: Vec::with_capacity(64),
-                        orphans: Vec::with_capacity(bn / 4),
-                        new_face_indices: Vec::with_capacity(32),
-                        planes_buf: Vec::with_capacity(32),
-                        edge_map: AHashMap::with_capacity(32),
-                        vis_stamps: Vec::with_capacity(bn * 2),
-                        vis_gen: 0,
-                    };
-                    let simplex = hull.build_initial_simplex();
-                    t_simplex += t1.elapsed().as_secs_f64();
-
-                    let (i0, i1, i2, i3) = match simplex {
-                        Ok(s) => s,
-                        Err(_) => {
-                            err_count += 1;
-                            continue;
-                        }
-                    };
-
-                    let t2 = Instant::now();
-                    hull.create_initial_tetrahedron(i0, i1, i2, i3);
-                    hull.initial_partition(i0, i1, i2, i3);
-                    t_partition += t2.elapsed().as_secs_f64();
-
-                    let t3 = Instant::now();
-                    hull.build_hull();
-                    t_loop += t3.elapsed().as_secs_f64();
-
-                    let t4 = Instant::now();
-                    let faces = hull.to_result();
-                    t_extract += t4.elapsed().as_secs_f64();
-
-                    let t5 = Instant::now();
-                    is_hull_valid_3d(pts, &faces);
-                    t_validate += t5.elapsed().as_secs_f64();
-
-                    ok_count += 1;
-                }
-
-                let t_total = t_tol + t_simplex + t_partition + t_loop + t_extract + t_validate;
-                timer.record(&format!(
-                    "n={n:>4} | {ok_count:>3} ok {err_count:>3} err | \
-                     tol {t_tol:.4}  simplex {t_simplex:.4}  part {t_partition:.4}  \
-                     loop {t_loop:.4}  extract {t_extract:.4}  valid {t_validate:.4}  \
-                     total {t_total:.4}s"
-                ));
-                total_hulls += ok_count;
-                total_errors += err_count;
-            } else {
-                let level_start = Instant::now();
-                let mut ok_count = 0u64;
-                let mut err_count = 0u64;
-                for pts in clouds {
-                    match convex_hull_3d(pts) {
-                        Ok(_) => ok_count += 1,
-                        Err(_) => err_count += 1,
-                    }
-                }
-                let elapsed = level_start.elapsed().as_secs_f64();
-                timer.record(&format!(
-                    "n={n:>4} | {ok_count:>3} ok {err_count:>3} err | total {elapsed:.4}s"
-                ));
-                total_hulls += ok_count;
-                total_errors += err_count;
-            }
-        }
-
-        timer.record(&format!(
-            "DONE: {total_hulls} hulls computed, {total_errors} degenerate"
-        ));
-        timer.print_conditionally();
-    }
 }
+
+#[cfg(test)]
+mod bench;
