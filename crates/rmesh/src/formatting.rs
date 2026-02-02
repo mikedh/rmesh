@@ -43,7 +43,12 @@ impl fmt::Display for Table {
         let ncols = self.headers.len();
         let widths: Vec<usize> = (0..ncols)
             .map(|i| {
-                let cell_max = self.rows.iter().map(|r| r.get(i).map_or(0, |c| c.len())).max().unwrap_or(0);
+                let cell_max = self
+                    .rows
+                    .iter()
+                    .map(|r| r.get(i).map_or(0, |c| c.len()))
+                    .max()
+                    .unwrap_or(0);
                 self.headers[i].len().max(cell_max)
             })
             .collect();
@@ -98,6 +103,9 @@ mod tests {
         assert!(out.contains(":|"), "right-aligned separator");
         // "name" is left-aligned, "value"/"pct" are right-aligned
         assert!(out.contains("| alpha |"), "left-aligned data");
-        assert!(out.contains("|  1234 |"), "right-aligned value padded to header width");
+        assert!(
+            out.contains("|  1234 |"),
+            "right-aligned value padded to header width"
+        );
     }
 }

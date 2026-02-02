@@ -36,8 +36,10 @@ fn bench_sweep() {
         }
     };
 
-    let levels: Vec<usize> =
-        [4, 8, 16, 32, 64, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000].into();
+    let levels: Vec<usize> = [
+        4, 8, 16, 32, 64, 100, 200, 500, 1000, 2000, 5000, 10000, 50000, 100000,
+    ]
+    .into();
 
     // Pre-generate all point clouds so generation time isn't measured
     let mut rng = Lcg::new(42424242);
@@ -63,7 +65,16 @@ fn bench_sweep() {
         .collect();
 
     let mut table = Table::new(&[
-        "n", "hulls", "ok", "err", "total", "tol", "simplex", "partition", "loop", "extract",
+        "n",
+        "hulls",
+        "ok",
+        "err",
+        "total",
+        "tol",
+        "simplex",
+        "partition",
+        "loop",
+        "extract",
         "validate",
     ]);
 
@@ -318,7 +329,10 @@ fn bench_vs_qhull() {
 
     let mut random_clouds: Vec<(&str, Vec<Point3<f64>>)> = Vec::new();
     // We need owned labels, but compare_clouds takes &str — use a Vec<String> for labels.
-    let random_labels: Vec<String> = levels.iter().map(|(n, h)| format!("rand {n}x{h}")).collect();
+    let random_labels: Vec<String> = levels
+        .iter()
+        .map(|(n, h)| format!("rand {n}x{h}"))
+        .collect();
     for (i, &(n, hulls)) in levels.iter().enumerate() {
         for _ in 0..hulls {
             let pts: Vec<Point3<f64>> = (0..n)

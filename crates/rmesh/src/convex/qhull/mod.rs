@@ -1,3 +1,8 @@
+// u32 is used intentionally for outside_start/len to reduce memory in hot
+// data structures. best_face is stored as f64 for uniform SIMD width.
+// Face indices stored as f64 are always non-negative.
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 use std::collections::BinaryHeap;
 
 use ahash::AHashMap;
@@ -6,9 +11,142 @@ use anyhow::{Result, bail};
 use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 
-/// Minimum item count before using rayon parallelism.
-/// Below this threshold the rayon scheduling overhead exceeds the gain.
-const RAYON_THRESHOLD: usize = 512;
+/// Minimum orphan count before parallelizing the distance kernel.
+const RAYON_MIN_ORPHANS: usize = 4096;
+
+/// SIMD-friendly distance kernel: for each point find the plane with greatest
+/// signed distance. All point slices must share length; all plane slices must
+/// share length.
+///
+/// Auto-vectorization requirements (AVX2 ymm / 4×f64):
+/// - Contiguous memory: all slices are pre-gathered sequential arrays
+/// - Explicit length proof: re-slicing eliminates bounds checks
+/// - Uniform element width: `best_face` is f64 so LLVM applies the same
+///   SIMD comparison mask to both conditional stores
+/// - FMA: `mul_add` maps to `vfmadd231pd`, halving arithmetic instructions
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn distance_kernel(
+    normal_x: &[f64],
+    normal_y: &[f64],
+    normal_z: &[f64],
+    plane_offset: &[f64],
+    point_x: &[f64],
+    point_y: &[f64],
+    point_z: &[f64],
+    best_dist: &mut [f64],
+    best_face: &mut [f64],
+) {
+    let n = point_x.len();
+    let n_planes = normal_x.len();
+    let point_y = &point_y[..n];
+    let point_z = &point_z[..n];
+    let best_dist = &mut best_dist[..n];
+    let best_face = &mut best_face[..n];
+    for i in 0..n {
+        best_dist[i] = f64::NEG_INFINITY;
+        best_face[i] = 0.0;
+    }
+    for fi in 0..n_planes {
+        let nx = normal_x[fi];
+        let ny = normal_y[fi];
+        let nz = normal_z[fi];
+        let offset = plane_offset[fi];
+        let fi_f64 = fi as f64;
+        for oi in 0..n {
+            let dist = nx.mul_add(
+                point_x[oi],
+                ny.mul_add(point_y[oi], nz.mul_add(point_z[oi], offset)),
+            );
+            if dist > best_dist[oi] {
+                best_dist[oi] = dist;
+                best_face[oi] = fi_f64;
+            }
+        }
+    }
+}
+
+/// Plane equations split into separate arrays for SIMD-friendly batch distance tests.
+struct FlatPlanes {
+    normal_x: Vec<f64>,
+    normal_y: Vec<f64>,
+    normal_z: Vec<f64>,
+    offset: Vec<f64>,
+}
+
+impl FlatPlanes {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            normal_x: Vec::with_capacity(cap),
+            normal_y: Vec::with_capacity(cap),
+            normal_z: Vec::with_capacity(cap),
+            offset: Vec::with_capacity(cap),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.normal_x.clear();
+        self.normal_y.clear();
+        self.normal_z.clear();
+        self.offset.clear();
+    }
+
+    fn push(&mut self, normal: &Vector3<f64>, offset: f64) {
+        self.normal_x.push(normal.x);
+        self.normal_y.push(normal.y);
+        self.normal_z.push(normal.z);
+        self.offset.push(offset);
+    }
+
+    fn find_best_plane(
+        &self,
+        point_x: &[f64],
+        point_y: &[f64],
+        point_z: &[f64],
+        best_dist: &mut [f64],
+        best_face: &mut [f64],
+    ) {
+        distance_kernel(
+            &self.normal_x,
+            &self.normal_y,
+            &self.normal_z,
+            &self.offset,
+            point_x,
+            point_y,
+            point_z,
+            best_dist,
+            best_face,
+        );
+    }
+
+    fn find_best_plane_parallel(
+        &self,
+        point_x: &[f64],
+        point_y: &[f64],
+        point_z: &[f64],
+        best_dist: &mut [f64],
+        best_face: &mut [f64],
+    ) {
+        let n = point_x.len();
+        let point_y = &point_y[..n];
+        let point_z = &point_z[..n];
+        let best_dist = &mut best_dist[..n];
+        let best_face = &mut best_face[..n];
+        let (nx, ny, nz, off) = (&self.normal_x, &self.normal_y, &self.normal_z, &self.offset);
+
+        best_dist
+            .par_chunks_mut(4096)
+            .zip(best_face.par_chunks_mut(4096))
+            .zip(point_x.par_chunks(4096))
+            .zip(point_y.par_chunks(4096))
+            .zip(point_z.par_chunks(4096))
+            .for_each(|((((best_dist, best_face), point_x), point_y), point_z)| {
+                distance_kernel(
+                    nx, ny, nz, off, point_x, point_y, point_z, best_dist, best_face,
+                );
+            });
+    }
+}
 
 /// Entry in the active-facet max-heap, keyed on `furthest_dist`.
 #[derive(Clone, Copy)]
@@ -43,9 +181,7 @@ impl Ord for ActiveEntry {
 /// Tolerance values for convex hull computation, adapted from qhull's
 /// `qh_distround` for dimension 3.
 struct Tolerances {
-    /// Maximum roundoff error for distance computations.
     dist_round: f64,
-    /// Minimum distance for a point to be considered "outside" a facet.
     outside_threshold: f64,
 }
 
@@ -64,7 +200,6 @@ impl Tolerances {
                     )
                 });
 
-        // qhull formula: maxdistsum = min(sqrt(dim) * max_abs, max_sum_abs)
         let max_dist_sum = (3.0_f64.sqrt() * max_abs).min(max_sum_abs);
         let dist_round = f64::EPSILON * (3.0 * max_dist_sum * 1.01 + max_abs);
         let outside_threshold = 10.0 * dist_round;
@@ -78,25 +213,18 @@ impl Tolerances {
 
 /// A triangular facet of the convex hull under construction.
 struct Facet {
-    /// Triangle vertex indices (CCW from outside).
     vertices: [usize; 3],
-    /// `neighbors[i]` is the facet sharing the edge opposite `vertices[i]`.
     neighbors: [usize; 3],
-    /// Outward unit normal.
     normal: Vector3<f64>,
-    /// Plane offset: `normal.dot(p) + offset = 0` for points on the plane.
     offset: f64,
-    /// Points above this facet. Index 0 is the furthest.
-    outside: Vec<usize>,
-    /// Distance of the furthest outside point.
+    /// Start index into `QHull::outside_pool`.
+    outside_start: u32,
+    outside_len: u32,
     furthest_dist: f64,
-    /// Whether this facet has been deleted.
     removed: bool,
 }
 
 impl Facet {
-    /// Signed distance from a point to this facet's plane.
-    /// Positive means the point is above (outside) the facet.
     #[inline]
     fn distance(&self, point: &Point3<f64>) -> f64 {
         self.normal.dot(&point.coords) + self.offset
@@ -110,8 +238,10 @@ struct QHull<'a> {
     free_list: Vec<usize>,
     tolerances: Tolerances,
     interior: Point3<f64>,
-    /// Max-heap of facets with non-empty outside sets, keyed on furthest_dist.
     active: BinaryHeap<ActiveEntry>,
+
+    /// Single backing pool for all facet outside sets.
+    outside_pool: Vec<usize>,
 
     // Working buffers (reused across build_hull iterations)
     visible: Vec<usize>,
@@ -119,8 +249,16 @@ struct QHull<'a> {
     queue: Vec<usize>,
     orphans: Vec<usize>,
     new_face_indices: Vec<usize>,
-    planes_buf: Vec<(Vector3<f64>, f64)>,
+    flat_planes: FlatPlanes,
     edge_map: AHashMap<usize, (usize, usize)>,
+
+    /// Pre-gathered orphan coordinates (contiguous for SIMD vectorization).
+    gather_x: Vec<f64>,
+    gather_y: Vec<f64>,
+    gather_z: Vec<f64>,
+    best_dist_buf: Vec<f64>,
+    /// Best face index stored as f64 for uniform SIMD width.
+    best_face_buf: Vec<f64>,
 
     // Generation-counter visibility tracking
     vis_stamps: Vec<u32>,
@@ -132,19 +270,25 @@ impl<'a> QHull<'a> {
         let n = points.len();
         Self {
             points,
-            facets: Vec::new(),
+            facets: Vec::with_capacity(2 * n),
             free_list: Vec::new(),
             tolerances: Tolerances::from_points(points),
             interior: Point3::origin(),
             active: BinaryHeap::with_capacity(64),
+            outside_pool: Vec::with_capacity(n),
             visible: Vec::with_capacity(64),
             horizon: Vec::with_capacity(64),
             queue: Vec::with_capacity(64),
             orphans: Vec::with_capacity(n / 4),
             new_face_indices: Vec::with_capacity(32),
-            planes_buf: Vec::with_capacity(32),
+            flat_planes: FlatPlanes::with_capacity(32),
             edge_map: AHashMap::with_capacity(32),
-            vis_stamps: Vec::with_capacity(n * 2),
+            gather_x: Vec::with_capacity(n / 4),
+            gather_y: Vec::with_capacity(n / 4),
+            gather_z: Vec::with_capacity(n / 4),
+            best_dist_buf: Vec::with_capacity(n / 4),
+            best_face_buf: Vec::with_capacity(n / 4),
+            vis_stamps: vec![0; 2 * n],
             vis_gen: 0,
         }
     }
@@ -155,7 +299,7 @@ impl<'a> QHull<'a> {
         let num_points = points.len();
 
         // Find extremes along each axis
-        let mut extremes = [0usize; 6]; // min_x, max_x, min_y, max_y, min_z, max_z
+        let mut extremes = [0usize; 6];
         for i in 1..num_points {
             if points[i].x < points[extremes[0]].x {
                 extremes[0] = i;
@@ -243,36 +387,21 @@ impl<'a> QHull<'a> {
     fn create_initial_tetrahedron(&mut self, mut i0: usize, mut i1: usize, i2: usize, i3: usize) {
         let points = self.points;
 
-        // Check signed volume: det = (p1-p0) . ((p2-p0) x (p3-p0))
         let det = (points[i1] - points[i0])
             .dot(&(points[i2] - points[i0]).cross(&(points[i3] - points[i0])));
         if det < 0.0 {
             std::mem::swap(&mut i0, &mut i1);
         }
 
-        // Interior point = centroid of the 4 simplex vertices
         self.interior = Point3::from(
             (points[i0].coords + points[i1].coords + points[i2].coords + points[i3].coords) / 4.0,
         );
 
-        // Face table for positive-volume tetrahedron (i0,i1,i2,i3).
-        // For det > 0, cross(v1-v0, v2-v0) points TOWARD the opposite vertex (inward).
-        // So we reverse winding to get outward-facing CCW normals:
-        //   face 0: (i0, i2, i1) opposite i3
-        //   face 1: (i0, i1, i3) opposite i2
-        //   face 2: (i0, i3, i2) opposite i1
-        //   face 3: (i1, i2, i3) opposite i0
         let face_verts = [[i0, i2, i1], [i0, i1, i3], [i0, i3, i2], [i1, i2, i3]];
-        // Neighbor table: face_neighbors[f][i] = neighbor sharing edge opposite vertex i of face f.
-        // Derived by matching shared edges between the four faces above.
-        let face_neighbors = [
-            [3, 1, 2], // face 0
-            [3, 2, 0], // face 1
-            [3, 0, 1], // face 2
-            [2, 1, 0], // face 3
-        ];
+        let face_neighbors = [[3, 1, 2], [3, 2, 0], [3, 0, 1], [2, 1, 0]];
 
         self.facets.clear();
+        self.outside_pool.clear();
         for face_idx in 0..4 {
             let mut verts = face_verts[face_idx];
             let neighbors = face_neighbors[face_idx];
@@ -282,7 +411,8 @@ impl<'a> QHull<'a> {
                 neighbors,
                 normal,
                 offset,
-                outside: Vec::new(),
+                outside_start: 0,
+                outside_len: 0,
                 furthest_dist: 0.0,
                 removed: false,
             });
@@ -290,8 +420,7 @@ impl<'a> QHull<'a> {
     }
 
     /// Compute the outward plane for a face, using the interior point to enforce orientation.
-    /// If the normal needs flipping, also swaps `vertices[1]` and `vertices[2]` so that
-    /// the vertex winding stays consistent with the outward normal direction.
+    /// If the normal needs flipping, also swaps `vertices[1]` and `vertices[2]`.
     fn compute_plane(&self, vertices: &mut [usize; 3]) -> (Vector3<f64>, f64) {
         let [a, b, c] = *vertices;
         let points = self.points;
@@ -302,9 +431,7 @@ impl<'a> QHull<'a> {
         }
         let mut offset = -normal.dot(&points[a].coords);
 
-        // Ensure interior point is on the negative side
-        let interior_dist = normal.dot(&self.interior.coords) + offset;
-        if interior_dist > 0.0 {
+        if normal.dot(&self.interior.coords) + offset > 0.0 {
             normal = -normal;
             offset = -offset;
             vertices.swap(1, 2);
@@ -313,53 +440,111 @@ impl<'a> QHull<'a> {
         (normal, offset)
     }
 
-    /// Assign all non-simplex points to the facet they are furthest above.
-    fn initial_partition(&mut self, i0: usize, i1: usize, i2: usize, i3: usize) {
-        let simplex = [i0, i1, i2, i3];
-        let num_facets = self.facets.len();
+    /// Gather orphan coordinates into contiguous buffers for SIMD vectorization.
+    fn gather_orphan_coords(&mut self) {
+        let n = self.orphans.len();
+        self.gather_x.resize(n, 0.0);
+        self.gather_y.resize(n, 0.0);
+        self.gather_z.resize(n, 0.0);
+        for (i, &pi) in self.orphans.iter().enumerate() {
+            self.gather_x[i] = self.points[pi].x;
+            self.gather_y[i] = self.points[pi].y;
+            self.gather_z[i] = self.points[pi].z;
+        }
+    }
 
-        // Compute best facet assignment for each point
-        let classify = |(point_index, point): (usize, &Point3<f64>)| -> Option<(usize, usize, f64)> {
-            if simplex.contains(&point_index) {
-                return None;
-            }
-            let mut best_face = 0;
-            let mut best_dist = f64::NEG_INFINITY;
-            for face_index in 0..num_facets {
-                let dist = self.facets[face_index].distance(point);
-                if dist > best_dist {
-                    best_dist = dist;
-                    best_face = face_index;
-                }
-            }
-            if best_dist > self.tolerances.outside_threshold {
-                Some((point_index, best_face, best_dist))
-            } else {
-                None
-            }
-        };
+    /// Run the vectorized distance kernel on `self.orphans` against the given facets,
+    /// then distribute points into the outside pool.
+    fn distribute_to_facets(&mut self, face_indices: &[usize], clear_pool: bool) {
+        if self.orphans.is_empty() || face_indices.is_empty() {
+            return;
+        }
 
-        let assignments: Vec<(usize, usize, f64)> = if self.points.len() >= RAYON_THRESHOLD {
-            self.points.par_iter().enumerate().filter_map(classify).collect()
+        self.flat_planes.clear();
+        for &fi in face_indices {
+            self.flat_planes
+                .push(&self.facets[fi].normal, self.facets[fi].offset);
+        }
+
+        self.gather_orphan_coords();
+
+        let n = self.orphans.len();
+        let threshold = self.tolerances.outside_threshold;
+        self.best_dist_buf.resize(n, 0.0);
+        self.best_face_buf.resize(n, 0.0);
+
+        if n >= RAYON_MIN_ORPHANS {
+            self.flat_planes.find_best_plane_parallel(
+                &self.gather_x,
+                &self.gather_y,
+                &self.gather_z,
+                &mut self.best_dist_buf,
+                &mut self.best_face_buf,
+            );
         } else {
-            self.points.iter().enumerate().filter_map(classify).collect()
-        };
+            self.flat_planes.find_best_plane(
+                &self.gather_x,
+                &self.gather_y,
+                &self.gather_z,
+                &mut self.best_dist_buf,
+                &mut self.best_face_buf,
+            );
+        }
 
-        // Sequential: distribute into outside sets, keeping furthest at index 0
-        for (point_index, face_index, dist) in assignments {
-            let facet = &mut self.facets[face_index];
-            facet.outside.push(point_index);
-            if dist > facet.furthest_dist {
-                facet.furthest_dist = dist;
-                let last = facet.outside.len() - 1;
-                facet.outside.swap(0, last);
+        // Count per face, allocate pool regions, fill pool
+        let n_faces = face_indices.len();
+        let mut counts = vec![0u32; n_faces];
+        for oi in 0..n {
+            if self.best_dist_buf[oi] > threshold {
+                counts[self.best_face_buf[oi] as usize] += 1;
             }
         }
 
-        // Populate the active heap with facets that received outside points.
+        if clear_pool {
+            self.outside_pool.clear();
+        }
+        let mut off = self.outside_pool.len() as u32;
+        for (&fi, &count) in face_indices.iter().zip(counts.iter()) {
+            self.facets[fi].outside_start = off;
+            self.facets[fi].outside_len = 0;
+            self.facets[fi].furthest_dist = 0.0;
+            off += count;
+        }
+        self.outside_pool.resize(off as usize, 0);
+
+        for oi in 0..n {
+            let dist = self.best_dist_buf[oi];
+            if dist > threshold {
+                let plane_idx = self.best_face_buf[oi] as usize;
+                let fi = face_indices[plane_idx];
+                let facet = &mut self.facets[fi];
+                let pos = (facet.outside_start + facet.outside_len) as usize;
+                self.outside_pool[pos] = self.orphans[oi];
+                facet.outside_len += 1;
+                if dist > facet.furthest_dist {
+                    facet.furthest_dist = dist;
+                    self.outside_pool.swap(facet.outside_start as usize, pos);
+                }
+            }
+        }
+    }
+
+    /// Assign all non-simplex points to the facet they are furthest above.
+    fn initial_partition(&mut self, i0: usize, i1: usize, i2: usize, i3: usize) {
+        let simplex = [i0, i1, i2, i3];
+        self.orphans.clear();
+        for i in 0..self.points.len() {
+            if !simplex.contains(&i) {
+                self.orphans.push(i);
+            }
+        }
+
+        let face_indices: Vec<usize> = (0..self.facets.len()).collect();
+        self.distribute_to_facets(&face_indices, true);
+
         self.active.clear();
         for (i, facet) in self.facets.iter().enumerate() {
-            if !facet.outside.is_empty() {
+            if facet.outside_len > 0 {
                 self.active.push(ActiveEntry {
                     dist: facet.furthest_dist,
                     facet_index: i,
@@ -371,43 +556,34 @@ impl<'a> QHull<'a> {
     /// Main Quickhull loop: iteratively add the furthest outside point.
     fn build_hull(&mut self) {
         loop {
-            // Pop until we find a valid (non-removed, non-empty) facet
             let start_face = loop {
                 let Some(entry) = self.active.pop() else {
                     return;
                 };
                 let fi = entry.facet_index;
-                if !self.facets[fi].removed && !self.facets[fi].outside.is_empty() {
+                if !self.facets[fi].removed && self.facets[fi].outside_len > 0 {
                     break fi;
                 }
             };
 
-            let apex = self.facets[start_face].outside[0];
-
-            // Find all visible facets and horizon edges in one BFS pass
+            let apex = self.outside_pool[self.facets[start_face].outside_start as usize];
             self.find_visible_and_horizon(start_face, apex);
-
-            // Build cone from apex to horizon
             self.build_cone(apex);
         }
     }
 
-    /// BFS from `start` to find all facets visible from `apex`, and collect
+    /// BFS from `start` to find all facets visible from `apex`, collecting
     /// horizon edges (visible-to-non-visible boundaries) in the same pass.
-    /// Results are stored in `self.visible` and `self.horizon`.
     fn find_visible_and_horizon(&mut self, start: usize, apex: usize) {
         let apex_point = &self.points[apex];
         let num_facets = self.facets.len();
 
-        // Advance generation counter for visibility tracking
         self.vis_gen = self.vis_gen.wrapping_add(1);
         if self.vis_gen == 0 {
-            // Wrapped around — reset all stamps
             self.vis_stamps.clear();
             self.vis_stamps.resize(num_facets, 0);
             self.vis_gen = 1;
         }
-        // Grow stamps if facets have been added since last call
         if self.vis_stamps.len() < num_facets {
             self.vis_stamps.resize(num_facets, 0);
         }
@@ -442,9 +618,6 @@ impl<'a> QHull<'a> {
                     self.visible.push(neighbor);
                     self.queue.push(neighbor);
                 } else {
-                    // Non-visible neighbor of visible facet = horizon edge.
-                    // Don't mark visited: multiple visible facets may share
-                    // the same non-visible neighbor at different edges.
                     self.horizon.push((face_index, neighbor_slot, neighbor));
                 }
             }
@@ -452,7 +625,6 @@ impl<'a> QHull<'a> {
     }
 
     /// Build new cone facets from apex to each horizon edge, then redistribute orphans.
-    /// Reads from `self.visible` and `self.horizon`.
     fn build_cone(&mut self, apex: usize) {
         let points = self.points;
         let interior = self.interior;
@@ -461,7 +633,10 @@ impl<'a> QHull<'a> {
         self.orphans.clear();
         for vi in 0..self.visible.len() {
             let face_index = self.visible[vi];
-            for &point_index in &self.facets[face_index].outside {
+            let start = self.facets[face_index].outside_start as usize;
+            let len = self.facets[face_index].outside_len as usize;
+            for i in start..start + len {
+                let point_index = self.outside_pool[i];
                 if point_index != apex {
                     self.orphans.push(point_index);
                 }
@@ -475,15 +650,13 @@ impl<'a> QHull<'a> {
         for hi in 0..self.horizon.len() {
             let (visible_face, edge_slot, horizon_neighbor) = self.horizon[hi];
 
-            // The horizon edge is opposite vertices[edge_slot] in the visible facet.
             let visible_verts = self.facets[visible_face].vertices;
             let edge_v0 = visible_verts[(edge_slot + 1) % 3];
             let edge_v1 = visible_verts[(edge_slot + 2) % 3];
 
-            // New triangle: (apex, edge_v1, edge_v0) -- reverse edge order for outward normal.
             let mut new_verts = [apex, edge_v1, edge_v0];
 
-            // Inline compute_plane to avoid &self borrow conflict with &mut self.facets
+            // Inline compute_plane to avoid &self/&mut self borrow conflict
             let [a, b, c] = new_verts;
             let mut normal = (points[b] - points[a]).cross(&(points[c] - points[a]));
             let normal_len = normal.norm();
@@ -491,14 +664,12 @@ impl<'a> QHull<'a> {
                 normal /= normal_len;
             }
             let mut offset = -normal.dot(&points[a].coords);
-            let interior_dist = normal.dot(&interior.coords) + offset;
-            if interior_dist > 0.0 {
+            if normal.dot(&interior.coords) + offset > 0.0 {
                 normal = -normal;
                 offset = -offset;
                 new_verts.swap(1, 2);
             }
 
-            // Reuse a removed facet slot or append a new one
             let new_face_index = self.free_list.pop().unwrap_or_else(|| {
                 let index = self.facets.len();
                 self.facets.push(Facet {
@@ -506,7 +677,8 @@ impl<'a> QHull<'a> {
                     neighbors: [0; 3],
                     normal: Vector3::zeros(),
                     offset: 0.0,
-                    outside: Vec::new(),
+                    outside_start: 0,
+                    outside_len: 0,
                     furthest_dist: 0.0,
                     removed: false,
                 });
@@ -517,15 +689,13 @@ impl<'a> QHull<'a> {
             facet.normal = normal;
             facet.offset = offset;
             facet.removed = false;
-            facet.outside.clear();
+            facet.outside_start = 0;
+            facet.outside_len = 0;
             facet.furthest_dist = 0.0;
-            // neighbors[0] (opposite apex) = horizon_neighbor
             facet.neighbors[0] = horizon_neighbor;
-            // neighbors[1] and [2] will be filled by linking step
             facet.neighbors[1] = usize::MAX;
             facet.neighbors[2] = usize::MAX;
 
-            // Update the horizon neighbor to point back to this new facet
             for slot in self.facets[horizon_neighbor].neighbors.iter_mut() {
                 if *slot == visible_face {
                     *slot = new_face_index;
@@ -535,8 +705,6 @@ impl<'a> QHull<'a> {
 
             self.new_face_indices.push(new_face_index);
 
-            // Link adjacent cone facets sharing an (apex, V) edge.
-            // new_verts already has the final (possibly swapped) winding.
             let vert_a = new_verts[1];
             let vert_b = new_verts[2];
             for &(vertex, slot) in &[(vert_b, 1usize), (vert_a, 2usize)] {
@@ -556,22 +724,20 @@ impl<'a> QHull<'a> {
             self.edge_map.len(),
         );
 
-        // Mark visible facets as removed and recycle their slots.
+        // Mark visible facets as removed and recycle their slots
         for vi in 0..self.visible.len() {
             let face_index = self.visible[vi];
             self.facets[face_index].removed = true;
             self.free_list.push(face_index);
         }
-        // No need to filter the active heap: lazy deletion in build_hull
-        // will skip removed/empty facets when they are popped.
 
         // Redistribute orphan points to new cone facets
-        self.redistribute_orphans();
+        let face_indices = self.new_face_indices.clone();
+        self.distribute_to_facets(&face_indices, false);
 
-        // Push new cone facets that received outside points into the active heap.
-        for fi in 0..self.new_face_indices.len() {
-            let idx = self.new_face_indices[fi];
-            if !self.facets[idx].outside.is_empty() {
+        // Push new cone facets that received outside points into the active heap
+        for &idx in &face_indices {
+            if self.facets[idx].outside_len > 0 {
                 self.active.push(ActiveEntry {
                     dist: self.facets[idx].furthest_dist,
                     facet_index: idx,
@@ -580,121 +746,13 @@ impl<'a> QHull<'a> {
         }
     }
 
-    /// Assign a point to a new cone facet's outside set, keeping the furthest at index 0.
-    fn assign_to_facet(&mut self, local_face_idx: usize, point_index: usize, dist: f64) {
-        let face_index = self.new_face_indices[local_face_idx];
-        let facet = &mut self.facets[face_index];
-        facet.outside.push(point_index);
-        if dist > facet.furthest_dist {
-            facet.furthest_dist = dist;
-            let last = facet.outside.len() - 1;
-            facet.outside.swap(0, last);
-        }
-    }
-
-    /// Distribute orphan points among new cone facets.
-    /// Reads from `self.orphans` and `self.new_face_indices`.
-    fn redistribute_orphans(&mut self) {
-        if self.orphans.is_empty() || self.new_face_indices.is_empty() {
-            return;
-        }
-
-        // Extract plane data into contiguous buffer for cache-friendly inner loop.
-        // Each entry is 32 bytes (normal + offset) vs ~120 bytes per Facet struct.
-        self.planes_buf.clear();
-        for fi in 0..self.new_face_indices.len() {
-            let face_index = self.new_face_indices[fi];
-            self.planes_buf.push((
-                self.facets[face_index].normal,
-                self.facets[face_index].offset,
-            ));
-        }
-
-        let points = self.points;
-        let threshold = self.tolerances.outside_threshold;
-
-        if self.orphans.len() >= RAYON_THRESHOLD {
-            // Parallel path: compute assignments via rayon, then apply sequentially.
-            // Move planes_buf to a local so the closure can capture it without
-            // borrowing all of `self`.
-            let planes_buf = &self.planes_buf;
-
-            let assignments: Vec<(usize, usize, f64)> = self
-                .orphans
-                .par_iter()
-                .filter_map(|&point_index| {
-                    let point = &points[point_index];
-                    let mut best_fi = 0;
-                    let mut best_dist = f64::NEG_INFINITY;
-                    for (fi, (normal, offset)) in planes_buf.iter().enumerate() {
-                        let dist = normal.dot(&point.coords) + offset;
-                        if dist > best_dist {
-                            best_dist = dist;
-                            best_fi = fi;
-                        }
-                    }
-                    if best_dist > threshold {
-                        Some((point_index, best_fi, best_dist))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Sequential: distribute into outside sets
-            for (point_index, best_fi, best_dist) in assignments {
-                self.assign_to_facet(best_fi, point_index, best_dist);
-            }
-        } else {
-            // Sequential path for small orphan counts
-            for oi in 0..self.orphans.len() {
-                let point_index = self.orphans[oi];
-                let point = &points[point_index];
-                let mut best_face_idx = 0;
-                let mut best_dist = f64::NEG_INFINITY;
-
-                for (fi, (normal, offset)) in self.planes_buf.iter().enumerate() {
-                    let dist = normal.dot(&point.coords) + offset;
-                    if dist > best_dist {
-                        best_dist = dist;
-                        best_face_idx = fi;
-                    }
-                }
-
-                if best_dist > threshold {
-                    self.assign_to_facet(best_face_idx, point_index, best_dist);
-                }
-            }
-        }
-    }
-
-    /// Extract the final hull faces, with orientation safety belt.
+    /// Extract the final hull faces.
     fn to_result(&self) -> Vec<[usize; 3]> {
-        let mut faces: Vec<[usize; 3]> = self
-            .facets
+        self.facets
             .iter()
             .filter(|f| !f.removed)
             .map(|f| f.vertices)
-            .collect();
-
-        // Safety belt: verify each face normal points away from the interior point.
-        // self.interior is the centroid of the initial simplex, guaranteed strictly inside.
-        let center = self.interior;
-        let fix_winding = |face: &mut [usize; 3]| {
-            let [a, b, c] = *face;
-            let normal =
-                (self.points[b] - self.points[a]).cross(&(self.points[c] - self.points[a]));
-            if normal.dot(&(self.points[a] - center)) < 0.0 {
-                face.swap(1, 2);
-            }
-        };
-        if faces.len() >= RAYON_THRESHOLD {
-            faces.par_iter_mut().for_each(fix_winding);
-        } else {
-            faces.iter_mut().for_each(fix_winding);
-        }
-
-        faces
+            .collect()
     }
 }
 
@@ -745,8 +803,6 @@ mod tests {
     /// Verify a 2D convex hull: edges form a valid, convex, CCW polygon.
     fn verify_hull_2d(points: &[Point2<f64>], edges: &[[usize; 2]]) {
         assert!(edges.len() >= 3, "hull has fewer than 3 edges");
-        // is_hull_valid_2d is checked inside convex_hull_2d via cfg(test)
-        // CCW: all cross products non-negative
         for i in 0..edges.len() {
             let j = (i + 1) % edges.len();
             let a = edges[i][0];
@@ -760,18 +816,15 @@ mod tests {
     }
 
     /// Full verification of a 3D convex hull result.
-    /// is_hull_valid_3d is checked inside convex_hull_3d via cfg(test).
     fn verify_hull(points: &[Point3<f64>], faces: &[[usize; 3]]) {
         assert!(!faces.is_empty(), "hull has no faces");
 
-        // All face indices must be valid
         for face in faces {
             for &idx in face {
                 assert!(idx < points.len(), "face index {} out of range", idx);
             }
         }
 
-        // Topological checks via Trimesh
         let mesh = Trimesh::new(points.to_vec(), faces.to_vec(), None, None).unwrap();
         assert!(mesh.is_watertight(), "hull is not watertight");
         assert!(mesh.is_convex(), "hull is not convex");
@@ -814,7 +867,6 @@ mod tests {
     #[test]
     fn test_box_with_interior() {
         let mut pts = create_box(&[2.0, 2.0, 2.0]).vertices;
-        // Add interior points
         pts.push(Point3::new(0.0, 0.0, 0.0));
         pts.push(Point3::new(0.1, 0.2, 0.3));
         pts.push(Point3::new(-0.3, 0.1, -0.1));
@@ -822,7 +874,6 @@ mod tests {
         verify_hull(&pts, &faces);
         assert_eq!(faces.len(), 12, "interior points shouldn't add faces");
 
-        // Verify only original 8 vertices are used
         let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for f in &faces {
             for &v in f {
@@ -854,10 +905,8 @@ mod tests {
 
     #[test]
     fn test_sphere_points() {
-        // Generate points on unit sphere
         let n = 100;
         let mut pts = Vec::with_capacity(n);
-        // Fibonacci sphere
         let golden = (1.0 + 5.0_f64.sqrt()) / 2.0;
         for i in 0..n {
             let theta = 2.0 * std::f64::consts::PI * i as f64 / golden;
@@ -871,7 +920,6 @@ mod tests {
         let faces = convex_hull_3d(&pts).unwrap();
         verify_hull(&pts, &faces);
 
-        // Volume should be near 4/3 pi r^3 = 4.189
         let mesh = Trimesh::new(pts.clone(), faces.clone(), None, None).unwrap();
         let vol = mesh.volume();
         assert!(
@@ -994,7 +1042,7 @@ mod tests {
     fn test_random_point_clouds() {
         let mut rng = Lcg::new(12345);
         for trial in 0..500 {
-            let n = 10 + (trial % 491); // 10-500 points
+            let n = 10 + (trial % 491);
             let pts: Vec<Point3<f64>> = (0..n)
                 .map(|_| {
                     Point3::new(
@@ -1007,7 +1055,6 @@ mod tests {
             let faces = convex_hull_3d(&pts).unwrap();
             verify_hull(&pts, &faces);
 
-            // Same cloud projected to 2D (drop Z)
             let pts2 = to_2d(&pts);
             let edges = convex_hull_2d(&pts2);
             if edges.len() >= 3 {
@@ -1020,10 +1067,9 @@ mod tests {
     fn test_random_on_sphere() {
         let mut rng = Lcg::new(99999);
         for trial in 0..200 {
-            let n = 10 + (trial % 91); // 10-100 points
+            let n = 10 + (trial % 91);
             let pts: Vec<Point3<f64>> = (0..n)
                 .map(|_| {
-                    // Random point on unit sphere
                     loop {
                         let x = rng.next_range(-1.0, 1.0);
                         let y = rng.next_range(-1.0, 1.0);
@@ -1038,15 +1084,12 @@ mod tests {
             let faces = convex_hull_3d(&pts).unwrap();
             verify_hull(&pts, &faces);
 
-            // All points should be on the hull (within tolerance)
             let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
             for f in &faces {
                 for &v in f {
                     used.insert(v);
                 }
             }
-            // Most sphere points should be on the hull (allow some tolerance for
-            // very close points that get classified as inside)
             assert!(
                 used.len() >= n * 8 / 10,
                 "Trial {}: only {}/{} sphere points on hull",
@@ -1055,7 +1098,6 @@ mod tests {
                 n
             );
 
-            // Same cloud projected to 2D (drop Z → circle)
             let pts2 = to_2d(&pts);
             let edges = convex_hull_2d(&pts2);
             if edges.len() >= 3 {
@@ -1067,7 +1109,6 @@ mod tests {
     #[test]
     fn test_random_clustered() {
         let mut rng = Lcg::new(54321);
-        // Cluster centers at cube corners
         let centers = [
             Point3::new(1.0, 1.0, 1.0),
             Point3::new(-1.0, 1.0, 1.0),
@@ -1095,7 +1136,6 @@ mod tests {
             let faces = convex_hull_3d(&pts).unwrap();
             verify_hull(&pts, &faces);
 
-            // Same cloud projected to 2D (drop Z)
             let pts2 = to_2d(&pts);
             let edges = convex_hull_2d(&pts2);
             if edges.len() >= 3 {
@@ -1132,13 +1172,11 @@ mod tests {
                 }
             }
         }
-        // Should either succeed with valid hull or return coplanar error
         assert!(
             successes + failures == 100,
             "all trials should either succeed or fail cleanly"
         );
     }
-
 }
 
 #[cfg(test)]

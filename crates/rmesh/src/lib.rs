@@ -5,6 +5,7 @@ pub mod creation;
 #[cfg(feature = "wgpu")]
 pub mod decomposition;
 pub mod exchange;
+pub mod formatting;
 pub mod geometry;
 pub mod graph;
 pub mod image;
@@ -16,7 +17,6 @@ pub mod schemas;
 pub mod serialize;
 pub mod simplify;
 pub mod subdivide;
-pub mod formatting;
 pub mod timer;
 pub mod triangles;
 #[cfg(feature = "wgpu")]
