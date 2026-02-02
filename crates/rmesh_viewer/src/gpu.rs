@@ -29,7 +29,7 @@ impl GpuContext {
         .expect("no suitable GPU adapter found");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rmesh_headless"),
-            required_features: wgpu::Features::empty(),
+            required_features: wgpu::Features::POLYGON_MODE_LINE,
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -69,7 +69,7 @@ impl GpuContext {
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("rmesh_viewer"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: wgpu::Features::POLYGON_MODE_LINE,
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                     experimental_features: wgpu::ExperimentalFeatures::default(),

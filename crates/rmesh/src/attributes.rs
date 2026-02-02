@@ -1,4 +1,5 @@
 use nalgebra::{Vector2, Vector3, Vector4};
+use serde::{Deserialize, Serialize};
 
 use crate::exchange::FileType;
 use crate::image::LazyImage;
@@ -10,7 +11,7 @@ pub type Color = Vec<Vector4<u8>>;
 pub type Normal = Vec<Vector3<f64>>;
 pub type Tangent = Vec<Vector4<f64>>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum GroupingKind {
     #[default]
     Unspecified,
@@ -22,14 +23,14 @@ pub enum GroupingKind {
 
 /// Per-face grouping attribute with a lookup table of names.
 /// Each face has an index into `names` stored in `indices`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Grouping {
     pub kind: GroupingKind,
     pub names: Vec<String>,
     pub indices: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Attributes {
     pub uv: Vec<UV>,
     pub normals: Vec<Normal>,
@@ -38,7 +39,7 @@ pub struct Attributes {
     pub groupings: Vec<Grouping>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LoadSource {
     // what format was this mesh loaded from?
     pub format: Option<FileType>,
@@ -47,7 +48,7 @@ pub struct LoadSource {
     pub header: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SimpleMaterial {
     pub name: String,
     pub diffuse: Option<Vector3<f64>>,
@@ -58,7 +59,7 @@ pub struct SimpleMaterial {
 }
 
 /// Alpha blending mode for materials.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlphaMode {
     /// Fully opaque, alpha channel is ignored.
     #[default]
@@ -71,7 +72,7 @@ pub enum AlphaMode {
 
 /// PBR (Physically Based Rendering) metallic-roughness material.
 /// Based on the glTF 2.0 material specification.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PBRMaterial {
     /// Material name for identification.
     pub name: String,
@@ -147,10 +148,10 @@ impl PBRMaterial {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmptyMaterial {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Material {
     Empty(EmptyMaterial),
     Simple(SimpleMaterial),

@@ -1,5 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
+use serde::{Deserialize, Serialize};
+
 pub use image::DynamicImage;
 
 /// Lazily-decoded image that stores raw bytes and decodes on demand.
@@ -71,5 +73,31 @@ impl Clone for LazyImage {
             bytes: Arc::clone(&self.bytes),
             decoded: OnceLock::new(),
         }
+    }
+}
+
+impl PartialEq for LazyImage {
+    fn eq(&self, other: &Self) -> bool {
+        *self.bytes == *other.bytes
+    }
+}
+
+impl Serialize for LazyImage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Serialize the raw bytes as a byte sequence
+        serializer.serialize_bytes(&self.bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for LazyImage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        Ok(LazyImage::new(bytes))
     }
 }

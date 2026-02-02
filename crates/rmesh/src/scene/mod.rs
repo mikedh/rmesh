@@ -215,6 +215,56 @@ impl Scene {
         index
     }
 
+    /// Add geometry with optional placement transforms.
+    ///
+    /// If `transforms` is `Some`, each matrix creates a SceneGraph node
+    /// referencing the shared geometry. If `None`, one node with identity
+    /// transform is created.
+    ///
+    /// Returns the unique name assigned to the geometry.
+    pub fn add(
+        &mut self,
+        name: &str,
+        geom: Geometry,
+        transforms: Option<&[Matrix4<f64>]>,
+    ) -> String {
+        // Ensure a root node exists
+        if self.graph.nodes.is_empty() {
+            self.graph.nodes.push(SceneNode::default());
+        }
+
+        let (actual_name, geom_index) = self.add_geometry(name, geom);
+        let root = self.graph.root;
+
+        match transforms {
+            Some(xforms) if !xforms.is_empty() => {
+                for t in xforms {
+                    let node = SceneNode {
+                        name: actual_name.clone(),
+                        transform: Some(*t),
+                        kind: SceneNodeKind::Geometry,
+                        index: vec![geom_index],
+                        ..Default::default()
+                    };
+                    let idx = self.graph.add_node(node);
+                    self.graph.nodes[root].children.push(idx);
+                }
+            }
+            _ => {
+                let node = SceneNode {
+                    name: actual_name.clone(),
+                    kind: SceneNodeKind::Geometry,
+                    index: vec![geom_index],
+                    ..Default::default()
+                };
+                let idx = self.graph.add_node(node);
+                self.graph.nodes[root].children.push(idx);
+            }
+        }
+
+        actual_name
+    }
+
     /// Compute the world-space axis-aligned bounding box of all geometry.
     ///
     /// Walks the scene graph to apply world transforms. If the graph is empty
@@ -418,6 +468,29 @@ mod tests {
         assert_eq!(graph.find_by_name("first"), Some(0));
         assert_eq!(graph.find_by_name("second"), Some(1));
         assert_eq!(graph.find_by_name("third"), None);
+    }
+
+    #[test]
+    fn test_scene_add() {
+        let mut scene = Scene::new();
+        let mesh = creation::create_box(&[1.0, 1.0, 1.0]);
+        let name = scene.add("cube", Geometry::Mesh(Box::new(mesh)), None);
+        assert_eq!(name, "cube");
+        assert_eq!(scene.geometry.len(), 1);
+        assert_eq!(scene.graph.nodes.len(), 2); // root + 1 geometry node
+        assert!(scene.bounds().is_some());
+    }
+
+    #[test]
+    fn test_scene_add_transforms() {
+        let mut scene = Scene::new();
+        let mesh = creation::create_box(&[1.0, 1.0, 1.0]);
+        let t1 = Matrix4::new_translation(&nalgebra::Vector3::new(5.0, 0.0, 0.0));
+        let t2 = Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 5.0, 0.0));
+        let name = scene.add("cube", Geometry::Mesh(Box::new(mesh)), Some(&[t1, t2]));
+        assert_eq!(name, "cube");
+        assert_eq!(scene.geometry.len(), 1);
+        assert_eq!(scene.graph.nodes.len(), 3); // root + 2 transform nodes
     }
 
     #[test]

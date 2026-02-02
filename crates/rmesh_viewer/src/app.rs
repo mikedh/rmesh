@@ -292,9 +292,16 @@ fn render_frame(state: &ViewerState) {
 }
 
 /// Run the viewer event loop. Blocks until the window is closed.
+///
+/// Uses a singleton viewer thread so the event loop can be reused
+/// across multiple calls (winit only allows one EventLoop per process).
 pub fn run(scene: &Scene, options: ViewerOptions) {
-    let event_loop = EventLoop::new().expect("failed to create event loop");
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+    crate::viewer_thread::show_scene(scene.clone(), options);
+}
+
+/// Run on an existing event loop (called from viewer thread).
+pub(crate) fn run_on(event_loop: &mut EventLoop<()>, scene: &Scene, options: ViewerOptions) {
+    use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
     let mut app = ViewerApp::new(scene, options);
-    let _ = event_loop.run_app(&mut app);
+    let _ = event_loop.run_app_on_demand(&mut app);
 }

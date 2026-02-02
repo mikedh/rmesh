@@ -1,4 +1,5 @@
 pub mod attributes;
+pub mod cache;
 pub mod cleanup;
 pub mod convex;
 pub mod creation;
@@ -11,6 +12,7 @@ pub mod graph;
 pub mod image;
 pub mod mesh;
 pub mod path;
+pub mod project;
 pub mod resolvers;
 pub mod scene;
 pub mod schemas;

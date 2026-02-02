@@ -2,7 +2,10 @@ use std::path::Path;
 
 use anyhow::Result;
 use nalgebra::{Point3, Vector3, Vector4};
-use numpy::{PyArray1, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods, ndarray::Array2, npyffi};
+use numpy::{
+    PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods, ndarray::Array2,
+    npyffi,
+};
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -552,11 +555,310 @@ fn create_colors_list(
 }
 
 // ============================================================================
+// PyPolygon2D
+// ============================================================================
+
+/// A 2D polygon with an exterior ring and optional interior holes.
+#[pyclass(name = "Polygon2D")]
+pub struct PyPolygon2D {
+    exterior_cache: OnceCell<Py<PyArray2<f64>>>,
+    interiors_cache: OnceCell<Py<pyo3::types::PyList>>,
+    pub(crate) data: rmesh::path::Polygon2D,
+}
+
+#[pymethods]
+impl PyPolygon2D {
+    /// The exterior ring as an (N, 2) array.
+    #[getter]
+    fn exterior(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        self.exterior_cache
+            .get_or_init(|| {
+                let flat: Vec<f64> = self.data.exterior.iter().flat_map(|p| [p.x, p.y]).collect();
+                let nd = Array2::from_shape_vec((self.data.exterior.len(), 2), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    /// Interior holes as a list of (M, 2) arrays.
+    #[getter]
+    fn interiors(&self, py: Python<'_>) -> Py<pyo3::types::PyList> {
+        self.interiors_cache
+            .get_or_init(|| {
+                let list = pyo3::types::PyList::empty(py);
+                for hole in &self.data.interiors {
+                    let flat: Vec<f64> = hole.iter().flat_map(|p| [p.x, p.y]).collect();
+                    let nd = Array2::from_shape_vec((hole.len(), 2), flat).unwrap();
+                    let arr = PyArray2::from_array(py, &nd);
+                    make_readonly(&arr);
+                    list.append(arr).unwrap();
+                }
+                list.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    /// Optional 4x4 transform from 2D polygon space back to 3D, shape (4, 4).
+    #[getter]
+    fn to_3d(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data.to_3d.map(|m| {
+            let flat: Vec<f64> = (0..4)
+                .flat_map(|r| (0..4).map(move |c| m[(r, c)]))
+                .collect();
+            let nd = Array2::from_shape_vec((4, 4), flat).unwrap();
+            let arr = PyArray2::from_array(py, &nd);
+            make_readonly(&arr);
+            arr.unbind()
+        })
+    }
+
+    /// The signed area of this polygon (exterior minus holes).
+    #[getter]
+    fn area(&self) -> f64 {
+        self.data.area()
+    }
+
+    /// Compute the union of this polygon with another.
+    fn union(&self, py: Python<'_>, other: &PyPolygon2D) -> Vec<Py<PyPolygon2D>> {
+        self.data
+            .union(&other.data)
+            .into_iter()
+            .map(|p| wrap_polygon(py, p))
+            .collect()
+    }
+
+    /// Compute the difference of this polygon minus another.
+    fn difference(&self, py: Python<'_>, other: &PyPolygon2D) -> Vec<Py<PyPolygon2D>> {
+        self.data
+            .difference(&other.data)
+            .into_iter()
+            .map(|p| wrap_polygon(py, p))
+            .collect()
+    }
+
+    /// Compute the intersection of this polygon with another.
+    fn intersection(&self, py: Python<'_>, other: &PyPolygon2D) -> Vec<Py<PyPolygon2D>> {
+        self.data
+            .intersection(&other.data)
+            .into_iter()
+            .map(|p| wrap_polygon(py, p))
+            .collect()
+    }
+
+    /// Offset the polygon boundary by `distance`.
+    ///
+    /// Positive = expand outward, negative = shrink inward.
+    /// Returns empty list if polygon shrinks to nothing.
+    fn buffer(&self, py: Python<'_>, distance: f64) -> Vec<Py<PyPolygon2D>> {
+        self.data
+            .buffer(distance)
+            .into_iter()
+            .map(|p| wrap_polygon(py, p))
+            .collect()
+    }
+
+    /// Lift this 2D polygon back to 3D using the stored `to_3d` transform.
+    ///
+    /// Returns a `Path3D` with line segments tracing the exterior and interior
+    /// rings in 3D space. Returns `None` if no `to_3d` transform is set.
+    fn to_path3d(&self, py: Python<'_>) -> Option<Py<PyPath3D>> {
+        self.data.to_path3d().map(|p| wrap_path3d(py, p))
+    }
+
+    /// Open an interactive 2D viewer window displaying this polygon.
+    #[pyo3(signature = (*, title="rmesh 2D", width=1280, height=720, background=None))]
+    fn show(
+        &self,
+        py: Python<'_>,
+        title: &str,
+        width: u32,
+        height: u32,
+        background: Option<[f32; 3]>,
+    ) {
+        use rmesh_viewer::{Viewer2D, ViewerOptions};
+        let data = self.data.clone();
+        let options = ViewerOptions {
+            title: title.to_string(),
+            width,
+            height,
+            background: background.unwrap_or([1.0, 1.0, 1.0]),
+        };
+        py.detach(|| data.show_2d_with_options(options));
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<rmesh.Polygon2D vertices: {} holes: {}>",
+            self.data.exterior.len(),
+            self.data.interiors.len()
+        )
+    }
+}
+
+// ============================================================================
+// PyPath2D
+// ============================================================================
+
+/// A 2D path made of line/arc/bezier/spline segments.
+#[pyclass(name = "Path2D")]
+pub struct PyPath2D {
+    pub(crate) data: rmesh::path::Path2D,
+    vertices_cache: OnceCell<Py<PyArray2<f64>>>,
+}
+
+#[pymethods]
+impl PyPath2D {
+    /// The shared vertex array as an (N, 2) array.
+    #[getter]
+    fn vertices(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        self.vertices_cache
+            .get_or_init(|| {
+                let flat: Vec<f64> = self.data.vertices.iter().flat_map(|p| [p.x, p.y]).collect();
+                let nd = Array2::from_shape_vec((self.data.vertices.len(), 2), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    /// Extract closed polygons from this path.
+    fn polygons(&self, py: Python<'_>) -> Vec<Py<PyPolygon2D>> {
+        self.data
+            .polygons()
+            .into_iter()
+            .map(|p| wrap_polygon(py, p.clone()))
+            .collect()
+    }
+
+    /// Lift this 2D path back to 3D using the stored `to_3d` transform.
+    ///
+    /// Transforms all vertices through the 4x4 matrix and converts
+    /// compatible segments (Line, Bezier, BSpline). Returns `None` if
+    /// no `to_3d` transform is set.
+    fn to_path3d(&self, py: Python<'_>) -> Option<Py<PyPath3D>> {
+        self.data.to_path3d().map(|p| wrap_path3d(py, p))
+    }
+
+    /// Open an interactive 2D viewer window displaying this path.
+    #[pyo3(signature = (*, title="rmesh 2D", width=1280, height=720, background=None))]
+    fn show(
+        &self,
+        py: Python<'_>,
+        title: &str,
+        width: u32,
+        height: u32,
+        background: Option<[f32; 3]>,
+    ) {
+        use rmesh_viewer::{Viewer2D, ViewerOptions};
+        let data = self.data.clone();
+        let options = ViewerOptions {
+            title: title.to_string(),
+            width,
+            height,
+            background: background.unwrap_or([1.0, 1.0, 1.0]),
+        };
+        py.detach(|| data.show_2d_with_options(options));
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<rmesh.Path2D vertices: {} segments: {}>",
+            self.data.vertices.len(),
+            self.data.segments.len()
+        )
+    }
+}
+
+// ============================================================================
+// PyPath3D
+// ============================================================================
+
+/// A 3D path consisting of vertices and line segments.
+#[pyclass(name = "Path3D")]
+pub struct PyPath3D {
+    vertices_cache: OnceCell<Py<PyArray2<f64>>>,
+    pub(crate) data: rmesh::path::Path3D,
+}
+
+#[pymethods]
+impl PyPath3D {
+    /// The path vertices as an (N, 3) array.
+    #[getter]
+    fn vertices(&self, py: Python<'_>) -> Py<PyArray2<f64>> {
+        self.vertices_cache
+            .get_or_init(|| {
+                let flat: Vec<f64> = self
+                    .data
+                    .vertices
+                    .iter()
+                    .flat_map(|p| [p.x, p.y, p.z])
+                    .collect();
+                let nd = Array2::from_shape_vec((self.data.vertices.len(), 3), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .clone_ref(py)
+    }
+
+    /// Discretize the path into a list of (M, 3) polylines.
+    fn discretize(&self, py: Python<'_>) -> Vec<Py<PyArray2<f64>>> {
+        self.data
+            .discretize()
+            .into_iter()
+            .map(|pts| {
+                let flat: Vec<f64> = pts.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+                let nd = Array2::from_shape_vec((pts.len(), 3), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<rmesh.Path3D vertices: {} segments: {}>",
+            self.data.vertices.len(),
+            self.data.segments.len()
+        )
+    }
+}
+
+/// Wrap a `Path3D` into a Python `PyPath3D` object.
+pub(crate) fn wrap_path3d(py: Python<'_>, data: rmesh::path::Path3D) -> Py<PyPath3D> {
+    Py::new(
+        py,
+        PyPath3D {
+            vertices_cache: OnceCell::new(),
+            data,
+        },
+    )
+    .unwrap()
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
+/// Wrap a `Polygon2D` into a Python `PyPolygon2D` object.
+pub(crate) fn wrap_polygon(py: Python<'_>, data: rmesh::path::Polygon2D) -> Py<PyPolygon2D> {
+    Py::new(
+        py,
+        PyPolygon2D {
+            exterior_cache: OnceCell::new(),
+            interiors_cache: OnceCell::new(),
+            data,
+        },
+    )
+    .unwrap()
+}
+
 /// Make a numpy array read-only by clearing the WRITEABLE flag.
-fn make_readonly<T: numpy::Element, D: numpy::ndarray::Dimension>(
+pub(crate) fn make_readonly<T: numpy::Element, D: numpy::ndarray::Dimension>(
     arr: &Bound<'_, numpy::PyArray<T, D>>,
 ) {
     unsafe {
@@ -585,7 +887,7 @@ macro_rules! cached_array {
 
 #[pyclass(name = "Trimesh")]
 pub struct PyTrimesh {
-    data: Trimesh,
+    pub(crate) data: Trimesh,
     vertices_cache: OnceCell<Py<PyArray2<f64>>>,
     faces_cache: OnceCell<Py<PyArray2<i64>>>,
     face_normals_cache: OnceCell<Py<PyArray2<f64>>>,
@@ -1067,6 +1369,41 @@ impl PyTrimesh {
         Self::new_from_trimesh(self.data.convex_hull().clone())
     }
 
+    /// Project the mesh onto a plane at multiple levels.
+    ///
+    /// Parameters
+    /// ----------
+    /// normal : (3,) float
+    ///     The plane normal direction.
+    /// origin : (3,) float
+    ///     A point on the plane.
+    /// levels : (N,) float
+    ///     Height offsets along the normal to project at.
+    ///
+    /// Returns
+    /// -------
+    /// list of (list of Polygon2D or None)
+    ///     One entry per level. None if no geometry intersects that level.
+    fn project(
+        &self,
+        py: Python<'_>,
+        normal: PyReadonlyArray1<'_, f64>,
+        origin: PyReadonlyArray1<'_, f64>,
+        levels: PyReadonlyArray1<'_, f64>,
+    ) -> Vec<Option<Vec<Py<PyPolygon2D>>>> {
+        let n = normal.as_array();
+        let o = origin.as_array();
+        let normal = Vector3::new(n[0], n[1], n[2]);
+        let origin = Point3::new(o[0], o[1], o[2]);
+        let levels: Vec<f64> = levels.as_array().to_vec();
+
+        self.data
+            .project(&normal, &origin, &levels)
+            .into_iter()
+            .map(|opt| opt.map(|polys| polys.into_iter().map(|p| wrap_polygon(py, p)).collect()))
+            .collect()
+    }
+
     /// Decompose the mesh into approximate convex parts.
     #[pyo3(signature = (max_hulls=64, resolution=400_000))]
     fn decompose(&self, max_hulls: u32, resolution: u32) -> Vec<Self> {
@@ -1280,220 +1617,6 @@ impl PyVoxelGrid {
 }
 
 // ============================================================================
-// PyGeometryDict
-// ============================================================================
-
-/// A dict-like collection of geometry, keyed by name.
-#[pyclass(name = "GeometryDict")]
-pub struct PyGeometryDict {
-    /// Stores (name, geometry) pairs, preserving insertion order
-    items: Vec<(String, Py<PyAny>)>,
-}
-
-#[pymethods]
-impl PyGeometryDict {
-    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        self.items
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, obj)| obj.clone_ref(py))
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("'{}'", key)))
-    }
-
-    fn __contains__(&self, key: &str) -> bool {
-        self.items.iter().any(|(name, _)| name == key)
-    }
-
-    fn __len__(&self) -> usize {
-        self.items.len()
-    }
-
-    fn __iter__(&self) -> PyGeometryDictKeysIter {
-        PyGeometryDictKeysIter {
-            keys: self.items.iter().map(|(k, _)| k.clone()).collect(),
-            index: 0,
-        }
-    }
-
-    fn keys(&self) -> Vec<String> {
-        self.items.iter().map(|(k, _)| k.clone()).collect()
-    }
-
-    fn values(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
-        self.items.iter().map(|(_, v)| v.clone_ref(py)).collect()
-    }
-
-    fn items(&self, py: Python<'_>) -> Vec<(String, Py<PyAny>)> {
-        self.items
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-            .collect()
-    }
-
-    #[pyo3(signature = (key, default=None))]
-    fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> Option<Py<PyAny>> {
-        self.items
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, obj)| obj.clone_ref(py))
-            .or(default)
-    }
-
-    fn __repr__(&self) -> String {
-        let keys: Vec<_> = self.items.iter().map(|(k, _)| format!("'{}'", k)).collect();
-        format!("GeometryDict({{{}}})", keys.join(", "))
-    }
-}
-
-#[pyclass]
-struct PyGeometryDictKeysIter {
-    keys: Vec<String>,
-    index: usize,
-}
-
-#[pymethods]
-impl PyGeometryDictKeysIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<String> {
-        if self.index < self.keys.len() {
-            let key = self.keys[self.index].clone();
-            self.index += 1;
-            Some(key)
-        } else {
-            None
-        }
-    }
-}
-
-// ============================================================================
-// PyScene
-// ============================================================================
-
-/// A scene containing geometry loaded from a file.
-#[pyclass(name = "Scene")]
-pub struct PyScene {
-    data: rmesh::scene::Scene,
-    geometry_cache: OnceCell<Py<PyGeometryDict>>,
-}
-
-impl PyScene {
-    fn new(data: rmesh::scene::Scene) -> Self {
-        Self {
-            data,
-            geometry_cache: OnceCell::new(),
-        }
-    }
-}
-
-#[pymethods]
-impl PyScene {
-    /// Get all geometry in the scene as a dict-like object keyed by name.
-    #[getter]
-    fn geometry(&self, py: Python<'_>) -> Py<PyGeometryDict> {
-        self.geometry_cache
-            .get_or_init(|| {
-                let items: Vec<(String, Py<PyAny>)> = self
-                    .data
-                    .geometry
-                    .iter()
-                    .filter_map(|(name, geom)| {
-                        let obj: Py<PyAny> = match geom {
-                            Geometry::Mesh(mesh) => {
-                                Py::new(py, PyTrimesh::new_from_trimesh((**mesh).clone()))
-                                    .ok()?
-                                    .into_any()
-                            }
-                            Geometry::Feature(model) => Py::new(
-                                py,
-                                crate::feature::PyFeatureModel {
-                                    inner: (**model).clone(),
-                                },
-                            )
-                            .ok()?
-                            .into_any(),
-                            // TODO: Path2D, Path3D, PointCloud bindings
-                            _ => return None,
-                        };
-                        Some((name.clone(), obj))
-                    })
-                    .collect();
-                Py::new(py, PyGeometryDict { items }).unwrap()
-            })
-            .clone_ref(py)
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Scene(geometry={})", self.data.geometry.len())
-    }
-
-    fn __len__(&self) -> usize {
-        self.data.geometry.len()
-    }
-
-    /// Open an interactive 3D viewer window displaying this scene.
-    #[pyo3(signature = (*, title="rmesh viewer", width=1280, height=720, background=None))]
-    fn show(
-        &self,
-        py: Python<'_>,
-        title: &str,
-        width: u32,
-        height: u32,
-        background: Option<[f32; 3]>,
-    ) {
-        let options = ViewerOptions {
-            title: title.to_string(),
-            width,
-            height,
-            background: background.unwrap_or([0.15, 0.15, 0.18]),
-        };
-        let data = self.data.clone();
-        py.detach(|| data.show_with_options(options));
-    }
-
-    /// Axis-aligned bounding box as a (2, 3) array [[min_x, min_y, min_z], [max_x, max_y, max_z]],
-    /// or None if the scene has no geometry with valid bounds.
-    #[getter]
-    fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
-        self.data.bounds().map(|(min, max)| {
-            let data = vec![min.x, min.y, min.z, max.x, max.y, max.z];
-            let nd = Array2::from_shape_vec((2, 3), data).unwrap();
-            let arr = PyArray2::from_array(py, &nd);
-            make_readonly(&arr);
-            arr.unbind()
-        })
-    }
-
-    /// Render this scene to a PNG image (headless, no window).
-    ///
-    /// Returns PNG bytes.
-    #[pyo3(signature = (*, width=1280, height=720, background=None))]
-    fn to_image<'py>(
-        &self,
-        py: Python<'py>,
-        width: u32,
-        height: u32,
-        background: Option<[f32; 3]>,
-    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-        let options = RenderOptions {
-            width,
-            height,
-            background: background.unwrap_or([0.15, 0.15, 0.18]),
-        };
-        let data = self.data.clone();
-        let rgba = py.detach(|| data.render_to_image(&options));
-        let img = image::RgbaImage::from_raw(width, height, rgba)
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("render failed"))?;
-        let mut buf = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(pyo3::types::PyBytes::new(py, &buf))
-    }
-}
-
-// ============================================================================
 // load
 // ============================================================================
 
@@ -1504,12 +1627,12 @@ pub fn py_load(
     file_obj: Py<PyAny>,
     file_type: Option<&str>,
     resolver: Option<Py<PyAny>>,
-) -> Result<PyScene> {
+) -> Result<crate::scene::PyScene> {
     // Try bytes first
     if let Ok(bytes) = file_obj.extract::<Vec<u8>>(py) {
         let ft = file_type.map(FileType::from_extension).transpose()?;
         let scene = load_with_resolver(&bytes, ft, resolver, py)?;
-        return Ok(PyScene::new(scene));
+        return Ok(crate::scene::PyScene::from_scene(scene));
     }
 
     // Try path
@@ -1535,7 +1658,7 @@ pub fn py_load(
     };
 
     let scene = load(&bytes, ft, Some(&FileResolver::from_file_path(path)))?;
-    Ok(PyScene::new(scene))
+    Ok(crate::scene::PyScene::from_scene(scene))
 }
 
 struct PyCallableResolver(Py<PyAny>);

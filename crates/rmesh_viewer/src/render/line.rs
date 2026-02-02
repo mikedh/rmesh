@@ -15,11 +15,31 @@ pub struct LineRenderer {
 }
 
 impl LineRenderer {
+    /// Create a line renderer for 2D (no depth buffer).
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn new_2d(
+        device: &wgpu::Device,
+        camera_bgl: &wgpu::BindGroupLayout,
+        format: TextureFormat,
+    ) -> Self {
+        Self::new_inner(device, camera_bgl, format, false)
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     pub fn new_with_format(
         device: &wgpu::Device,
         camera_bgl: &wgpu::BindGroupLayout,
         format: TextureFormat,
+    ) -> Self {
+        Self::new_inner(device, camera_bgl, format, true)
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn new_inner(
+        device: &wgpu::Device,
+        camera_bgl: &wgpu::BindGroupLayout,
+        format: TextureFormat,
+        use_depth: bool,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("line_shader"),
@@ -72,13 +92,17 @@ impl LineRenderer {
                 topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: StencilState::default(),
-                bias: DepthBiasState::default(),
-            }),
+            depth_stencil: if use_depth {
+                Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: StencilState::default(),
+                    bias: DepthBiasState::default(),
+                })
+            } else {
+                None
+            },
             multisample: MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -147,6 +171,13 @@ impl LineRenderer {
             pass.draw(0..path.vertex_count, 0..1);
         }
     }
+
+    /// Draw a single line buffer (used by 2D renderer).
+    pub fn draw_buffer<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, buf: &'a GpuPath) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, buf.vertex_buffer.slice(..));
+        pass.draw(0..buf.vertex_count, 0..1);
+    }
 }
 
 /// Generate grid and axes overlay vertices.
@@ -160,22 +191,22 @@ fn generate_overlays(extent: f32) -> (Vec<LineVertex>, Vec<LineVertex>) {
     let mut grid = Vec::with_capacity((lines as usize) * 4);
     for i in 0..lines {
         let t = -half + i as f32 * step;
-        // Lines parallel to Z axis
+        // Lines parallel to Y axis
         grid.push(LineVertex {
-            position: [t, 0.0, -half],
+            position: [t, -half, 0.0],
             color: grid_color,
         });
         grid.push(LineVertex {
-            position: [t, 0.0, half],
+            position: [t, half, 0.0],
             color: grid_color,
         });
         // Lines parallel to X axis
         grid.push(LineVertex {
-            position: [-half, 0.0, t],
+            position: [-half, t, 0.0],
             color: grid_color,
         });
         grid.push(LineVertex {
-            position: [half, 0.0, t],
+            position: [half, t, 0.0],
             color: grid_color,
         });
     }

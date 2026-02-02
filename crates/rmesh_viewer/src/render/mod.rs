@@ -1,6 +1,8 @@
+pub mod fill;
 pub mod line;
 pub mod mesh;
 pub mod point;
+pub mod scene2d;
 pub mod voxel;
 
 use nalgebra::Matrix4;
@@ -166,7 +168,7 @@ impl SceneRenderer {
             &mut render_pass,
             &scene_data.meshes,
             mesh_bind_groups,
-            toggles.backface_culling,
+            toggles.wireframe,
         );
 
         // Draw paths

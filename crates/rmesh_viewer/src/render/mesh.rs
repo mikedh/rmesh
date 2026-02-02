@@ -34,8 +34,8 @@ pub struct MeshBindGroups {
 }
 
 pub struct MeshRenderer {
-    pipeline: wgpu::RenderPipeline,
-    pipeline_no_cull: wgpu::RenderPipeline,
+    pipeline_fill: wgpu::RenderPipeline,
+    pipeline_wire: wgpu::RenderPipeline,
     model_bind_group_layout: wgpu::BindGroupLayout,
     material_bind_group_layout: wgpu::BindGroupLayout,
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -138,7 +138,7 @@ impl MeshRenderer {
             ],
         };
 
-        let make_pipeline = |cull: Option<wgpu::Face>| {
+        let make_pipeline = |cull: Option<wgpu::Face>, poly_mode: wgpu::PolygonMode| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("mesh_pipeline"),
                 layout: Some(&pipeline_layout),
@@ -163,7 +163,7 @@ impl MeshRenderer {
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Ccw,
                     cull_mode: cull,
-                    polygon_mode: wgpu::PolygonMode::Fill,
+                    polygon_mode: poly_mode,
                     unclipped_depth: false,
                     conservative: false,
                 },
@@ -180,8 +180,8 @@ impl MeshRenderer {
             })
         };
 
-        let pipeline = make_pipeline(Some(wgpu::Face::Back));
-        let pipeline_no_cull = make_pipeline(None);
+        let pipeline_fill = make_pipeline(None, wgpu::PolygonMode::Fill);
+        let pipeline_wire = make_pipeline(None, wgpu::PolygonMode::Line);
 
         // 1x1 white fallback texture for meshes without a base color texture
         let default_texture = device.create_texture_with_data(
@@ -216,8 +216,8 @@ impl MeshRenderer {
         });
 
         Self {
-            pipeline,
-            pipeline_no_cull,
+            pipeline_fill,
+            pipeline_wire,
             model_bind_group_layout: model_bgl,
             material_bind_group_layout: material_bgl,
             texture_bind_group_layout: texture_bgl,
@@ -317,13 +317,13 @@ impl MeshRenderer {
         pass: &mut wgpu::RenderPass<'a>,
         meshes: &'a [GpuMesh],
         bind_groups: &'a [MeshBindGroups],
-        backface_culling: bool,
+        wireframe: bool,
     ) {
-        if backface_culling {
-            pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(if wireframe {
+            &self.pipeline_wire
         } else {
-            pass.set_pipeline(&self.pipeline_no_cull);
-        }
+            &self.pipeline_fill
+        });
 
         for (mesh, bg) in meshes.iter().zip(bind_groups.iter()) {
             pass.set_bind_group(1, &bg.model_bind_group, &[]);

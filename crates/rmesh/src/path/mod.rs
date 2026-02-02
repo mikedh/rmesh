@@ -90,11 +90,10 @@ macro_rules! resolve_deviation {
     };
 }
 
-use std::sync::OnceLock;
-
-use nalgebra::{Point2, Point3};
+use nalgebra::{Matrix4, Point2, Point3};
 use serde::{Deserialize, Serialize};
 
+use crate::cache::Cache;
 use crate::creation::Triangulator;
 
 // Re-export commonly used types
@@ -280,16 +279,20 @@ pub struct Path2D {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deviation: Option<f64>,
 
+    /// Optional transform from 2D path space back to 3D
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_3d: Option<Matrix4<f64>>,
+
     // Cached - computed lazily on first access (skip in serde)
     #[serde(skip)]
-    cache_bounds: OnceLock<Option<(Point2<f64>, Point2<f64>)>>,
+    cache_bounds: Cache<Option<(Point2<f64>, Point2<f64>)>>,
     #[serde(skip)]
-    cache_extents: OnceLock<[f64; 2]>,
+    cache_extents: Cache<[f64; 2]>,
     #[serde(skip)]
-    cache_polygons: OnceLock<Vec<Polygon2D>>,
+    cache_polygons: Cache<Vec<Polygon2D>>,
     #[serde(skip)]
     #[allow(clippy::type_complexity)]
-    cache_triangulation: OnceLock<(Vec<Point2<f64>>, Vec<[usize; 3]>)>,
+    cache_triangulation: Cache<(Vec<Point2<f64>>, Vec<[usize; 3]>)>,
 }
 
 impl Default for Path2D {
@@ -298,10 +301,11 @@ impl Default for Path2D {
             vertices: Vec::new(),
             segments: Vec::new(),
             deviation: None,
-            cache_bounds: OnceLock::new(),
-            cache_extents: OnceLock::new(),
-            cache_polygons: OnceLock::new(),
-            cache_triangulation: OnceLock::new(),
+            to_3d: None,
+            cache_bounds: Cache::new(),
+            cache_extents: Cache::new(),
+            cache_polygons: Cache::new(),
+            cache_triangulation: Cache::new(),
         }
     }
 }
@@ -312,11 +316,12 @@ impl Clone for Path2D {
             vertices: self.vertices.clone(),
             segments: self.segments.clone(),
             deviation: self.deviation,
+            to_3d: self.to_3d,
             // Fresh caches - will recompute on demand
-            cache_bounds: OnceLock::new(),
-            cache_extents: OnceLock::new(),
-            cache_polygons: OnceLock::new(),
-            cache_triangulation: OnceLock::new(),
+            cache_bounds: Cache::new(),
+            cache_extents: Cache::new(),
+            cache_polygons: Cache::new(),
+            cache_triangulation: Cache::new(),
         }
     }
 }
@@ -326,6 +331,7 @@ impl PartialEq for Path2D {
         self.vertices == other.vertices
             && self.segments == other.segments
             && self.deviation == other.deviation
+            && self.to_3d == other.to_3d
     }
 }
 
@@ -344,10 +350,11 @@ impl Path2D {
             vertices,
             segments,
             deviation: None,
-            cache_bounds: OnceLock::new(),
-            cache_extents: OnceLock::new(),
-            cache_polygons: OnceLock::new(),
-            cache_triangulation: OnceLock::new(),
+            to_3d: None,
+            cache_bounds: Cache::new(),
+            cache_extents: Cache::new(),
+            cache_polygons: Cache::new(),
+            cache_triangulation: Cache::new(),
         }
     }
 
@@ -717,6 +724,37 @@ impl Path2D {
             .sum()
     }
 
+    /// Lift this 2D path back to 3D using the stored `to_3d` transform.
+    ///
+    /// Transforms all vertices through the 4x4 matrix and converts
+    /// segments that have direct 3D equivalents (Line, CubicBezier,
+    /// QuadraticBezier, BSpline). Arc, Circle, and Ellipse segments
+    /// are skipped since their 3D representations differ structurally.
+    ///
+    /// Returns `None` if no `to_3d` transform is set.
+    pub fn to_path3d(&self) -> Option<Path3D> {
+        let to_3d = self.to_3d?;
+        let vertices: Vec<Point3<f64>> = self
+            .vertices
+            .iter()
+            .map(|p| to_3d.transform_point(&Point3::new(p.x, p.y, 0.0)))
+            .collect();
+
+        let segments: Vec<Segment3D> = self
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment2D::Line(l) => Some(Segment3D::Line(l.clone())),
+                Segment2D::CubicBezier(b) => Some(Segment3D::CubicBezier(b.clone())),
+                Segment2D::QuadraticBezier(b) => Some(Segment3D::QuadraticBezier(b.clone())),
+                Segment2D::BSpline(b) => Some(Segment3D::BSpline(b.clone())),
+                _ => None,
+            })
+            .collect();
+
+        Some(Path3D::from_vertices_and_segments(vertices, segments))
+    }
+
     /// Get the area of the first ring
     ///
     /// Uses the shoelace formula. Returns 0 if no rings are found.
@@ -749,9 +787,9 @@ pub struct Path3D {
 
     // Cached - computed lazily on first access (skip in serde)
     #[serde(skip)]
-    cache_bounds: OnceLock<Option<(Point3<f64>, Point3<f64>)>>,
+    cache_bounds: Cache<Option<(Point3<f64>, Point3<f64>)>>,
     #[serde(skip)]
-    cache_extents: OnceLock<[f64; 3]>,
+    cache_extents: Cache<[f64; 3]>,
 }
 
 impl Default for Path3D {
@@ -760,8 +798,8 @@ impl Default for Path3D {
             vertices: Vec::new(),
             segments: Vec::new(),
             deviation: None,
-            cache_bounds: OnceLock::new(),
-            cache_extents: OnceLock::new(),
+            cache_bounds: Cache::new(),
+            cache_extents: Cache::new(),
         }
     }
 }
@@ -773,8 +811,8 @@ impl Clone for Path3D {
             segments: self.segments.clone(),
             deviation: self.deviation,
             // Fresh caches - will recompute on demand
-            cache_bounds: OnceLock::new(),
-            cache_extents: OnceLock::new(),
+            cache_bounds: Cache::new(),
+            cache_extents: Cache::new(),
         }
     }
 }
@@ -802,8 +840,8 @@ impl Path3D {
             vertices,
             segments,
             deviation: None,
-            cache_bounds: OnceLock::new(),
-            cache_extents: OnceLock::new(),
+            cache_bounds: Cache::new(),
+            cache_extents: Cache::new(),
         }
     }
 

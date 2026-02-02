@@ -36,6 +36,8 @@ dev = [
     "trimesh[easy,recommend]",
     "pytest>=9.0.2",
     "ruff>=0.14.13",
+    "matplotlib>=3.10.8",
+    "cascadio>=0.0.18rc5",
 ]
 
 
@@ -44,7 +46,7 @@ addopts = "-p rmesh.compatibility.conftest --rmesh-compat=compare"
 testpaths = ["test/trimesh/tests"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py314"
 line-length = 90
 
 [tool.ruff.lint]

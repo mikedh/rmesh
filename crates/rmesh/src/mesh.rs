@@ -1,17 +1,19 @@
-use std::sync::OnceLock;
-
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     attributes::{Attributes, LoadSource, Material},
+    cache::Cache,
+    creation::Plane,
     graph::{EdgeGroups, ManifoldStatus, SortedEdge, adjacency},
+    path::Polygon2D,
     simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
     triangles::{
         bvh::TriangleBvh,
         inertia::{self, MassProperties},
     },
 };
-use nalgebra::{Matrix3, Point3, Vector3};
+use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
 use rayon::prelude::*;
 
 /// A triangle mesh with vertices and face indices.
@@ -34,7 +36,7 @@ use rayon::prelude::*;
 ///
 /// If you mutate `vertices` or `faces` after calling any cached method,
 /// the cached values will be stale. Create a new `Trimesh` instead of mutating.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Trimesh {
     /// Vertex positions
     pub vertices: Vec<Point3<f64>>,
@@ -56,22 +58,38 @@ pub struct Trimesh {
     pub density: Option<f64>,
 
     // Cached derived values - computed lazily on first access
-    cache_faces_cross: OnceLock<Vec<Vector3<f64>>>,
-    cache_face_normals: OnceLock<Vec<Vector3<f64>>>,
-    cache_faces_area: OnceLock<Vec<f64>>,
-    cache_area: OnceLock<f64>,
-    cache_edges: OnceLock<Vec<[usize; 2]>>,
-    cache_face_adjacency: OnceLock<Vec<(usize, usize)>>,
-    cache_edges_unique: OnceLock<Vec<[usize; 2]>>,
-    cache_edges_sorted: OnceLock<Vec<SortedEdge>>,
-    cache_edges_grouped: OnceLock<EdgeGroups>,
-    cache_edges_unique_inverse: OnceLock<Vec<usize>>,
-    cache_mass_properties: OnceLock<MassProperties>,
-    cache_manifold_status: OnceLock<ManifoldStatus>,
-    cache_vertex_mask: OnceLock<Vec<bool>>,
-    cache_bvh: OnceLock<TriangleBvh>,
-    cache_convex_hull: OnceLock<Box<Trimesh>>,
-    cache_obb: OnceLock<crate::convex::OrientedBoundingBox>,
+    #[serde(skip)]
+    cache_faces_cross: Cache<Vec<Vector3<f64>>>,
+    #[serde(skip)]
+    cache_face_normals: Cache<Vec<Vector3<f64>>>,
+    #[serde(skip)]
+    cache_faces_area: Cache<Vec<f64>>,
+    #[serde(skip)]
+    cache_area: Cache<f64>,
+    #[serde(skip)]
+    cache_edges: Cache<Vec<[usize; 2]>>,
+    #[serde(skip)]
+    cache_face_adjacency: Cache<Vec<(usize, usize)>>,
+    #[serde(skip)]
+    cache_edges_unique: Cache<Vec<[usize; 2]>>,
+    #[serde(skip)]
+    cache_edges_sorted: Cache<Vec<SortedEdge>>,
+    #[serde(skip)]
+    cache_edges_grouped: Cache<EdgeGroups>,
+    #[serde(skip)]
+    cache_edges_unique_inverse: Cache<Vec<usize>>,
+    #[serde(skip)]
+    cache_mass_properties: Cache<MassProperties>,
+    #[serde(skip)]
+    cache_manifold_status: Cache<ManifoldStatus>,
+    #[serde(skip)]
+    cache_vertex_mask: Cache<Vec<bool>>,
+    #[serde(skip)]
+    cache_bvh: Cache<TriangleBvh>,
+    #[serde(skip)]
+    cache_convex_hull: Cache<Box<Trimesh>>,
+    #[serde(skip)]
+    cache_obb: Cache<crate::convex::OrientedBoundingBox>,
 }
 
 impl Default for Trimesh {
@@ -84,22 +102,22 @@ impl Default for Trimesh {
             source: LoadSource::default(),
             materials: Vec::new(),
             density: None,
-            cache_faces_cross: OnceLock::new(),
-            cache_face_normals: OnceLock::new(),
-            cache_faces_area: OnceLock::new(),
-            cache_area: OnceLock::new(),
-            cache_edges: OnceLock::new(),
-            cache_face_adjacency: OnceLock::new(),
-            cache_edges_unique: OnceLock::new(),
-            cache_edges_sorted: OnceLock::new(),
-            cache_edges_grouped: OnceLock::new(),
-            cache_edges_unique_inverse: OnceLock::new(),
-            cache_mass_properties: OnceLock::new(),
-            cache_manifold_status: OnceLock::new(),
-            cache_vertex_mask: OnceLock::new(),
-            cache_bvh: OnceLock::new(),
-            cache_convex_hull: OnceLock::new(),
-            cache_obb: OnceLock::new(),
+            cache_faces_cross: Cache::new(),
+            cache_face_normals: Cache::new(),
+            cache_faces_area: Cache::new(),
+            cache_area: Cache::new(),
+            cache_edges: Cache::new(),
+            cache_face_adjacency: Cache::new(),
+            cache_edges_unique: Cache::new(),
+            cache_edges_sorted: Cache::new(),
+            cache_edges_grouped: Cache::new(),
+            cache_edges_unique_inverse: Cache::new(),
+            cache_mass_properties: Cache::new(),
+            cache_manifold_status: Cache::new(),
+            cache_vertex_mask: Cache::new(),
+            cache_bvh: Cache::new(),
+            cache_convex_hull: Cache::new(),
+            cache_obb: Cache::new(),
         }
     }
 }
@@ -116,23 +134,35 @@ impl Clone for Trimesh {
             density: self.density,
 
             // Fresh cache - will recompute on demand
-            cache_faces_cross: OnceLock::new(),
-            cache_face_normals: OnceLock::new(),
-            cache_faces_area: OnceLock::new(),
-            cache_area: OnceLock::new(),
-            cache_edges: OnceLock::new(),
-            cache_face_adjacency: OnceLock::new(),
-            cache_edges_unique: OnceLock::new(),
-            cache_edges_sorted: OnceLock::new(),
-            cache_edges_grouped: OnceLock::new(),
-            cache_edges_unique_inverse: OnceLock::new(),
-            cache_mass_properties: OnceLock::new(),
-            cache_manifold_status: OnceLock::new(),
-            cache_vertex_mask: OnceLock::new(),
-            cache_bvh: OnceLock::new(),
-            cache_convex_hull: OnceLock::new(),
-            cache_obb: OnceLock::new(),
+            cache_faces_cross: Cache::new(),
+            cache_face_normals: Cache::new(),
+            cache_faces_area: Cache::new(),
+            cache_area: Cache::new(),
+            cache_edges: Cache::new(),
+            cache_face_adjacency: Cache::new(),
+            cache_edges_unique: Cache::new(),
+            cache_edges_sorted: Cache::new(),
+            cache_edges_grouped: Cache::new(),
+            cache_edges_unique_inverse: Cache::new(),
+            cache_mass_properties: Cache::new(),
+            cache_manifold_status: Cache::new(),
+            cache_vertex_mask: Cache::new(),
+            cache_bvh: Cache::new(),
+            cache_convex_hull: Cache::new(),
+            cache_obb: Cache::new(),
         }
+    }
+}
+
+impl PartialEq for Trimesh {
+    fn eq(&self, other: &Self) -> bool {
+        self.vertices == other.vertices
+            && self.faces == other.faces
+            && self.attributes_vertex == other.attributes_vertex
+            && self.attributes_face == other.attributes_face
+            && self.source == other.source
+            && self.materials == other.materials
+            && self.density == other.density
     }
 }
 
@@ -788,6 +818,29 @@ impl Trimesh {
             .collect()
     }
 
+    /// Project the mesh onto a plane at multiple levels.
+    ///
+    /// Returns one `Option<Vec<Polygon2D>>` per level. Levels where
+    /// the plane doesn't intersect any geometry return `None`.
+    ///
+    /// # Arguments
+    /// * `normal` - Projection direction (will be normalized)
+    /// * `origin` - A point on the projection plane
+    /// * `levels` - Height offsets along the normal
+    pub fn project(
+        &self,
+        normal: &Vector3<f64>,
+        origin: &Point3<f64>,
+        levels: &[f64],
+    ) -> Vec<Option<Vec<Polygon2D>>> {
+        let normal = normal.normalize();
+        let plane = Plane::new(normal, *origin);
+        let dots = crate::project::vertex_dots(&self.vertices, &normal, origin);
+        let vertices_2d = plane.to_2d(&self.vertices);
+        let to_3d: Option<Matrix4<f64>> = plane.transform_to_2d().try_inverse();
+        crate::project::project(&self.faces, &dots, &vertices_2d, levels, to_3d)
+    }
+
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,
     /// or None if the mesh is empty or degenerate.
     pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
@@ -839,7 +892,7 @@ mod tests {
     use crate::creation::create_box;
     use crate::exchange::{FileType, load};
     use crate::geometry::Geometry;
-    use approx::relative_eq;
+    use approx::{assert_relative_eq, relative_eq};
 
     #[test]
     fn test_mesh_normals() {
@@ -1022,5 +1075,76 @@ mod tests {
             duration1,
             duration2
         );
+    }
+
+    #[test]
+    fn test_project_to_3d_planes() {
+        // Project a cube along Z and verify that transformed polygon
+        // vertices lie on the expected planes: origin + normal * level.
+        let cube = create_box(&[2.0, 2.0, 2.0]);
+        let normal = Vector3::new(0.0, 0.0, 1.0);
+        let origin = Point3::new(0.0, 0.0, 0.0);
+        let levels = vec![-0.5, 0.0, 0.5];
+
+        let results = cube.project(&normal, &origin, &levels);
+
+        for (i, level) in levels.iter().enumerate() {
+            let polys = results[i].as_ref().expect("should have projection");
+            for poly in polys {
+                let to_3d = poly.to_3d.expect("should have to_3d");
+                for p in &poly.exterior {
+                    let p3 = to_3d.transform_point(&Point3::new(p.x, p.y, 0.0));
+                    let height = (p3 - origin).dot(&normal);
+                    assert_relative_eq!(height, *level, epsilon = 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_project_to_3d_diagonal() {
+        // Same test but with a diagonal normal to exercise the rotation.
+        let cube = create_box(&[2.0, 2.0, 2.0]);
+        let normal = Vector3::new(1.0, 1.0, 1.0).normalize();
+        let origin = Point3::new(1.0, 2.0, 3.0);
+        let levels = vec![-0.3, 0.0, 0.3];
+
+        let results = cube.project(&normal, &origin, &levels);
+
+        for (i, level) in levels.iter().enumerate() {
+            if let Some(polys) = &results[i] {
+                for poly in polys {
+                    let to_3d = poly.to_3d.expect("should have to_3d");
+                    for p in &poly.exterior {
+                        let p3 = to_3d.transform_point(&Point3::new(p.x, p.y, 0.0));
+                        let height = (p3 - origin).dot(&normal);
+                        assert_relative_eq!(height, *level, epsilon = 1e-6);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_project_to_path3d() {
+        // Verify Polygon2D::to_path3d() produces 3D vertices on the plane.
+        let cube = create_box(&[2.0, 2.0, 2.0]);
+        let normal = Vector3::new(0.0, 0.0, 1.0);
+        let origin = Point3::origin();
+        let levels = vec![0.0];
+
+        let results = cube.project(&normal, &origin, &levels);
+        let polys = results[0].as_ref().expect("should have projection");
+
+        for poly in polys {
+            let path3d = poly.to_path3d().expect("should produce Path3D");
+            assert!(!path3d.vertices.is_empty());
+            assert!(!path3d.segments.is_empty());
+
+            // All 3D vertices should lie on the Z=0 plane
+            for v in &path3d.vertices {
+                assert_relative_eq!(v.z, 0.0, epsilon = 1e-6);
+            }
+        }
     }
 }

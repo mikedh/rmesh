@@ -6,22 +6,28 @@
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
-use nalgebra::Point2;
+use i_overlay::mesh::outline::offset::OutlineOffset;
+use i_overlay::mesh::style::{LineJoin, OutlineStyle};
+use nalgebra::{Matrix4, Point2, Point3};
 use serde::{Deserialize, Serialize};
 
-use super::Path2D;
+use super::{Line, Path2D, Path3D, Segment3D};
 
 /// Type alias for i_overlay contours
 type Contour = Vec<[f64; 2]>;
 type Contours = Vec<Contour>;
+type Shape = Vec<Contour>;
 
 /// A 2D polygon with exterior boundary and interior holes
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Polygon2D {
     /// Exterior ring (CCW orientation for positive area)
     pub exterior: Vec<Point2<f64>>,
     /// Interior rings / holes (CW orientation)
     pub interiors: Vec<Vec<Point2<f64>>>,
+    /// Optional transform from 2D polygon space back to 3D
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_3d: Option<Matrix4<f64>>,
 }
 
 impl Polygon2D {
@@ -30,6 +36,7 @@ impl Polygon2D {
         Self {
             exterior,
             interiors: Vec::new(),
+            to_3d: None,
         }
     }
 
@@ -38,6 +45,7 @@ impl Polygon2D {
         Self {
             exterior,
             interiors,
+            to_3d: None,
         }
     }
 
@@ -94,6 +102,120 @@ impl Polygon2D {
     /// Get the number of holes
     pub fn num_holes(&self) -> usize {
         self.interiors.len()
+    }
+
+    /// Convert to i_overlay shape format (exterior + holes as contour list).
+    fn to_shape(&self) -> Shape {
+        let mut contours = Vec::with_capacity(1 + self.interiors.len());
+        contours.push(self.exterior.iter().map(|p| [p.x, p.y]).collect());
+        for hole in &self.interiors {
+            contours.push(hole.iter().map(|p| [p.x, p.y]).collect());
+        }
+        contours
+    }
+
+    /// Perform a boolean operation between this polygon and another.
+    fn boolean(&self, other: &Polygon2D, rule: OverlayRule) -> Vec<Polygon2D> {
+        let subj = self.to_shape();
+        let clip = other.to_shape();
+        let result = subj.overlay(&clip, rule, FillRule::EvenOdd);
+        let mut polys = shapes_to_polygons(&result, None);
+        // Propagate to_3d from self to results
+        for p in &mut polys {
+            p.to_3d = self.to_3d;
+        }
+        polys
+    }
+
+    /// Compute the union of this polygon with another.
+    pub fn union(&self, other: &Polygon2D) -> Vec<Polygon2D> {
+        self.boolean(other, OverlayRule::Union)
+    }
+
+    /// Compute the difference of this polygon minus another.
+    pub fn difference(&self, other: &Polygon2D) -> Vec<Polygon2D> {
+        self.boolean(other, OverlayRule::Difference)
+    }
+
+    /// Compute the intersection of this polygon with another.
+    pub fn intersection(&self, other: &Polygon2D) -> Vec<Polygon2D> {
+        self.boolean(other, OverlayRule::Intersect)
+    }
+
+    /// Offset the polygon boundary by `distance`.
+    ///
+    /// Positive = expand outward, negative = shrink inward.
+    /// Returns empty vec if polygon shrinks to nothing.
+    pub fn buffer(&self, distance: f64) -> Vec<Polygon2D> {
+        let shape = self.to_shape();
+        let style = OutlineStyle::new(distance).line_join(LineJoin::Round(0.1));
+        let result = shape.outline(&style);
+        let mut polys = shapes_to_polygons(&result, None);
+        // Propagate to_3d from self to results
+        for p in &mut polys {
+            p.to_3d = self.to_3d;
+        }
+        polys
+    }
+
+    /// Convert this polygon to a `Path2D` with Line segments tracing each ring.
+    pub fn to_path2d(&self) -> Path2D {
+        let mut path = Path2D::new();
+
+        let mut add_ring = |ring: &[Point2<f64>]| {
+            if ring.len() < 2 {
+                return;
+            }
+            let start = path.vertices.len();
+            for p in ring {
+                path.add_vertex(*p);
+            }
+            let end = path.vertices.len();
+            for i in start..end {
+                let j = if i + 1 < end { i + 1 } else { start };
+                path.push(super::Segment2D::Line(Line::new(i, j)));
+            }
+        };
+
+        add_ring(&self.exterior);
+        for interior in &self.interiors {
+            add_ring(interior);
+        }
+        path.to_3d = self.to_3d;
+        path
+    }
+
+    /// Lift this 2D polygon back to 3D using the stored `to_3d` transform.
+    ///
+    /// Each ring (exterior + interiors) becomes a closed loop of `Line` segments
+    /// in the returned `Path3D`. Returns `None` if no `to_3d` transform is set.
+    pub fn to_path3d(&self) -> Option<Path3D> {
+        let to_3d = self.to_3d?;
+
+        let mut path = Path3D::new();
+
+        // Helper: add a closed ring of Line segments
+        let mut add_ring = |ring: &[Point2<f64>]| {
+            if ring.len() < 2 {
+                return;
+            }
+            let start = path.vertices.len();
+            for p in ring {
+                path.add_vertex(to_3d.transform_point(&Point3::new(p.x, p.y, 0.0)));
+            }
+            let end = path.vertices.len();
+            for i in start..end {
+                let j = if i + 1 < end { i + 1 } else { start };
+                path.push(Segment3D::Line(Line::new(i, j)));
+            }
+        };
+
+        add_ring(&self.exterior);
+        for interior in &self.interiors {
+            add_ring(interior);
+        }
+
+        Some(path)
     }
 }
 
@@ -160,15 +282,22 @@ pub fn polygons_from_path(path: &Path2D, _tolerance: f64) -> Vec<Polygon2D> {
         if signed_area(&exterior) < 0.0 {
             exterior.reverse();
         }
-        return vec![Polygon2D::new(exterior)];
+        return vec![Polygon2D {
+            exterior,
+            interiors: Vec::new(),
+            to_3d: path.to_3d,
+        }];
     }
 
     // Use i_overlay to handle enclosure detection and hole assignment
-    polygons_from_rings_overlay(&rings)
+    polygons_from_rings_overlay(&rings, path.to_3d)
 }
 
 /// Use i_overlay to build polygons with proper hole assignment
-fn polygons_from_rings_overlay(rings: &[Vec<Point2<f64>>]) -> Vec<Polygon2D> {
+fn polygons_from_rings_overlay(
+    rings: &[Vec<Point2<f64>>],
+    to_3d: Option<Matrix4<f64>>,
+) -> Vec<Polygon2D> {
     if rings.is_empty() {
         return Vec::new();
     }
@@ -188,32 +317,29 @@ fn polygons_from_rings_overlay(rings: &[Vec<Point2<f64>>]) -> Vec<Polygon2D> {
     let empty: Contours = vec![];
     let result = contours.overlay(&empty, OverlayRule::Subject, FillRule::EvenOdd);
 
-    // Convert i_overlay result back to Polygon2D
-    let mut polygons = Vec::new();
+    shapes_to_polygons(&result, to_3d)
+}
 
-    for shape in result {
-        if shape.is_empty() {
-            continue;
-        }
-
-        // First contour is the exterior
-        let exterior: Vec<Point2<f64>> = shape[0].iter().map(|p| Point2::new(p[0], p[1])).collect();
-
-        // Remaining contours are holes
-        let interiors: Vec<Vec<Point2<f64>>> = shape[1..]
-            .iter()
-            .map(|contour| contour.iter().map(|p| Point2::new(p[0], p[1])).collect())
-            .collect();
-
-        if !exterior.is_empty() {
-            polygons.push(Polygon2D {
+/// Convert i_overlay shapes result to `Vec<Polygon2D>`.
+///
+/// Each shape is `[exterior, hole0, hole1, ...]`.
+fn shapes_to_polygons(shapes: &[Shape], to_3d: Option<Matrix4<f64>>) -> Vec<Polygon2D> {
+    shapes
+        .iter()
+        .filter(|s| !s.is_empty() && !s[0].is_empty())
+        .map(|shape| {
+            let exterior = shape[0].iter().map(|p| Point2::new(p[0], p[1])).collect();
+            let interiors = shape[1..]
+                .iter()
+                .map(|c| c.iter().map(|p| Point2::new(p[0], p[1])).collect())
+                .collect();
+            Polygon2D {
                 exterior,
                 interiors,
-            });
-        }
-    }
-
-    polygons
+                to_3d,
+            }
+        })
+        .collect()
 }
 
 /// Create a simple Polygon2D from a list of points (no holes)
@@ -360,5 +486,93 @@ mod tests {
 
         assert_eq!(polygons.len(), 1);
         assert_relative_eq!(polygons[0].area(), 100.0, epsilon = 0.1);
+    }
+
+    /// Helper: create a CCW square polygon at (x, y) with given side length.
+    fn make_square(x: f64, y: f64, size: f64) -> Polygon2D {
+        Polygon2D::new(vec![
+            Point2::new(x, y),
+            Point2::new(x + size, y),
+            Point2::new(x + size, y + size),
+            Point2::new(x, y + size),
+        ])
+    }
+
+    #[test]
+    fn test_union_overlapping() {
+        // Two overlapping unit squares: [0,1]x[0,1] and [0.5,1.5]x[0,1]
+        let a = make_square(0.0, 0.0, 1.0);
+        let b = make_square(0.5, 0.0, 1.0);
+
+        let result = a.union(&b);
+        assert_eq!(result.len(), 1);
+
+        let area: f64 = result.iter().map(|p| p.area()).sum();
+        // Union of two overlapping unit squares = 1.5
+        assert_relative_eq!(area, 1.5, epsilon = 1e-6);
+        assert!(area > a.area());
+        assert!(area > b.area());
+    }
+
+    #[test]
+    fn test_difference() {
+        // Large square minus small centered square → polygon with hole
+        let outer = make_square(0.0, 0.0, 10.0);
+        let inner = make_square(2.0, 2.0, 6.0);
+
+        let result = outer.difference(&inner);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_holes(), 1);
+
+        let area: f64 = result.iter().map(|p| p.area()).sum();
+        // 100 - 36 = 64
+        assert_relative_eq!(area, 64.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_intersection() {
+        // Two overlapping unit squares
+        let a = make_square(0.0, 0.0, 1.0);
+        let b = make_square(0.5, 0.0, 1.0);
+
+        let result = a.intersection(&b);
+        assert_eq!(result.len(), 1);
+
+        let area: f64 = result.iter().map(|p| p.area()).sum();
+        // Overlap region = 0.5 x 1.0 = 0.5
+        assert_relative_eq!(area, 0.5, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_buffer_positive() {
+        let square = make_square(0.0, 0.0, 10.0);
+        let original_area = square.area();
+
+        let result = square.buffer(1.0);
+        assert!(!result.is_empty());
+
+        let area: f64 = result.iter().map(|p| p.area()).sum();
+        assert!(area > original_area);
+    }
+
+    #[test]
+    fn test_buffer_negative() {
+        let square = make_square(0.0, 0.0, 10.0);
+        let original_area = square.area();
+
+        let result = square.buffer(-1.0);
+        assert!(!result.is_empty());
+
+        let area: f64 = result.iter().map(|p| p.area()).sum();
+        assert!(area < original_area);
+    }
+
+    #[test]
+    fn test_buffer_collapse() {
+        // A small square buffered by a large negative → nothing left
+        let square = make_square(0.0, 0.0, 2.0);
+
+        let result = square.buffer(-10.0);
+        assert!(result.is_empty());
     }
 }

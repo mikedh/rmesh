@@ -11,6 +11,7 @@ pollster = "0.4"
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }
 anyhow = { workspace = true }
+earcut = "0.4"
 image = "0.25"
 log = "0.4"
 env_logger = "0.11"

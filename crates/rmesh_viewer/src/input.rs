@@ -10,16 +10,14 @@ pub struct RenderToggles {
     pub wireframe: bool,
     pub grid: bool,
     pub axes: bool,
-    pub backface_culling: bool,
 }
 
 impl Default for RenderToggles {
     fn default() -> Self {
         Self {
             wireframe: false,
-            grid: true,
-            axes: true,
-            backface_culling: false,
+            grid: false,
+            axes: false,
         }
     }
 }
@@ -45,6 +43,14 @@ impl Default for InputState {
     }
 }
 
+/// Zoom box state for right-drag selection (used by 2D viewer).
+#[derive(Default)]
+pub struct ZoomBoxState {
+    pub active: bool,
+    pub start: (f64, f64),
+    pub current: (f64, f64),
+}
+
 /// Commands produced by input processing.
 pub enum InputCommand {
     Rotate(Vector2<f64>),
@@ -54,7 +60,6 @@ pub enum InputCommand {
     ToggleWireframe,
     ToggleGrid,
     ToggleAxes,
-    ToggleCulling,
     ToggleFullscreen,
     Close,
 }
@@ -129,7 +134,6 @@ impl InputState {
                 "w" => Some(InputCommand::ToggleWireframe),
                 "g" => Some(InputCommand::ToggleGrid),
                 "a" => Some(InputCommand::ToggleAxes),
-                "c" => Some(InputCommand::ToggleCulling),
                 "f" => Some(InputCommand::ToggleFullscreen),
                 _ => None,
             },
@@ -151,7 +155,6 @@ impl InputState {
             InputCommand::ToggleWireframe => toggles.wireframe = !toggles.wireframe,
             InputCommand::ToggleGrid => toggles.grid = !toggles.grid,
             InputCommand::ToggleAxes => toggles.axes = !toggles.axes,
-            InputCommand::ToggleCulling => toggles.backface_culling = !toggles.backface_culling,
             InputCommand::ResetView | InputCommand::Close | InputCommand::ToggleFullscreen => {}
         }
     }

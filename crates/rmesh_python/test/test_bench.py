@@ -24,7 +24,7 @@ def compare(file_data: bytes, file_type: str):
         # make sure we can load in both libraries before benchmarking
         _r = rmesh.load(file_data, file_type=file_type)
         if not _r.geometry:
-            print(f"  Skip: no geometry in scene")
+            print("  Skip: no geometry in scene")
             return None
         _t = trimesh.load_mesh(file_obj=BytesIO(file_data), file_type=file_type)
     except BaseException as E:
@@ -77,7 +77,7 @@ def test_both():
             break
 
     if models_dir is None:
-        print(f"models not in expected location, tried:")
+        print("models not in expected location, tried:")
         print(f"  - {_models}")
         print(f"  - {_models_home}")
         return
