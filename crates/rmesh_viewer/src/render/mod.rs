@@ -3,6 +3,7 @@ pub mod line;
 pub mod mesh;
 pub mod point;
 pub mod scene2d;
+pub mod shaders;
 pub mod voxel;
 
 use nalgebra::Matrix4;
@@ -13,12 +14,14 @@ use crate::gpu::GpuContext;
 use crate::input::RenderToggles;
 use crate::upload::SceneGpuData;
 
-/// Camera uniform buffer data.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CameraUniforms {
-    pub view_proj: [[f32; 4]; 4],
-    pub camera_pos: [f32; 4],
+use shaders::CameraUniforms;
+
+/// Convert a nalgebra Matrix4 to a flat [f32; 16] array (column-major).
+pub fn mat4_to_array(m: &Matrix4<f32>) -> [f32; 16] {
+    let s = m.as_slice();
+    let mut out = [0.0f32; 16];
+    out.copy_from_slice(s);
+    out
 }
 
 /// Orchestrates all sub-renderers.
@@ -62,8 +65,10 @@ impl SceneRenderer {
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera_uniform"),
             contents: bytemuck::bytes_of(&CameraUniforms {
-                view_proj: Matrix4::<f32>::identity().into(),
+                view_proj: mat4_to_array(&Matrix4::<f32>::identity()),
                 camera_pos: [0.0; 4],
+                use_env_light: 1,
+                _pad_0: [0; 12],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -102,10 +107,13 @@ impl SceneRenderer {
         queue: &wgpu::Queue,
         view_proj: &Matrix4<f32>,
         camera_pos: [f32; 3],
+        env_light: bool,
     ) {
         let uniforms = CameraUniforms {
-            view_proj: (*view_proj).into(),
+            view_proj: mat4_to_array(view_proj),
             camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
+            use_env_light: u32::from(env_light),
+            _pad_0: [0; 12],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
@@ -182,5 +190,18 @@ impl SceneRenderer {
 
     pub fn update_overlays(&mut self, device: &wgpu::Device, scene_extent: f32) {
         self.line_renderer.update_overlays(device, scene_extent);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create the full SceneRenderer to validate all shaders compile on the GPU.
+    #[test]
+    fn shaders_compile() {
+        let (device, queue) = GpuContext::create_device();
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        SceneRenderer::new_with_format(&device, &queue, format);
     }
 }

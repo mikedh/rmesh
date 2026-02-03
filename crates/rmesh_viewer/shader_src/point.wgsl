@@ -1,9 +1,6 @@
 // Point cloud shader
 
-struct CameraUniforms {
-    view_proj: mat4x4<f32>,
-    camera_pos: vec4<f32>,
-};
+#include "uniforms.inc.wgsl"
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 

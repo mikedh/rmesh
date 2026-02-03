@@ -1347,7 +1347,7 @@ mod tests {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 2);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 2);
 
         assert_eq!(faces.len(), 12 * 16);
 
@@ -1362,7 +1362,7 @@ mod tests {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 1);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 1);
 
         let result = simplify_mesh(&verts, &faces, None, None, opts(4));
 
@@ -1375,7 +1375,7 @@ mod tests {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 5); // 12 * 4^5 = 12,288 faces
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 5); // 12 * 4^5 = 12,288 faces
 
         assert!(faces.len() > 10_000);
 
@@ -1391,7 +1391,7 @@ mod tests {
 
     #[test]
     fn test_simplify_preserves_face_colors() {
-        use crate::subdivide::subdivide_with_attributes;
+        use crate::subdivide::subdivide;
         use nalgebra::Vector4;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
@@ -1407,7 +1407,7 @@ mod tests {
         face_attrs.colors.push(face_colors.clone());
 
         let (verts, faces, new_face_attrs) =
-            subdivide_with_attributes(&cube.vertices, &cube.faces, &face_attrs, 1);
+            subdivide(&cube.vertices, &cube.faces, Some(&face_attrs), 1);
 
         assert_eq!(faces.len(), 48);
         assert_eq!(new_face_attrs.colors[0].len(), 48);
@@ -1435,7 +1435,7 @@ mod tests {
         use ahash::AHashMap;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 2);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 2);
 
         let result = simplify_mesh(&verts, &faces, None, None, opts(50));
 
@@ -1467,7 +1467,7 @@ mod tests {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 3);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 3);
 
         // Original volume should be positive (normals point outward)
         let original_volume = volume(&verts, &faces);
@@ -1489,7 +1489,7 @@ mod tests {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 2);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 2);
 
         let result = simplify_mesh(&verts, &faces, None, None, opts(30));
 
@@ -1515,7 +1515,7 @@ mod tests {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 3);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 3);
 
         let result = simplify_mesh(&verts, &faces, None, None, opts(20));
 
@@ -1550,7 +1550,7 @@ mod tests {
         ];
 
         // Subdivide to get more faces
-        let (verts, faces) = subdivide(&vertices, &faces, 3);
+        let (verts, faces, _) = subdivide(&vertices, &faces, None, 3);
 
         let original_volume = volume(&verts, &faces);
 
@@ -1577,7 +1577,7 @@ mod tests {
         use crate::subdivide::subdivide;
 
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 2);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 2);
 
         let result = simplify_mesh(&verts, &faces, None, None, opts(30));
 

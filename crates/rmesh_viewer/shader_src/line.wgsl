@@ -1,9 +1,6 @@
 // Line shader - renders lines as screen-space quads for configurable width
 
-struct CameraUniforms {
-    view_proj: mat4x4<f32>,
-    camera_pos: vec4<f32>,
-};
+#include "uniforms.inc.wgsl"
 
 struct LineUniforms {
     viewport_size: vec2<f32>,

@@ -10,7 +10,8 @@ use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use rmesh::attributes::{AlphaMode, Attributes, GroupingKind, Material, SimpleMaterial};
+use rmesh::attributes::{AlphaMode, Attributes, Grouping, GroupingKind, Material, SimpleMaterial};
+use rmesh::boundary::faces;
 use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
 use rmesh::geometry::Geometry;
 use rmesh::mesh::Trimesh;
@@ -299,11 +300,12 @@ impl PyGrouping {
 
 impl PyGrouping {
     fn from_grouping(grouping: &rmesh::attributes::Grouping, py: Python<'_>) -> Self {
-        let kind = match grouping.kind {
+        let kind = match &grouping.kind {
             GroupingKind::Material => "material",
             GroupingKind::Group => "group",
             GroupingKind::Smoothing => "smoothing",
             GroupingKind::Object => "object",
+            GroupingKind::Surface => "surface",
             GroupingKind::Unspecified => "unspecified",
         };
         let names = pyo3::types::PyList::new(py, &grouping.names)
@@ -350,6 +352,12 @@ impl PyGroupingCollection {
     #[getter]
     fn object(&self, py: Python<'_>) -> Option<Py<PyGrouping>> {
         self.find_by_kind(py, "object")
+    }
+
+    /// Get surface grouping if present.
+    #[getter]
+    fn surface(&self, py: Python<'_>) -> Option<Py<PyGrouping>> {
+        self.find_by_kind(py, "surface")
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyGrouping>> {
@@ -742,6 +750,19 @@ impl PyPath2D {
         self.data.to_path3d().map(|p| wrap_path3d(py, p))
     }
 
+    /// Offset the path boundary by `distance`, preserving analytical curves.
+    ///
+    /// Circles and arcs from the original path are recognized in the
+    /// buffered result with adjusted radii. Positive = expand outward,
+    /// negative = shrink inward. Returns empty list if path shrinks to nothing.
+    fn buffer(&self, py: Python<'_>, distance: f64) -> Vec<Py<PyPath2D>> {
+        self.data
+            .buffer(distance)
+            .into_iter()
+            .map(|p| wrap_path2d(py, p))
+            .collect()
+    }
+
     /// Open an interactive 2D viewer window displaying this path.
     #[pyo3(signature = (*, title="rmesh 2D", width=1280, height=720, background=None))]
     fn show(
@@ -761,6 +782,84 @@ impl PyPath2D {
             background: background.unwrap_or([1.0, 1.0, 1.0]),
         };
         py.detach(|| data.show_2d_with_options(options));
+    }
+
+    /// Segment descriptions as a list of dicts.
+    ///
+    /// Each dict contains at minimum a ``"kind"`` key (``"line"``, ``"arc"``,
+    /// ``"circle"``, ``"ellipse"``, ``"cubic_bezier"``, ``"quadratic_bezier"``,
+    /// ``"bspline"``).  Circles include ``"center"`` (2-tuple) and ``"radius"``.
+    /// Arcs include ``"start"``/``"finish"`` (2-tuples), ``"center"`` (2-tuple),
+    /// ``"radius"``, and ``"angle"`` (sweep in radians).  Lines include a
+    /// ``"points"`` list of vertex indices.
+    #[getter]
+    fn segments(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        use rmesh::path::Segment2D;
+        let verts = &self.data.vertices;
+        let mut out = Vec::with_capacity(self.data.segments.len());
+        for seg in &self.data.segments {
+            let d = PyDict::new(py);
+            match seg {
+                Segment2D::Line(l) => {
+                    d.set_item("kind", "line")?;
+                    d.set_item("points", &l.points)?;
+                }
+                Segment2D::Circle(c) => {
+                    d.set_item("kind", "circle")?;
+                    let center = &verts[c.center];
+                    d.set_item("center", (center.x, center.y))?;
+                    d.set_item("radius", c.radius)?;
+                    d.set_item("center_index", c.center)?;
+                }
+                Segment2D::Arc(a) => {
+                    d.set_item("kind", "arc")?;
+                    let s = &verts[a.start];
+                    let f = &verts[a.finish];
+                    d.set_item("start", (s.x, s.y))?;
+                    d.set_item("finish", (f.x, f.y))?;
+                    d.set_item("angle", a.sweep_angle())?;
+                    if let Some(center) = a.center(verts) {
+                        d.set_item("center", (center.x, center.y))?;
+                    }
+                    if let Some(radius) = a.radius(verts) {
+                        d.set_item("radius", radius)?;
+                    }
+                    d.set_item("start_index", a.start)?;
+                    d.set_item("finish_index", a.finish)?;
+                }
+                Segment2D::Ellipse(_) => {
+                    d.set_item("kind", "ellipse")?;
+                }
+                Segment2D::CubicBezier(_) => {
+                    d.set_item("kind", "cubic_bezier")?;
+                }
+                Segment2D::QuadraticBezier(_) => {
+                    d.set_item("kind", "quadratic_bezier")?;
+                }
+                Segment2D::BSpline(_) => {
+                    d.set_item("kind", "bspline")?;
+                }
+            }
+            out.push(d.unbind());
+        }
+        Ok(out)
+    }
+
+    /// Discretize all segments into polylines.
+    ///
+    /// Returns a list of (M, 2) arrays, one per segment.
+    fn discretize(&self, py: Python<'_>) -> Vec<Py<PyArray2<f64>>> {
+        self.data
+            .discretize()
+            .into_iter()
+            .map(|pts| {
+                let flat: Vec<f64> = pts.iter().flat_map(|p| [p.x, p.y]).collect();
+                let nd = Array2::from_shape_vec((pts.len(), 2), flat).unwrap();
+                let arr = PyArray2::from_array(py, &nd);
+                make_readonly(&arr);
+                arr.unbind()
+            })
+            .collect()
     }
 
     fn __repr__(&self) -> String {
@@ -844,6 +943,18 @@ pub(crate) fn wrap_path3d(py: Python<'_>, data: rmesh::path::Path3D) -> Py<PyPat
 // Helpers
 // ============================================================================
 
+/// Wrap a `Path2D` into a Python `PyPath2D` object.
+pub(crate) fn wrap_path2d(py: Python<'_>, data: rmesh::path::Path2D) -> Py<PyPath2D> {
+    Py::new(
+        py,
+        PyPath2D {
+            data,
+            vertices_cache: OnceCell::new(),
+        },
+    )
+    .unwrap()
+}
+
 /// Wrap a `Polygon2D` into a Python `PyPolygon2D` object.
 pub(crate) fn wrap_polygon(py: Python<'_>, data: rmesh::path::Polygon2D) -> Py<PyPolygon2D> {
     Py::new(
@@ -917,13 +1028,15 @@ impl PyTrimesh {
 #[pymethods]
 impl PyTrimesh {
     #[new]
-    #[pyo3(signature = (vertices, faces, *, vertex_normals=None, face_colors=None))]
+    #[pyo3(signature = (vertices, faces, *, vertex_normals=None, face_colors=None, face_surfaces=None))]
     pub fn new(
+        _py: Python<'_>,
         vertices: PyReadonlyArray2<'_, f64>,
         faces: PyReadonlyArray2<'_, i64>,
         vertex_normals: Option<PyReadonlyArray2<'_, f64>>,
         face_colors: Option<PyReadonlyArray2<'_, u8>>,
-    ) -> Result<Self> {
+        face_surfaces: Option<(Vec<Bound<'_, PyDict>>, PyReadonlyArray1<'_, i64>)>,
+    ) -> PyResult<Self> {
         let vertices: Vec<Point3<f64>> = vertices
             .as_array()
             .rows()
@@ -959,12 +1072,23 @@ impl PyTrimesh {
             );
         }
 
-        Ok(Self::new_from_trimesh(Trimesh::new(
-            vertices,
-            faces,
-            Some(attr_vertex),
-            Some(attr_face),
-        )?))
+        let mut data = Trimesh::new(vertices, faces, Some(attr_vertex), Some(attr_face))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        // Parse face_surfaces kwarg: (list[dict], ndarray[int64])
+        if let Some((surface_dicts, face_index)) = face_surfaces {
+            let (surfaces, names) = parse_surface_dicts(&surface_dicts)?;
+            let indices: Vec<usize> = face_index.as_array().iter().map(|&i| i as usize).collect();
+
+            data.face_surfaces = surfaces;
+            data.attributes_face.groupings.push(Grouping {
+                kind: GroupingKind::Surface,
+                names,
+                indices,
+            });
+        }
+
+        Ok(Self::new_from_trimesh(data))
     }
 
     #[getter]
@@ -1369,7 +1493,96 @@ impl PyTrimesh {
         Self::new_from_trimesh(self.data.convex_hull().clone())
     }
 
+    /// Face surface data from BREP/CAD source, if available.
+    ///
+    /// Returns ``None`` if no surface data is present, otherwise a tuple of
+    /// ``(surfaces, face_index)`` where ``surfaces`` is a list of dicts and
+    /// ``face_index`` is a per-face int64 index array.
+    #[getter]
+    fn face_surfaces(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        if self.data.face_surfaces.is_empty() {
+            return None;
+        }
+
+        let surfaces = pyo3::types::PyList::empty(py);
+        for s in &self.data.face_surfaces {
+            let dict = PyDict::new(py);
+            match s {
+                rmesh::boundary::Surface::Plane(p) => {
+                    dict.set_item("kind", "Plane").unwrap();
+                    dict.set_item("origin", [p.origin.x, p.origin.y, p.origin.z])
+                        .unwrap();
+                    dict.set_item("normal", [p.normal.x, p.normal.y, p.normal.z])
+                        .unwrap();
+                }
+                rmesh::boundary::Surface::Cylinder(c) => {
+                    dict.set_item("kind", "Cylinder").unwrap();
+                    dict.set_item("origin", [c.origin.x, c.origin.y, c.origin.z])
+                        .unwrap();
+                    dict.set_item("axis", [c.axis.x, c.axis.y, c.axis.z])
+                        .unwrap();
+                    dict.set_item("radius", c.radius).unwrap();
+                }
+                rmesh::boundary::Surface::Cone(c) => {
+                    dict.set_item("kind", "Cone").unwrap();
+                    dict.set_item("apex", [c.apex.x, c.apex.y, c.apex.z])
+                        .unwrap();
+                    dict.set_item("axis", [c.axis.x, c.axis.y, c.axis.z])
+                        .unwrap();
+                    dict.set_item("half_angle", c.half_angle).unwrap();
+                }
+                rmesh::boundary::Surface::Sphere(s) => {
+                    dict.set_item("kind", "Sphere").unwrap();
+                    dict.set_item("center", [s.center.x, s.center.y, s.center.z])
+                        .unwrap();
+                    dict.set_item("radius", s.radius).unwrap();
+                }
+                rmesh::boundary::Surface::Torus(t) => {
+                    dict.set_item("kind", "Torus").unwrap();
+                    dict.set_item("center", [t.center.x, t.center.y, t.center.z])
+                        .unwrap();
+                    dict.set_item("axis", [t.axis.x, t.axis.y, t.axis.z])
+                        .unwrap();
+                    dict.set_item("major_radius", t.major_radius).unwrap();
+                    dict.set_item("minor_radius", t.minor_radius).unwrap();
+                }
+            }
+            surfaces.append(dict).unwrap();
+        }
+
+        // Find the Surface grouping to get the face index
+        let face_index = self
+            .data
+            .attributes_face
+            .groupings
+            .iter()
+            .find(|g| matches!(g.kind, GroupingKind::Surface))
+            .map(|g| {
+                let indices: Vec<i64> = g.indices.iter().map(|&i| i as i64).collect();
+                let arr = PyArray1::from_vec(py, indices);
+                make_readonly(&arr);
+                arr.unbind()
+            });
+
+        let result = pyo3::types::PyTuple::new(
+            py,
+            &[
+                surfaces.into_any(),
+                match face_index {
+                    Some(arr) => arr.into_bound(py).into_any(),
+                    None => py.None().into_bound(py),
+                },
+            ],
+        )
+        .unwrap();
+        Some(result.unbind().into())
+    }
+
     /// Project the mesh onto a plane at multiple levels.
+    ///
+    /// When BREP data is available (via ``face_surfaces``), circles and arcs
+    /// from aligned cylinders are preserved as analytical entities in the
+    /// returned ``Path2D`` objects.
     ///
     /// Parameters
     /// ----------
@@ -1382,7 +1595,7 @@ impl PyTrimesh {
     ///
     /// Returns
     /// -------
-    /// list of (list of Polygon2D or None)
+    /// list of (list of Path2D or None)
     ///     One entry per level. None if no geometry intersects that level.
     fn project(
         &self,
@@ -1390,7 +1603,7 @@ impl PyTrimesh {
         normal: PyReadonlyArray1<'_, f64>,
         origin: PyReadonlyArray1<'_, f64>,
         levels: PyReadonlyArray1<'_, f64>,
-    ) -> Vec<Option<Vec<Py<PyPolygon2D>>>> {
+    ) -> Vec<Option<Vec<Py<PyPath2D>>>> {
         let n = normal.as_array();
         let o = origin.as_array();
         let normal = Vector3::new(n[0], n[1], n[2]);
@@ -1400,7 +1613,7 @@ impl PyTrimesh {
         self.data
             .project(&normal, &origin, &levels)
             .into_iter()
-            .map(|opt| opt.map(|polys| polys.into_iter().map(|p| wrap_polygon(py, p)).collect()))
+            .map(|opt| opt.map(|paths| paths.into_iter().map(|p| wrap_path2d(py, p)).collect()))
             .collect()
     }
 
@@ -1701,6 +1914,83 @@ fn load_with_resolver(
             }
         }
     }
+}
+
+/// Parse a list of Python dicts into `(Vec<Surface>, Vec<String>)`.
+fn parse_surface_dicts(
+    dicts: &[Bound<'_, PyDict>],
+) -> PyResult<(Vec<rmesh::boundary::Surface>, Vec<String>)> {
+    let mut surfaces = Vec::new();
+    let mut names = Vec::new();
+
+    for dict in dicts {
+        let kind: String = dict
+            .get_item("kind")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'kind' key"))?
+            .extract()?;
+
+        let surface = match kind.as_str() {
+            "Plane" => {
+                let origin: [f64; 3] = dict.get_item("origin")?.unwrap().extract()?;
+                let normal: [f64; 3] = dict.get_item("normal")?.unwrap().extract()?;
+                rmesh::boundary::Surface::Plane(faces::SurfacePlane {
+                    origin: Point3::new(origin[0], origin[1], origin[2]),
+                    normal: Vector3::new(normal[0], normal[1], normal[2]),
+                })
+            }
+            "Cylinder" => {
+                let origin: [f64; 3] = dict.get_item("origin")?.unwrap().extract()?;
+                let axis: [f64; 3] = dict.get_item("axis")?.unwrap().extract()?;
+                let radius: f64 = dict.get_item("radius")?.unwrap().extract()?;
+                rmesh::boundary::Surface::Cylinder(faces::Cylinder {
+                    origin: Point3::new(origin[0], origin[1], origin[2]),
+                    axis: Vector3::new(axis[0], axis[1], axis[2]),
+                    radius,
+                })
+            }
+            "Cone" => {
+                let apex: [f64; 3] = dict.get_item("apex")?.unwrap().extract()?;
+                let axis: [f64; 3] = dict.get_item("axis")?.unwrap().extract()?;
+                let half_angle: f64 = dict.get_item("half_angle")?.unwrap().extract()?;
+                rmesh::boundary::Surface::Cone(faces::Cone {
+                    apex: Point3::new(apex[0], apex[1], apex[2]),
+                    axis: Vector3::new(axis[0], axis[1], axis[2]),
+                    half_angle,
+                })
+            }
+            "Sphere" => {
+                let center: [f64; 3] = dict.get_item("center")?.unwrap().extract()?;
+                let radius: f64 = dict.get_item("radius")?.unwrap().extract()?;
+                rmesh::boundary::Surface::Sphere(faces::Sphere {
+                    center: Point3::new(center[0], center[1], center[2]),
+                    radius,
+                })
+            }
+            "Torus" => {
+                let center: [f64; 3] = dict.get_item("center")?.unwrap().extract()?;
+                let axis: [f64; 3] = dict.get_item("axis")?.unwrap().extract()?;
+                let major_radius: f64 = dict.get_item("major_radius")?.unwrap().extract()?;
+                let minor_radius: f64 = dict.get_item("minor_radius")?.unwrap().extract()?;
+                rmesh::boundary::Surface::Torus(faces::Torus {
+                    center: Point3::new(center[0], center[1], center[2]),
+                    axis: Vector3::new(axis[0], axis[1], axis[2]),
+                    major_radius,
+                    minor_radius,
+                })
+            }
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Unknown surface kind: '{}'",
+                    other
+                )));
+            }
+        };
+
+        names.push(kind);
+        surfaces.push(surface);
+    }
+
+    Ok((surfaces, names))
 }
 
 #[cfg(test)]

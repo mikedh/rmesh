@@ -176,3 +176,6 @@ cython_debug/
 
 # Cargo.lock is usually not commited for libraries
 Cargo.lock
+
+# shaders should be in `shader_src` and auto-generated
+**/shaders/*

@@ -31,7 +31,7 @@ impl FillRenderer {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fill2d_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shader_src/fill2d.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/fill2d.wgsl").into()),
         });
 
         let color_bind_group_layout =

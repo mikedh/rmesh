@@ -1,4 +1,5 @@
 pub mod attributes;
+pub mod boundary;
 pub mod cache;
 pub mod cleanup;
 pub mod convex;

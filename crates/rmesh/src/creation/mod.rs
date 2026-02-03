@@ -164,7 +164,10 @@ pub fn create_icosphere(radius: f64, subdivisions: usize) -> Trimesh {
     let mut faces = ico.faces;
 
     for _ in 0..subdivisions {
-        (vertices, faces) = crate::subdivide::subdivide(&vertices, &faces, 1);
+        (vertices, faces) = {
+            let (v, f, _) = crate::subdivide::subdivide(&vertices, &faces, None, 1);
+            (v, f)
+        };
         for v in &mut vertices {
             let len = v.coords.norm();
             if len > 0.0 {

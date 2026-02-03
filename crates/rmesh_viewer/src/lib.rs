@@ -31,7 +31,7 @@ impl Default for ViewerOptions {
             title: "rmesh viewer".to_string(),
             width: 1280,
             height: 720,
-            background: [0.15, 0.15, 0.18],
+            background: [0.9, 0.9, 0.92],
         }
     }
 }
@@ -48,7 +48,7 @@ impl Default for RenderOptions {
         Self {
             width: 1280,
             height: 720,
-            background: [0.15, 0.15, 0.18],
+            background: [0.9, 0.9, 0.92],
         }
     }
 }
@@ -340,6 +340,7 @@ impl SceneViewer for Scene {
             &view_proj,
             #[allow(clippy::cast_possible_truncation)]
             [cam_pos.x as f32, cam_pos.y as f32, cam_pos.z as f32],
+            true,
         );
 
         // Render

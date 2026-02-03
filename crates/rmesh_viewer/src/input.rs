@@ -10,6 +10,7 @@ pub struct RenderToggles {
     pub wireframe: bool,
     pub grid: bool,
     pub axes: bool,
+    pub env_light: bool,
 }
 
 impl Default for RenderToggles {
@@ -18,6 +19,7 @@ impl Default for RenderToggles {
             wireframe: false,
             grid: false,
             axes: false,
+            env_light: true,
         }
     }
 }
@@ -61,6 +63,7 @@ pub enum InputCommand {
     ToggleGrid,
     ToggleAxes,
     ToggleFullscreen,
+    ToggleEnvLight,
     Close,
 }
 
@@ -135,6 +138,7 @@ impl InputState {
                 "g" => Some(InputCommand::ToggleGrid),
                 "a" => Some(InputCommand::ToggleAxes),
                 "f" => Some(InputCommand::ToggleFullscreen),
+                "e" => Some(InputCommand::ToggleEnvLight),
                 _ => None,
             },
             _ => None,
@@ -155,6 +159,7 @@ impl InputState {
             InputCommand::ToggleWireframe => toggles.wireframe = !toggles.wireframe,
             InputCommand::ToggleGrid => toggles.grid = !toggles.grid,
             InputCommand::ToggleAxes => toggles.axes = !toggles.axes,
+            InputCommand::ToggleEnvLight => toggles.env_light = !toggles.env_light,
             InputCommand::ResetView | InputCommand::Close | InputCommand::ToggleFullscreen => {}
         }
     }

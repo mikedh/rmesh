@@ -1,9 +1,6 @@
 // Voxel ray-march shader - fullscreen triangle rendering of voxel grids
 
-struct CameraUniforms {
-    view_proj: mat4x4<f32>,
-    camera_pos: vec4<f32>,
-};
+#include "uniforms.inc.wgsl"
 
 struct VoxelUniforms {
     inv_view_proj: mat4x4<f32>,

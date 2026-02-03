@@ -192,6 +192,113 @@ impl std::fmt::Display for Timer {
     }
 }
 
+#[cfg(feature = "bench")]
+pub struct Profiler {
+    guard: Option<pprof::ProfilerGuard<'static>>,
+    report: Option<pprof::Report>,
+}
+
+#[cfg(feature = "bench")]
+impl Profiler {
+    pub fn start() -> Self {
+        let guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(4000)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .unwrap();
+        Self {
+            guard: Some(guard),
+            report: None,
+        }
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            self.report = guard.report().build().ok();
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+impl Profiler {
+    /// Write a flamegraph SVG to the given path.
+    pub fn flamegraph(&self, path: &std::path::Path) {
+        if let Some(report) = &self.report {
+            let file = std::fs::File::create(path).unwrap();
+            report.flamegraph(file).unwrap();
+            println!("flamegraph: {}", path.display());
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+impl std::fmt::Display for Profiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let report = match &self.report {
+            Some(r) => r,
+            None => return write!(f, "Profiler: call .stop() first"),
+        };
+
+        let total_samples: isize = report.data.values().sum();
+        if total_samples == 0 {
+            return write!(f, "Profiler: 0 samples collected");
+        }
+
+        // Aggregate cumulative samples by file:line across all stack frames.
+        // Each stack sample contributes to every frame in it (cumulative).
+        let mut by_location: std::collections::HashMap<String, isize> =
+            std::collections::HashMap::new();
+        for (frames, count) in &report.data {
+            let mut seen = std::collections::HashSet::new();
+            for frame in &frames.frames {
+                for sym in frame {
+                    let name = sym.name();
+                    // Skip non-project frames by function name
+                    if !name.contains("rmesh") && !name.contains("i_overlay") {
+                        continue;
+                    }
+                    let filename = sym.filename();
+                    let lineno = sym.lineno();
+                    let key = if lineno > 0 && filename != "Unknown" {
+                        let short = filename
+                            .rfind("crates/")
+                            .or_else(|| filename.rfind("src/"))
+                            .map(|i| &filename[i..])
+                            .unwrap_or(&filename);
+                        format!("{short}:{lineno} {name}")
+                    } else {
+                        name.to_string()
+                    };
+                    if seen.insert(key.clone()) {
+                        *by_location.entry(key).or_default() += count;
+                    }
+                }
+            }
+        }
+
+        let mut sorted: Vec<_> = by_location.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+        writeln!(f, "Profiler: {total_samples} samples (cumulative)")?;
+        writeln!(f, "{:-<80}", "")?;
+        writeln!(f, "{:>5}  {:>5}  location", "%", "hits")?;
+        writeln!(f, "{:-<80}", "")?;
+        for (location, count) in sorted.iter().take(25) {
+            let pct = *count as f64 / total_samples as f64 * 100.0;
+            writeln!(f, "{pct:5.1}%  {count:>5}  {location}")?;
+        }
+        writeln!(f, "{:-<80}", "")?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "bench")]
+impl std::fmt::Debug for Profiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

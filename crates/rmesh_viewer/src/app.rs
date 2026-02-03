@@ -265,9 +265,12 @@ fn render_frame(state: &ViewerState) {
     let cam_pos = state.trackball.position();
     #[allow(clippy::cast_possible_truncation)]
     let cam_pos_f32 = [cam_pos.x as f32, cam_pos.y as f32, cam_pos.z as f32];
-    state
-        .renderer
-        .update_camera(&state.gpu.queue, &view_proj, cam_pos_f32);
+    state.renderer.update_camera(
+        &state.gpu.queue,
+        &view_proj,
+        cam_pos_f32,
+        state.toggles.env_light,
+    );
 
     let mut encoder = state
         .gpu

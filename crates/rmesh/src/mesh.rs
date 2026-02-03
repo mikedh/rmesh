@@ -2,18 +2,21 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    attributes::{Attributes, LoadSource, Material},
+    attributes::{Attributes, GroupingKind, LoadSource, Material, UNSET},
+    boundary::Surface,
     cache::Cache,
     creation::Plane,
     graph::{EdgeGroups, ManifoldStatus, SortedEdge, adjacency},
-    path::Polygon2D,
+    path::Path2D,
+    project::CircleWithEdges,
     simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
     triangles::{
         bvh::TriangleBvh,
         inertia::{self, MassProperties},
     },
 };
-use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
+use kiddo::ImmutableKdTree;
+use nalgebra::{Matrix3, Matrix4, Point2, Point3, Vector3};
 use rayon::prelude::*;
 
 /// A triangle mesh with vertices and face indices.
@@ -53,6 +56,11 @@ pub struct Trimesh {
 
     /// Materials loaded from the mesh file (e.g., from OBJ's MTL reference)
     pub materials: Vec<Material>,
+
+    /// Analytical surface definitions from BREP data (e.g. via cascadio).
+    /// Per-face index mapping lives in `attributes_face.groupings` with
+    /// `GroupingKind::Surface`.
+    pub face_surfaces: Vec<Surface>,
 
     /// Optional density for mass property calculations (default 1.0)
     pub density: Option<f64>,
@@ -101,6 +109,7 @@ impl Default for Trimesh {
             attributes_face: Attributes::default(),
             source: LoadSource::default(),
             materials: Vec::new(),
+            face_surfaces: Vec::new(),
             density: None,
             cache_faces_cross: Cache::new(),
             cache_face_normals: Cache::new(),
@@ -131,6 +140,7 @@ impl Clone for Trimesh {
             attributes_face: self.attributes_face.clone(),
             source: self.source.clone(),
             materials: self.materials.clone(),
+            face_surfaces: self.face_surfaces.clone(),
             density: self.density,
 
             // Fresh cache - will recompute on demand
@@ -162,6 +172,7 @@ impl PartialEq for Trimesh {
             && self.attributes_face == other.attributes_face
             && self.source == other.source
             && self.materials == other.materials
+            && self.face_surfaces == other.face_surfaces
             && self.density == other.density
     }
 }
@@ -237,19 +248,22 @@ impl Trimesh {
     ///
     /// Each edge is split at its midpoint. After N iterations,
     /// the face count is multiplied by 4^N.
-    /// Face attributes (colors) are propagated to child faces.
+    /// Face attributes (colors, UVs, normals, tangents, groupings)
+    /// are propagated to child faces.
     #[must_use]
     pub fn subdivide(&self, iterations: usize) -> Self {
-        let (vertices, faces, attributes_face) = crate::subdivide::subdivide_with_attributes(
+        let (vertices, faces, attributes_face) = crate::subdivide::subdivide(
             &self.vertices,
             &self.faces,
-            &self.attributes_face,
+            Some(&self.attributes_face),
             iterations,
         );
         Self {
             vertices,
             faces,
             attributes_face,
+            face_surfaces: self.face_surfaces.clone(),
+            materials: self.materials.clone(),
             ..Default::default()
         }
     }
@@ -820,8 +834,11 @@ impl Trimesh {
 
     /// Project the mesh onto a plane at multiple levels.
     ///
-    /// Returns one `Option<Vec<Polygon2D>>` per level. Levels where
-    /// the plane doesn't intersect any geometry return `None`.
+    /// Returns one `Option<Vec<Path2D>>` per level. When BREP data is
+    /// available (via `face_surfaces`), circles and arcs from
+    /// cylinders aligned with the projection normal are preserved as
+    /// analytical `Circle2`/`Arc2` segments. Without BREP data, all
+    /// segments are `Line` (equivalent to the previous polygon output).
     ///
     /// # Arguments
     /// * `normal` - Projection direction (will be normalized)
@@ -832,13 +849,134 @@ impl Trimesh {
         normal: &Vector3<f64>,
         origin: &Point3<f64>,
         levels: &[f64],
-    ) -> Vec<Option<Vec<Polygon2D>>> {
+    ) -> Vec<Option<Vec<Path2D>>> {
         let normal = normal.normalize();
         let plane = Plane::new(normal, *origin);
         let dots = crate::project::vertex_dots(&self.vertices, &normal, origin);
         let vertices_2d = plane.to_2d(&self.vertices);
         let to_3d: Option<Matrix4<f64>> = plane.transform_to_2d().try_inverse();
-        crate::project::project(&self.faces, &dots, &vertices_2d, levels, to_3d)
+
+        // Get polygons from the existing projection algorithm
+        let polygon_results =
+            crate::project::project_polygons(&self.faces, &dots, &vertices_2d, levels, to_3d);
+
+        // Collect expected circles from face surface data and deduplicate
+        let mut expected_circles: Vec<(Point2<f64>, f64)> = self
+            .face_surfaces
+            .iter()
+            .filter_map(|s| s.project_as_circle(&plane))
+            .collect();
+        expected_circles.sort_unstable_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(
+                    a.0.x
+                        .partial_cmp(&b.0.x)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+                .then(
+                    a.0.y
+                        .partial_cmp(&b.0.y)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+        });
+        expected_circles.dedup_by(|a, b| {
+            let tol = b.1.abs() * 1e-8;
+            (a.1 - b.1).abs() < tol && (a.0.x - b.0.x).abs() < tol && (a.0.y - b.0.y).abs() < tol
+        });
+
+        // Group cylinder edges by circle for snap_to_cylinder_edges
+        let circles_with_edges: Vec<CircleWithEdges> = {
+            let mut result: Vec<CircleWithEdges> = expected_circles
+                .iter()
+                .map(|&(center, radius)| CircleWithEdges {
+                    center,
+                    radius,
+                    edges: Vec::new(),
+                    max_sagitta: 0.0,
+                })
+                .collect();
+
+            // Find Surface grouping for per-face lookup
+            if let Some(grouping) = self
+                .attributes_face
+                .groupings
+                .iter()
+                .find(|g| matches!(g.kind, GroupingKind::Surface))
+            {
+                for (fi, &si) in grouping.indices.iter().enumerate() {
+                    if si == UNSET {
+                        continue;
+                    }
+                    if let Some((center, radius)) = self.face_surfaces[si].project_as_circle(&plane)
+                    {
+                        if let Some(ci) = result.iter().position(|c| {
+                            let tol = c.radius.abs() * 1e-8;
+                            (c.center.x - center.x).abs() < tol
+                                && (c.center.y - center.y).abs() < tol
+                                && (c.radius - radius).abs() < tol
+                        }) {
+                            let face = self.faces[fi];
+                            for &(a, b) in
+                                &[(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+                            {
+                                result[ci].edges.push((vertices_2d[a], vertices_2d[b]));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Compute max_sagitta from the longest chord on each circle.
+            // The sagitta is the maximum distance between a chord and the
+            // arc it subtends: s = r - sqrt(r² - (chord/2)²).
+            for c in &mut result {
+                let max_chord = c
+                    .edges
+                    .iter()
+                    .map(|(a, b)| (b - a).norm())
+                    .fold(0.0_f64, f64::max);
+                let half = (max_chord / 2.0).min(c.radius);
+                c.max_sagitta = c.radius - (c.radius * c.radius - half * half).sqrt();
+            }
+
+            result
+        };
+
+        // Build kiddo tree from circle centers for broad-phase
+        let cylinder_edges = if circles_with_edges.is_empty() {
+            None
+        } else {
+            let circle_centers: Vec<[f64; 2]> = circles_with_edges
+                .iter()
+                .map(|c| [c.center.x, c.center.y])
+                .collect();
+            Some((
+                circles_with_edges,
+                ImmutableKdTree::new_from_slice(&circle_centers),
+            ))
+        };
+
+        // Convert each polygon to Path2D with arc/circle detection
+        polygon_results
+            .into_par_iter()
+            .map(|opt| {
+                opt.map(|polys| {
+                    polys
+                        .into_par_iter()
+                        .map(|p| {
+                            crate::project::polygon_to_path(
+                                &p,
+                                &expected_circles,
+                                cylinder_edges
+                                    .as_ref()
+                                    .map(|(edges, tree)| (edges.as_slice(), tree)),
+                            )
+                        })
+                        .collect()
+                })
+            })
+            .collect()
     }
 
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,
@@ -1079,7 +1217,7 @@ mod tests {
 
     #[test]
     fn test_project_to_3d_planes() {
-        // Project a cube along Z and verify that transformed polygon
+        // Project a cube along Z and verify that transformed path
         // vertices lie on the expected planes: origin + normal * level.
         let cube = create_box(&[2.0, 2.0, 2.0]);
         let normal = Vector3::new(0.0, 0.0, 1.0);
@@ -1089,10 +1227,10 @@ mod tests {
         let results = cube.project(&normal, &origin, &levels);
 
         for (i, level) in levels.iter().enumerate() {
-            let polys = results[i].as_ref().expect("should have projection");
-            for poly in polys {
-                let to_3d = poly.to_3d.expect("should have to_3d");
-                for p in &poly.exterior {
+            let paths = results[i].as_ref().expect("should have projection");
+            for path in paths {
+                let to_3d = path.to_3d.expect("should have to_3d");
+                for p in &path.vertices {
                     let p3 = to_3d.transform_point(&Point3::new(p.x, p.y, 0.0));
                     let height = (p3 - origin).dot(&normal);
                     assert_relative_eq!(height, *level, epsilon = 1e-6);
@@ -1112,10 +1250,10 @@ mod tests {
         let results = cube.project(&normal, &origin, &levels);
 
         for (i, level) in levels.iter().enumerate() {
-            if let Some(polys) = &results[i] {
-                for poly in polys {
-                    let to_3d = poly.to_3d.expect("should have to_3d");
-                    for p in &poly.exterior {
+            if let Some(paths) = &results[i] {
+                for path in paths {
+                    let to_3d = path.to_3d.expect("should have to_3d");
+                    for p in &path.vertices {
                         let p3 = to_3d.transform_point(&Point3::new(p.x, p.y, 0.0));
                         let height = (p3 - origin).dot(&normal);
                         assert_relative_eq!(height, *level, epsilon = 1e-6);
@@ -1146,5 +1284,189 @@ mod tests {
                 assert_relative_eq!(v.z, 0.0, epsilon = 1e-6);
             }
         }
+    }
+
+    /// Test that projecting a BREP model with cylindrical holes detects
+    /// the correct number of analytical circles on each cardinal axis.
+    ///
+    /// The featuretype model is a plate with drilled holes. Cylinder edge
+    /// snapping in `snap_to_cylinder_edges` must project intersection
+    /// vertices onto circles so `ring_to_segments` can detect them.
+    #[test]
+    fn test_project_cylinder_hole_detected_as_circle() {
+        use crate::path::Segment2D;
+
+        // Load the featuretype GLB (plate with cylindrical holes, includes BREP data)
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test/data/featuretype.glb");
+        if !path.exists() {
+            eprintln!("Skipping test: {:?} not found", path);
+            return;
+        }
+        let data = std::fs::read(&path).unwrap();
+        let scene = load(&data, Some(FileType::GLB), None).unwrap();
+
+        // Extract the mesh
+        let mesh = scene
+            .geometry
+            .values()
+            .find_map(|g| match g {
+                Geometry::Mesh(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .expect("featuretype.glb should contain a mesh");
+
+        // The model must have face surfaces from BREP data
+        assert!(
+            !mesh.face_surfaces.is_empty(),
+            "featuretype.glb should have BREP face surface data"
+        );
+
+        // Helper: project along `normal` at level 0, count Circle segments
+        let count_circles = |normal: Vector3<f64>| -> usize {
+            let results = mesh.project(&normal, &Point3::origin(), &[0.0]);
+            results[0]
+                .as_ref()
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .flat_map(|p| p.segments.iter())
+                        .filter(|s| matches!(s, Segment2D::Circle(_)))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+
+        // Y axis: 1 hole visible
+        assert_eq!(count_circles(Vector3::y()), 1, "Y: expected 1 circle");
+
+        // Verify the Y-axis circle has a reasonable radius (~0.0049m for this model)
+        let y_results = mesh.project(&Vector3::y(), &Point3::origin(), &[0.0]);
+        let circle = y_results[0]
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p.segments.iter())
+            .find_map(|s| match s {
+                Segment2D::Circle(c) => Some(c),
+                _ => None,
+            })
+            .expect("Y projection should contain a circle");
+        assert!(
+            circle.radius > 0.001 && circle.radius < 0.05,
+            "circle radius {} outside expected range [0.001, 0.05]",
+            circle.radius
+        );
+
+        // Z axis: 8 holes visible from top
+        assert_eq!(count_circles(Vector3::z()), 8, "Z: expected 8 circles");
+
+        // X axis: no holes aligned with X
+        assert_eq!(count_circles(Vector3::x()), 0, "X: expected 0 circles");
+    }
+
+    /// Verify that the TM_brep_faces extension loads the correct number
+    /// of surfaces and that the per-face index mapping is valid.
+    #[test]
+    fn test_brep_faces_loaded_correctly() {
+        use crate::attributes::UNSET;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test/data/featuretype.glb");
+        if !path.exists() {
+            eprintln!("Skipping test: {:?} not found", path);
+            return;
+        }
+        let data = std::fs::read(&path).unwrap();
+        let scene = load(&data, Some(FileType::GLB), None).unwrap();
+
+        let mesh = scene
+            .geometry
+            .values()
+            .find_map(|g| match g {
+                Geometry::Mesh(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .expect("featuretype.glb should contain a mesh");
+
+        // The GLB has 96 BREP face entries, 1 null → 95 valid surfaces.
+        assert_eq!(
+            mesh.face_surfaces.len(),
+            95,
+            "expected 95 non-null BREP surfaces, got {}",
+            mesh.face_surfaces.len()
+        );
+
+        // Find the Surface grouping.
+        let grouping = mesh
+            .attributes_face
+            .groupings
+            .iter()
+            .find(|g| matches!(g.kind, GroupingKind::Surface))
+            .expect("mesh should have a Surface grouping");
+
+        // One index per face.
+        assert_eq!(
+            grouping.indices.len(),
+            mesh.faces.len(),
+            "grouping indices length {} != face count {}",
+            grouping.indices.len(),
+            mesh.faces.len()
+        );
+
+        // Every non-UNSET index must be in range [0, face_surfaces.len()).
+        for (fi, &si) in grouping.indices.iter().enumerate() {
+            if si != UNSET {
+                assert!(
+                    si < mesh.face_surfaces.len(),
+                    "face {} has surface index {} but only {} surfaces",
+                    fi,
+                    si,
+                    mesh.face_surfaces.len()
+                );
+            }
+        }
+
+        // At least two distinct non-UNSET indices (planes and cylinders).
+        let distinct: std::collections::HashSet<usize> = grouping
+            .indices
+            .iter()
+            .copied()
+            .filter(|&i| i != UNSET)
+            .collect();
+        assert!(
+            distinct.len() >= 2,
+            "expected multiple distinct surface indices, got {}",
+            distinct.len()
+        );
+
+        // Some faces should be UNSET (the null BREP face).
+        let n_unset = grouping.indices.iter().filter(|&&i| i == UNSET).count();
+        assert!(
+            n_unset > 0,
+            "expected some UNSET indices for the null BREP face"
+        );
+
+        // Count surface types.
+        let n_cylinders = mesh
+            .face_surfaces
+            .iter()
+            .filter(|s| matches!(s, crate::boundary::Surface::Cylinder(_)))
+            .count();
+        let n_planes = mesh
+            .face_surfaces
+            .iter()
+            .filter(|s| matches!(s, crate::boundary::Surface::Plane(_)))
+            .count();
+        assert_eq!(n_cylinders, 46, "expected 46 cylinder surfaces");
+        assert_eq!(n_planes, 49, "expected 49 plane surfaces");
     }
 }

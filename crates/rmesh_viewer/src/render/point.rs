@@ -17,7 +17,7 @@ impl PointRenderer {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("point_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shader_src/point.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/point.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

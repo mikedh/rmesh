@@ -1,81 +1,82 @@
 //! Mesh subdivision algorithms.
 
-use nalgebra::{Point3, Vector4};
+use nalgebra::Point3;
 use rayon::prelude::*;
 
-use crate::attributes::Attributes;
+use crate::attributes::{Attributes, Grouping};
 
 /// Subdivide a mesh by splitting each triangle into 4 triangles.
 ///
 /// Each edge is split at its midpoint, creating 4 smaller triangles
 /// from each original triangle. This is sometimes called "mid-edge" subdivision.
 ///
+/// If `face_attributes` is provided, all attribute fields (colors, UVs,
+/// normals, tangents, groupings) are propagated: each child face inherits
+/// its parent face's attributes.
+///
 /// # Arguments
 /// * `vertices` - Original vertex positions
 /// * `faces` - Original triangle faces
+/// * `face_attributes` - Optional face attributes to propagate
 /// * `iterations` - Number of subdivision iterations (each multiplies faces by 4)
 ///
 /// # Returns
-/// New vertices and faces after subdivision.
+/// New vertices, faces, and face attributes after subdivision.
 pub fn subdivide(
     vertices: &[Point3<f64>],
     faces: &[[usize; 3]],
-    iterations: usize,
-) -> (Vec<Point3<f64>>, Vec<[usize; 3]>) {
-    if iterations == 0 || faces.is_empty() {
-        return (vertices.to_vec(), faces.to_vec());
-    }
-
-    // For multiple iterations, we process iteratively but efficiently
-    let mut current_vertices = vertices.to_vec();
-    let mut current_faces = faces.to_vec();
-
-    for _ in 0..iterations {
-        (current_vertices, current_faces) = subdivide_once(&current_vertices, &current_faces);
-    }
-
-    (current_vertices, current_faces)
-}
-
-/// Subdivide a mesh with face attributes.
-///
-/// Each child face inherits its parent face's attributes (colors, etc.).
-///
-/// # Arguments
-/// * `vertices` - Original vertex positions
-/// * `faces` - Original triangle faces
-/// * `face_attributes` - Face attributes to propagate
-/// * `iterations` - Number of subdivision iterations
-///
-/// # Returns
-/// New vertices, faces, and face attributes after subdivision.
-pub fn subdivide_with_attributes(
-    vertices: &[Point3<f64>],
-    faces: &[[usize; 3]],
-    face_attributes: &Attributes,
+    face_attributes: Option<&Attributes>,
     iterations: usize,
 ) -> (Vec<Point3<f64>>, Vec<[usize; 3]>, Attributes) {
     if iterations == 0 || faces.is_empty() {
-        return (vertices.to_vec(), faces.to_vec(), face_attributes.clone());
+        return (
+            vertices.to_vec(),
+            faces.to_vec(),
+            face_attributes.cloned().unwrap_or_default(),
+        );
     }
 
     let mut current_vertices = vertices.to_vec();
     let mut current_faces = faces.to_vec();
-    let mut current_attrs = face_attributes.clone();
+    let mut current_attrs = face_attributes.cloned().unwrap_or_default();
 
     for _ in 0..iterations {
         let (new_verts, new_faces) = subdivide_once(&current_vertices, &current_faces);
 
-        // Propagate face colors: each parent face becomes 4 child faces
+        // Propagate face attributes: each parent face becomes 4 child faces
         // Child faces are in order: [top, right, left, center] for each parent
         let mut new_attrs = Attributes::default();
 
         for colors in &current_attrs.colors {
-            let new_colors: Vec<Vector4<u8>> = colors
-                .iter()
-                .flat_map(|&color| [color, color, color, color])
-                .collect();
-            new_attrs.colors.push(new_colors);
+            new_attrs
+                .colors
+                .push(colors.iter().flat_map(|&v| [v, v, v, v]).collect());
+        }
+        for uv in &current_attrs.uv {
+            new_attrs
+                .uv
+                .push(uv.iter().flat_map(|&v| [v, v, v, v]).collect());
+        }
+        for normals in &current_attrs.normals {
+            new_attrs
+                .normals
+                .push(normals.iter().flat_map(|&v| [v, v, v, v]).collect());
+        }
+        for tangents in &current_attrs.tangents {
+            new_attrs
+                .tangents
+                .push(tangents.iter().flat_map(|&v| [v, v, v, v]).collect());
+        }
+        for grouping in &current_attrs.groupings {
+            new_attrs.groupings.push(Grouping {
+                kind: grouping.kind.clone(),
+                names: grouping.names.clone(),
+                indices: grouping
+                    .indices
+                    .iter()
+                    .flat_map(|&idx| [idx, idx, idx, idx])
+                    .collect(),
+            });
         }
 
         current_vertices = new_verts;
@@ -187,23 +188,25 @@ fn subdivide_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attributes::{Attributes, GroupingKind};
     use crate::creation::create_box;
     use crate::mesh::Trimesh;
     use crate::triangles::inertia::volume;
     use approx::assert_relative_eq;
+    use nalgebra::Vector4;
 
     #[test]
     fn test_subdivide_face_count() {
         let cube = create_box(&[1.0, 1.0, 1.0]);
 
         // Each iteration multiplies face count by 4
-        let (_, faces1) = subdivide(&cube.vertices, &cube.faces, 1);
+        let (_, faces1, _) = subdivide(&cube.vertices, &cube.faces, None, 1);
         assert_eq!(faces1.len(), 12 * 4);
 
-        let (_, faces2) = subdivide(&cube.vertices, &cube.faces, 2);
+        let (_, faces2, _) = subdivide(&cube.vertices, &cube.faces, None, 2);
         assert_eq!(faces2.len(), 12 * 16);
 
-        let (_, faces3) = subdivide(&cube.vertices, &cube.faces, 3);
+        let (_, faces3, _) = subdivide(&cube.vertices, &cube.faces, None, 3);
         assert_eq!(faces3.len(), 12 * 64);
     }
 
@@ -213,7 +216,7 @@ mod tests {
         let original_volume = volume(&cube.vertices, &cube.faces).abs();
 
         for iterations in 1..=3 {
-            let (verts, faces) = subdivide(&cube.vertices, &cube.faces, iterations);
+            let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, iterations);
             let new_volume = volume(&verts, &faces).abs();
             assert_relative_eq!(new_volume, original_volume, epsilon = 1e-10);
         }
@@ -225,7 +228,7 @@ mod tests {
         assert!(cube.is_watertight());
 
         for iterations in 1..=3 {
-            let (verts, faces) = subdivide(&cube.vertices, &cube.faces, iterations);
+            let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, iterations);
             let mesh = Trimesh::new(verts, faces, None, None).unwrap();
             assert!(
                 mesh.is_watertight(),
@@ -238,7 +241,7 @@ mod tests {
     #[test]
     fn test_subdivide_zero_iterations() {
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 0);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 0);
         assert_eq!(verts.len(), cube.vertices.len());
         assert_eq!(faces.len(), cube.faces.len());
     }
@@ -246,7 +249,7 @@ mod tests {
     #[test]
     fn test_subdivide_no_degenerate_faces() {
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 2);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 2);
 
         for (i, [v0, v1, v2]) in faces.iter().enumerate() {
             assert!(v0 != v1 && v1 != v2 && v2 != v0, "Degenerate face {}", i);
@@ -260,7 +263,7 @@ mod tests {
         let cube = create_box(&[1.0, 1.0, 1.0]);
 
         // 5 iterations: 12 * 4^5 = 12,288 faces
-        let (verts, faces) = subdivide(&cube.vertices, &cube.faces, 5);
+        let (verts, faces, _) = subdivide(&cube.vertices, &cube.faces, None, 5);
         assert_eq!(faces.len(), 12 * 1024);
 
         // Verify it's still valid
@@ -270,24 +273,12 @@ mod tests {
 
     #[test]
     fn test_subdivide_propagates_face_colors() {
-        use super::subdivide_with_attributes;
-        use crate::attributes::Attributes;
-        use nalgebra::Vector4;
-
         let cube = create_box(&[1.0, 1.0, 1.0]);
-        // Cube has 12 faces (2 triangles per side of the box)
 
-        // Create distinct colors for each face
-        // Colors grouped by cube side: faces 0-1 (side 0), 2-3 (side 1), etc.
         let face_colors: Vec<Vector4<u8>> = (0..12)
             .map(|i| {
-                let side = i / 2; // 0-5 for each side of cube
-                Vector4::new(
-                    (side * 40) as u8,       // R: 0, 40, 80, 120, 160, 200
-                    ((5 - side) * 40) as u8, // G: 200, 160, 120, 80, 40, 0
-                    100,                     // B: constant
-                    255,                     // A: opaque
-                )
+                let side = i / 2;
+                Vector4::new((side * 40) as u8, ((5 - side) * 40) as u8, 100, 255)
             })
             .collect();
 
@@ -296,13 +287,12 @@ mod tests {
 
         // Subdivide once: 12 faces -> 48 faces
         let (_, new_faces, new_attrs) =
-            subdivide_with_attributes(&cube.vertices, &cube.faces, &face_attrs, 1);
+            subdivide(&cube.vertices, &cube.faces, Some(&face_attrs), 1);
 
         assert_eq!(new_faces.len(), 48);
         assert_eq!(new_attrs.colors.len(), 1);
         assert_eq!(new_attrs.colors[0].len(), 48);
 
-        // Each original face becomes 4 child faces with the same color
         for (parent_idx, parent_color) in face_colors.iter().enumerate() {
             for child_offset in 0..4 {
                 let child_idx = parent_idx * 4 + child_offset;
@@ -316,12 +306,11 @@ mod tests {
 
         // Subdivide twice: 12 faces -> 192 faces
         let (_, new_faces2, new_attrs2) =
-            subdivide_with_attributes(&cube.vertices, &cube.faces, &face_attrs, 2);
+            subdivide(&cube.vertices, &cube.faces, Some(&face_attrs), 2);
 
         assert_eq!(new_faces2.len(), 192);
         assert_eq!(new_attrs2.colors[0].len(), 192);
 
-        // Each original face becomes 16 child faces (4^2)
         for (parent_idx, parent_color) in face_colors.iter().enumerate() {
             for child_offset in 0..16 {
                 let child_idx = parent_idx * 16 + child_offset;
@@ -329,6 +318,50 @@ mod tests {
                     new_attrs2.colors[0][child_idx], *parent_color,
                     "Child face {} should have same color as parent face {} after 2 iterations",
                     child_idx, parent_idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_subdivide_propagates_groupings() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+
+        // Assign each pair of faces to a named group (one per cube side)
+        let grouping = Grouping {
+            kind: GroupingKind::Group,
+            names: vec![
+                "side0".into(),
+                "side1".into(),
+                "side2".into(),
+                "side3".into(),
+                "side4".into(),
+                "side5".into(),
+            ],
+            indices: (0..12).map(|i| i / 2).collect(),
+        };
+
+        let mut face_attrs = Attributes::default();
+        face_attrs.groupings.push(grouping);
+
+        let (_, new_faces, new_attrs) =
+            subdivide(&cube.vertices, &cube.faces, Some(&face_attrs), 1);
+
+        assert_eq!(new_faces.len(), 48);
+        assert_eq!(new_attrs.groupings.len(), 1);
+        let g = &new_attrs.groupings[0];
+        assert_eq!(g.indices.len(), 48);
+        assert_eq!(g.names.len(), 6);
+
+        // Each parent face's group index should appear 4 times consecutively
+        for parent_idx in 0..12 {
+            let expected_group = parent_idx / 2;
+            for child_offset in 0..4 {
+                let child_idx = parent_idx * 4 + child_offset;
+                assert_eq!(
+                    g.indices[child_idx], expected_group,
+                    "Child face {} should have group {} from parent face {}",
+                    child_idx, expected_group, parent_idx
                 );
             }
         }

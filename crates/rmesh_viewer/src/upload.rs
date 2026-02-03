@@ -7,7 +7,7 @@ use rmesh::geometry::Geometry;
 use rmesh::image::LazyImage;
 use rmesh::scene::{Scene, SceneNodeKind};
 
-/// GPU-ready mesh vertex: 36 bytes interleaved.
+/// GPU-ready mesh vertex: 52 bytes interleaved.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshVertex {
@@ -15,6 +15,7 @@ pub struct MeshVertex {
     pub normal: [f32; 3],
     pub color: [u8; 4],
     pub uv: [f32; 2],
+    pub tangent: [f32; 4],
 }
 
 /// GPU-ready line vertex.
@@ -40,6 +41,13 @@ pub struct GpuMaterial {
     pub metallic: f32,
     pub roughness: f32,
     pub use_vertex_color: bool,
+    pub emissive_factor: [f32; 3],
+    pub occlusion_strength: f32,
+    pub normal_scale: f32,
+    pub has_metallic_roughness_texture: bool,
+    pub has_normal_texture: bool,
+    pub has_occlusion_texture: bool,
+    pub has_emissive_texture: bool,
 }
 
 impl Default for GpuMaterial {
@@ -49,6 +57,13 @@ impl Default for GpuMaterial {
             metallic: 0.0,
             roughness: 0.5,
             use_vertex_color: false,
+            emissive_factor: [0.0, 0.0, 0.0],
+            occlusion_strength: 1.0,
+            normal_scale: 1.0,
+            has_metallic_roughness_texture: false,
+            has_normal_texture: false,
+            has_occlusion_texture: false,
+            has_emissive_texture: false,
         }
     }
 }
@@ -68,6 +83,10 @@ pub struct GpuMesh {
     pub transform: Matrix4<f32>,
     pub material: GpuMaterial,
     pub base_color_texture: Option<GpuTexture>,
+    pub metallic_roughness_texture: Option<GpuTexture>,
+    pub normal_texture: Option<GpuTexture>,
+    pub occlusion_texture: Option<GpuTexture>,
+    pub emissive_texture: Option<GpuTexture>,
 }
 
 /// An uploaded path draw call.
@@ -104,6 +123,17 @@ fn convert_material(mat: &Material) -> GpuMaterial {
         metallic: pbr.metallic_factor as f32,
         roughness: pbr.roughness_factor as f32,
         use_vertex_color: false,
+        emissive_factor: [
+            pbr.emissive_factor.x as f32,
+            pbr.emissive_factor.y as f32,
+            pbr.emissive_factor.z as f32,
+        ],
+        occlusion_strength: pbr.occlusion_strength as f32,
+        normal_scale: pbr.normal_scale as f32,
+        has_metallic_roughness_texture: pbr.metallic_roughness_texture.is_some(),
+        has_normal_texture: pbr.normal_texture.is_some(),
+        has_occlusion_texture: pbr.occlusion_texture.is_some(),
+        has_emissive_texture: pbr.emissive_texture.is_some(),
     }
 }
 
@@ -112,10 +142,17 @@ fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     img: &LazyImage,
+    srgb: bool,
 ) -> Option<GpuTexture> {
     let decoded = img.decode()?;
     let rgba = decoded.to_rgba8();
     let (w, h) = decoded.dimensions();
+
+    let format = if srgb {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    };
 
     let size = wgpu::Extent3d {
         width: w,
@@ -123,12 +160,12 @@ fn upload_texture(
         depth_or_array_layers: 1,
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("base_color_texture"),
+        label: Some("pbr_texture"),
         size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -374,11 +411,17 @@ fn upload_mesh(
     let vertex_normals: Option<&[nalgebra::Vector3<f64>]> =
         mesh.attributes_vertex.normals.first().map(|n| n.as_slice());
 
+    let vertex_tangents: Option<&[nalgebra::Vector4<f64>]> = mesh
+        .attributes_vertex
+        .tangents
+        .first()
+        .map(|t| t.as_slice());
+
     let has_vertex_colors = vertex_colors.is_some();
 
+    let default_tangent = [0.0f32, 0.0, 1.0, 1.0];
+
     let (vertices, indices) = if let Some(normals) = vertex_normals {
-        // Per-vertex normals available: build one vertex per mesh vertex
-        // and use the mesh's face indices directly (real indexed drawing).
         let mut verts = Vec::with_capacity(mesh.vertices.len());
         for (vi, p) in mesh.vertices.iter().enumerate() {
             let wp = transform_point(p, world_transform);
@@ -396,12 +439,18 @@ fn upload_mesh(
                 .and_then(|u| u.get(vi))
                 .copied()
                 .unwrap_or_else(nalgebra::Vector2::zeros);
+            let tangent = vertex_tangents
+                .and_then(|t| t.get(vi))
+                .map_or(default_tangent, |t| {
+                    [t.x as f32, t.y as f32, t.z as f32, t.w as f32]
+                });
 
             verts.push(MeshVertex {
                 position: [p.x as f32, p.y as f32, p.z as f32],
                 normal: [n.x as f32, n.y as f32, n.z as f32],
                 color: [color.x, color.y, color.z, color.w],
                 uv: [uv.x as f32, uv.y as f32],
+                tangent,
             });
         }
 
@@ -414,7 +463,6 @@ fn upload_mesh(
         (verts, idxs)
     } else {
         // No per-vertex normals: expand to one vertex per face corner
-        // so each triangle can carry its own flat normal.
         let face_normals = mesh.face_normals();
         let mut verts = Vec::with_capacity(mesh.faces.len() * 3);
         let mut idxs = Vec::with_capacity(mesh.faces.len() * 3);
@@ -434,6 +482,11 @@ fn upload_mesh(
                     .and_then(|u| u.get(vi))
                     .copied()
                     .unwrap_or_else(nalgebra::Vector2::zeros);
+                let tangent = vertex_tangents
+                    .and_then(|t| t.get(vi))
+                    .map_or(default_tangent, |t| {
+                        [t.x as f32, t.y as f32, t.z as f32, t.w as f32]
+                    });
 
                 idxs.push(verts.len() as u32);
                 verts.push(MeshVertex {
@@ -441,6 +494,7 @@ fn upload_mesh(
                     normal: [fn_val.x as f32, fn_val.y as f32, fn_val.z as f32],
                     color: [color.x, color.y, color.z, color.w],
                     uv: [uv.x as f32, uv.y as f32],
+                    tangent,
                 });
             }
         }
@@ -460,7 +514,7 @@ fn upload_mesh(
         usage: wgpu::BufferUsages::INDEX,
     });
 
-    // Determine material and upload texture
+    // Determine material and upload textures
     let first_mat = mesh.materials.first();
     let mut material = first_mat.map_or(GpuMaterial::default(), convert_material);
 
@@ -468,11 +522,36 @@ fn upload_mesh(
         material.use_vertex_color = true;
     }
 
-    let base_color_texture = first_mat.and_then(|m| {
-        let pbr = m.to_pbr();
-        pbr.base_color_texture
+    let pbr = first_mat.map(|m| m.to_pbr());
+
+    let base_color_texture = pbr.as_ref().and_then(|p| {
+        p.base_color_texture
             .as_ref()
-            .and_then(|img| upload_texture(device, queue, img))
+            .and_then(|img| upload_texture(device, queue, img, true))
+    });
+
+    let metallic_roughness_texture = pbr.as_ref().and_then(|p| {
+        p.metallic_roughness_texture
+            .as_ref()
+            .and_then(|img| upload_texture(device, queue, img, false))
+    });
+
+    let normal_texture = pbr.as_ref().and_then(|p| {
+        p.normal_texture
+            .as_ref()
+            .and_then(|img| upload_texture(device, queue, img, false))
+    });
+
+    let occlusion_texture = pbr.as_ref().and_then(|p| {
+        p.occlusion_texture
+            .as_ref()
+            .and_then(|img| upload_texture(device, queue, img, false))
+    });
+
+    let emissive_texture = pbr.as_ref().and_then(|p| {
+        p.emissive_texture
+            .as_ref()
+            .and_then(|img| upload_texture(device, queue, img, true))
     });
 
     let transform = mat4_f64_to_f32(world_transform);
@@ -484,6 +563,10 @@ fn upload_mesh(
         transform,
         material,
         base_color_texture,
+        metallic_roughness_texture,
+        normal_texture,
+        occlusion_texture,
+        emissive_texture,
     });
 }
 

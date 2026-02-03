@@ -6,7 +6,8 @@ use anyhow::{Context, Result, bail};
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3, Vector4};
 use rayon::prelude::*;
 
-use crate::attributes::{AlphaMode, Grouping, GroupingKind, Material, PBRMaterial};
+use crate::attributes::{AlphaMode, Grouping, GroupingKind, Material, PBRMaterial, UNSET};
+use crate::boundary::Surface;
 use crate::geometry::Geometry;
 use crate::image::LazyImage;
 use crate::mesh::Trimesh;
@@ -39,7 +40,6 @@ struct AccessorReader<'a> {
 pub struct GltfLoader {
     header: Gltf,
     buffers: Vec<Vec<u8>>,
-    #[allow(dead_code)] // Will be used for extension processing
     extensions: ExtensionRegistry,
 }
 
@@ -295,7 +295,14 @@ impl GltfLoader {
             .primitives
             .iter()
             .enumerate()
-            .filter_map(|(idx, prim)| self.load_primitive(prim, materials).ok().map(|m| (idx, m)))
+            .filter_map(|(idx, prim)| match self.load_primitive(prim, materials) {
+                Ok(m) => Some((idx, m)),
+                Err(_e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[gltf] failed to load primitive {idx}: {_e:?}");
+                    None
+                }
+            })
             .collect();
 
         if loaded_primitives.is_empty() {
@@ -318,6 +325,11 @@ impl GltfLoader {
         let mut material_names: Vec<String> = Vec::new();
         let mut combined_materials: Vec<Material> = Vec::new();
 
+        // Track BREP surfaces across primitives
+        let mut combined_face_surfaces: Vec<Surface> = Vec::new();
+        let mut surface_indices: Vec<usize> = Vec::new();
+        let mut surface_names: Vec<String> = Vec::new();
+
         for (prim_idx, prim_mesh) in loaded_primitives {
             let vertex_offset = combined_vertices.len();
             let num_faces = prim_mesh.faces.len();
@@ -339,6 +351,28 @@ impl GltfLoader {
             let prim_name_idx = primitive_names.len();
             primitive_names.push(prim_name);
             primitive_indices.extend(std::iter::repeat_n(prim_name_idx, num_faces));
+
+            // Merge face_surfaces from this primitive
+            if !prim_mesh.face_surfaces.is_empty() {
+                combined_face_surfaces.extend(prim_mesh.face_surfaces.iter().cloned());
+                // Find the surface grouping to get per-face indices
+                if let Some(sg) = prim_mesh
+                    .attributes_face
+                    .groupings
+                    .iter()
+                    .find(|g| g.kind == GroupingKind::Surface)
+                {
+                    let name_offset = surface_names.len();
+                    surface_names.extend(sg.names.iter().cloned());
+                    surface_indices.extend(
+                        sg.indices.iter().map(
+                            |&i| {
+                                if i == UNSET { UNSET } else { i + name_offset }
+                            },
+                        ),
+                    );
+                }
+            }
 
             // Handle materials from this primitive
             if prim_mesh.materials.is_empty() {
@@ -389,6 +423,16 @@ impl GltfLoader {
         }
 
         result.materials = combined_materials;
+
+        // Add combined face surfaces and grouping
+        if !combined_face_surfaces.is_empty() {
+            result.face_surfaces = combined_face_surfaces;
+            result.attributes_face.groupings.push(Grouping {
+                kind: GroupingKind::Surface,
+                names: surface_names,
+                indices: surface_indices,
+            });
+        }
 
         Ok(result)
     }
@@ -550,6 +594,21 @@ impl GltfLoader {
                     material_index,
                     materials.len()
                 );
+            }
+        }
+
+        // Process primitive extensions (TM_brep_faces, etc.)
+        if primitive.extensions.is_some() {
+            let ext_result = self
+                .extensions
+                .handle_primitive(&primitive.extensions, &|accessor_idx| {
+                    self.read_accessor_indices(accessor_idx)
+                })?;
+            if !ext_result.face_surfaces.is_empty() {
+                mesh.face_surfaces = ext_result.face_surfaces;
+            }
+            if let Some(grouping) = ext_result.surface_grouping {
+                mesh.attributes_face.groupings.push(grouping);
             }
         }
 

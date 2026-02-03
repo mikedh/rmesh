@@ -1,9 +1,14 @@
 //! GLTF extension handling system.
 
+mod brep;
+
 use std::collections::HashMap;
 
 use anyhow::Result;
 use serde_json::Value;
+
+use crate::attributes::Grouping;
+use crate::boundary::Surface;
 
 /// Extension processing scopes - when the handler is invoked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,10 +43,25 @@ pub struct MeshParams {
 /// Handler function type for extensions.
 pub type Handler = fn(&mut ExtensionContext) -> Result<Option<Value>>;
 
+/// Data produced by a primitive extension handler.
+#[derive(Debug, Default)]
+pub struct PrimitiveResult {
+    pub face_surfaces: Vec<Surface>,
+    pub surface_grouping: Option<Grouping>,
+}
+
+/// Handler for primitive-scope extensions.
+/// `accessor_reader` reads a SCALAR accessor by index → `Vec<usize>`.
+pub type PrimitiveHandler = fn(
+    data: &Value,
+    accessor_reader: &dyn Fn(usize) -> Result<Vec<usize>>,
+) -> Result<PrimitiveResult>;
+
 /// Registry of extension handlers.
 #[derive(Default)]
 pub struct ExtensionRegistry {
     handlers: HashMap<(Scope, String), Handler>,
+    primitive_handlers: HashMap<String, PrimitiveHandler>,
 }
 
 impl ExtensionRegistry {
@@ -68,12 +88,43 @@ impl ExtensionRegistry {
             handle_texture_webp,
         );
 
+        // Register TM_brep_faces primitive handler
+        registry.register_primitive("TM_brep_faces", brep::handle_brep_faces);
+
         registry
     }
 
     /// Register a handler for an extension at a given scope.
     pub fn register(&mut self, name: &str, scope: Scope, handler: Handler) {
         self.handlers.insert((scope, name.to_string()), handler);
+    }
+
+    /// Register a handler for a primitive-scope extension.
+    pub fn register_primitive(&mut self, name: &str, handler: PrimitiveHandler) {
+        self.primitive_handlers.insert(name.to_string(), handler);
+    }
+
+    /// Process primitive extensions, returning merged results from all handlers.
+    pub fn handle_primitive(
+        &self,
+        extensions: &Option<HashMap<String, Value>>,
+        accessor_reader: &dyn Fn(usize) -> Result<Vec<usize>>,
+    ) -> Result<PrimitiveResult> {
+        let mut result = PrimitiveResult::default();
+        if let Some(exts) = extensions {
+            for (name, data) in exts {
+                if let Some(handler) = self.primitive_handlers.get(name) {
+                    let hr = handler(data, accessor_reader)?;
+                    if !hr.face_surfaces.is_empty() {
+                        result.face_surfaces = hr.face_surfaces;
+                    }
+                    if hr.surface_grouping.is_some() {
+                        result.surface_grouping = hr.surface_grouping;
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
 
     /// Process extensions at a given scope.

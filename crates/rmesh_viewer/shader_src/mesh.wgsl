@@ -1,34 +1,25 @@
 // PBR mesh shader - Cook-Torrance BRDF with GGX distribution
+// Full PBR pipeline: base color, metallic-roughness, normal map, occlusion, emissive
 
-struct CameraUniforms {
-    view_proj: mat4x4<f32>,
-    camera_pos: vec4<f32>,
-};
-
-struct ModelUniforms {
-    model: mat4x4<f32>,
-    normal_matrix: mat4x4<f32>,
-};
-
-struct MaterialUniforms {
-    base_color: vec4<f32>,
-    metallic: f32,
-    roughness: f32,
-    use_vertex_color: u32,
-    has_texture: u32,
-};
+#include "uniforms.inc.wgsl"
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(1) @binding(0) var<uniform> model: ModelUniforms;
 @group(2) @binding(0) var<uniform> material: MaterialUniforms;
+
 @group(3) @binding(0) var base_color_tex: texture_2d<f32>;
-@group(3) @binding(1) var base_color_sampler: sampler;
+@group(3) @binding(1) var mr_tex: texture_2d<f32>;
+@group(3) @binding(2) var normal_tex: texture_2d<f32>;
+@group(3) @binding(3) var occlusion_tex: texture_2d<f32>;
+@group(3) @binding(4) var emissive_tex: texture_2d<f32>;
+@group(3) @binding(5) var tex_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
+    @location(4) tangent: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -37,6 +28,7 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
+    @location(4) world_tangent: vec4<f32>,
 };
 
 @vertex
@@ -46,6 +38,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_position = camera.view_proj * world_pos;
     out.world_pos = world_pos.xyz;
     out.world_normal = normalize((model.normal_matrix * vec4<f32>(in.normal, 0.0)).xyz);
+    let wt = normalize((model.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz);
+    out.world_tangent = vec4<f32>(wt, in.tangent.w);
     out.color = in.color;
     out.uv = in.uv;
     return out;
@@ -81,14 +75,19 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let max_reflect = vec3<f32>(1.0 - roughness);
+    return f0 + (max(max_reflect, f0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var albedo = material.base_color.rgb;
     var alpha = material.base_color.a;
 
-    // Sample base color texture if present (multiplied with base_color factor)
+    // Sample base color texture if present
     if material.has_texture != 0u {
-        let tex_color = textureSample(base_color_tex, base_color_sampler, in.uv);
+        let tex_color = textureSample(base_color_tex, tex_sampler, in.uv);
         albedo *= tex_color.rgb;
         alpha *= tex_color.a;
     }
@@ -98,9 +97,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         alpha = in.color.a;
     }
 
-    let metallic = material.metallic;
-    let roughness = max(material.roughness, 0.04);
-    let n = normalize(in.world_normal);
+    // Metallic-roughness from texture or uniforms
+    var metallic = material.metallic;
+    var roughness = material.roughness;
+    if material.has_mr_texture != 0u {
+        let mr_sample = textureSample(mr_tex, tex_sampler, in.uv);
+        metallic *= mr_sample.b;   // glTF spec: B=metallic
+        roughness *= mr_sample.g;  // glTF spec: G=roughness
+    }
+    roughness = max(roughness, 0.04);
+
+    // Normal mapping
+    var n = normalize(in.world_normal);
+    if material.has_normal_texture != 0u {
+        let normal_sample = textureSample(normal_tex, tex_sampler, in.uv).xyz;
+        let tangent_normal = (normal_sample * 2.0 - 1.0) * vec3<f32>(material.normal_scale, material.normal_scale, 1.0);
+        let t = normalize(in.world_tangent.xyz);
+        let b = normalize(cross(n, t) * in.world_tangent.w);
+        // TBN matrix transforms tangent-space normal to world space
+        n = normalize(t * tangent_normal.x + b * tangent_normal.y + n * tangent_normal.z);
+    }
+
     let v = normalize(camera.camera_pos.xyz - in.world_pos);
 
     // F0 for Fresnel
@@ -135,14 +152,56 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fill_n_dot_l = max(dot(n, fill_dir), 0.0);
     lo += albedo * 0.3 * fill_n_dot_l;
 
-    // Ambient
-    let ambient = vec3<f32>(0.03) * albedo;
-    var color = ambient + lo;
+    // Ambient / environment lighting
+    var ambient = vec3<f32>(0.0);
+    if camera.use_env_light != 0u {
+        // Hemisphere sky approximation
+        let sky_top = vec3<f32>(0.6, 0.7, 0.9);
+        let sky_bottom = vec3<f32>(0.2, 0.2, 0.25);
+        let sky_blend = n.y * 0.5 + 0.5;
+        let irradiance = mix(sky_bottom, sky_top, sky_blend);
+
+        let n_dot_v = max(dot(n, v), 0.0);
+        let f_env = fresnel_schlick_roughness(n_dot_v, f0, roughness);
+        let kd_env = (vec3<f32>(1.0) - f_env) * (1.0 - metallic);
+
+        // Diffuse ambient
+        ambient = kd_env * albedo * irradiance;
+
+        // Specular ambient (reflection probe approximation)
+        let reflect_dir = reflect(-v, n);
+        let reflect_blend = reflect_dir.y * 0.5 + 0.5;
+        let blur = roughness * roughness;
+        let env_color = mix(
+            mix(sky_bottom, sky_top, reflect_blend),
+            irradiance,
+            blur
+        );
+        ambient += f_env * env_color;
+    } else {
+        ambient = vec3<f32>(0.03) * albedo;
+    }
+
+    // Occlusion
+    var ao = 1.0;
+    if material.has_occlusion_texture != 0u {
+        let ao_sample = textureSample(occlusion_tex, tex_sampler, in.uv).r;
+        ao = mix(1.0, ao_sample, material.occlusion_strength);
+    }
+
+    // Emissive
+    var emissive = vec3<f32>(0.0);
+    if material.has_emissive_texture != 0u {
+        emissive = textureSample(emissive_tex, tex_sampler, in.uv).rgb * material.emissive_factor;
+    } else {
+        emissive = material.emissive_factor;
+    }
+
+    var color = ambient * ao + lo + emissive;
 
     // Reinhard tonemap
     color = color / (color + vec3<f32>(1.0));
-    // Gamma correction
-    color = pow(color, vec3<f32>(1.0 / 2.2));
+    // Note: no manual gamma — the sRGB render target handles linear→sRGB conversion
 
     return vec4<f32>(color, alpha);
 }

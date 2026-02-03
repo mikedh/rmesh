@@ -8,9 +8,33 @@ Provides ``from_trimesh()`` for data conversion, ``WrappedMesh`` and
 import numpy as np
 
 
+def _cascadio_to_rmesh_surface(d):
+    """Remap a cascadio surface dict to the format expected by rmesh.
+
+    Cascadio uses ``"type"`` (lowercase) while rmesh expects ``"kind"``
+    (capitalized).  Extra keys like ``face_index`` and ``extent_*`` are
+    stripped since the Rust parser doesn't expect them.
+    """
+    kind = d["type"].capitalize()
+    out = {"kind": kind}
+    # Copy geometry keys that rmesh expects
+    for key in ("origin", "normal", "axis", "radius",
+                "center", "apex", "half_angle",
+                "major_radius", "minor_radius"):
+        if key in d:
+            out[key] = d[key]
+    return out
+
+
 def from_trimesh(mesh):
     """
     Convert a ``trimesh.Trimesh`` to an ``rmesh.Trimesh``.
+
+    If the source mesh carries cascadio BREP metadata
+    (``mesh.metadata['cascadio']['brep_faces']`` and
+    ``mesh.face_attributes['brep_index']``), it is forwarded
+    as ``face_surfaces`` so that ``project()`` can emit
+    analytical circles and arcs.
 
     Parameters
     ----------
@@ -25,7 +49,28 @@ def from_trimesh(mesh):
 
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces, dtype=np.int64)
-    return rmesh.Trimesh(vertices, faces)
+
+    face_surfaces = None
+    cascadio_meta = getattr(mesh, "metadata", {}).get("cascadio", {})
+    brep_faces = cascadio_meta.get("brep_faces")
+    fa = getattr(mesh, "face_attributes", {})
+    brep_index = fa.get("brep_index") if isinstance(fa, dict) else None
+    if brep_faces is not None and brep_index is not None:
+        # Filter out None entries and remap face indices
+        valid = {old: new for new, old in enumerate(
+            i for i, f in enumerate(brep_faces) if f is not None)}
+        clean_faces = [_cascadio_to_rmesh_surface(f)
+                       for f in brep_faces if f is not None]
+        raw_index = np.asarray(brep_index, dtype=np.int64)
+        # Remap indices; faces referencing a None surface get index -1
+        remapped = np.array([valid.get(int(i), -1) for i in raw_index],
+                            dtype=np.int64)
+        if clean_faces and (remapped >= 0).any():
+            # Drop faces with unmapped surfaces by clamping to 0
+            remapped = np.clip(remapped, 0, len(clean_faces) - 1)
+            face_surfaces = (clean_faces, remapped)
+
+    return rmesh.Trimesh(vertices, faces, face_surfaces=face_surfaces)
 
 
 class WrappedMesh:

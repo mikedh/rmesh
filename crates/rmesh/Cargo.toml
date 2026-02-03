@@ -17,6 +17,7 @@ itertools = "0.14.0"
 rayon = "1.11"
 earcut = "0.4"
 i_overlay = "4"
+kiddo = "5"
 approx = "0.5"
 image = "0.25"
 flate2 = "1.0"
@@ -35,7 +36,7 @@ nalgebra_034 = { package = "nalgebra", version = "0.34" }
 [features]
 default = []
 wgpu = ["dep:wgpu", "dep:pollster"]
-bench = []
+bench = ["dep:pprof"]
 
 [dependencies.wgpu]
 workspace = true
@@ -43,6 +44,11 @@ optional = true
 
 [dependencies.pollster]
 version = "0.4"
+optional = true
+
+[dependencies.pprof]
+version = "0.15"
+features = ["flamegraph"]
 optional = true
 
 [dev-dependencies]

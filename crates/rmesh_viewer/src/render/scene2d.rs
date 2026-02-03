@@ -1,9 +1,10 @@
 use nalgebra::Matrix4;
 use wgpu::util::DeviceExt;
 
-use super::CameraUniforms;
 use super::fill::{FillRenderer, GpuFill};
 use super::line::LineRenderer;
+use super::mat4_to_array;
+use super::shaders::CameraUniforms;
 use crate::gpu::GpuContext;
 use crate::upload::GpuPath;
 
@@ -39,8 +40,10 @@ impl Scene2DRenderer {
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera2d_uniform"),
             contents: bytemuck::bytes_of(&CameraUniforms {
-                view_proj: Matrix4::<f32>::identity().into(),
+                view_proj: mat4_to_array(&Matrix4::<f32>::identity()),
                 camera_pos: [0.0; 4],
+                use_env_light: 0,
+                _pad_0: [0; 12],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -70,8 +73,10 @@ impl Scene2DRenderer {
 
     pub fn update_camera(&self, queue: &wgpu::Queue, view_proj: &Matrix4<f32>) {
         let uniforms = CameraUniforms {
-            view_proj: (*view_proj).into(),
+            view_proj: mat4_to_array(view_proj),
             camera_pos: [0.0; 4],
+            use_env_light: 0,
+            _pad_0: [0; 12],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
     }

@@ -43,7 +43,7 @@ impl LineRenderer {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("line_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shader_src/line.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/line.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

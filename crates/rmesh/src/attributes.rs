@@ -19,10 +19,16 @@ pub enum GroupingKind {
     Group,
     Smoothing,
     Object,
+    /// Per-face surface index; geometry lives in `Trimesh.face_surfaces`.
+    Surface,
 }
+
+/// Sentinel value meaning "this face has no group assignment".
+pub const UNSET: usize = usize::MAX;
 
 /// Per-face grouping attribute with a lookup table of names.
 /// Each face has an index into `names` stored in `indices`.
+/// Use [`UNSET`] for faces that have no assignment.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Grouping {
     pub kind: GroupingKind,

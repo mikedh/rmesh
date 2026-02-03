@@ -755,6 +755,77 @@ impl Path2D {
         Some(Path3D::from_vertices_and_segments(vertices, segments))
     }
 
+    /// Offset the path boundary by `distance`, preserving analytical curves.
+    ///
+    /// Circles and arcs from the original path are recognized in the
+    /// buffered result and emitted with adjusted radii rather than being
+    /// discretized into line segments.
+    ///
+    /// Positive distance = expand outward, negative = shrink inward.
+    /// Returns empty vec if the path shrinks to nothing.
+    pub fn buffer(&self, distance: f64) -> Vec<Path2D> {
+        use crate::project::polygon_to_path;
+
+        // 1. Collect original analytical circles from our segments
+        let mut known_circles: Vec<(Point2<f64>, f64)> = Vec::new();
+        for seg in &self.segments {
+            match seg {
+                Segment2D::Circle(c) => {
+                    let center = self.vertices[c.center];
+                    known_circles.push((center, c.radius));
+                }
+                Segment2D::Arc(a) => {
+                    if let (Some(center), Some(r)) =
+                        (a.center(&self.vertices), a.radius(&self.vertices))
+                    {
+                        // Only add unique circles
+                        let already = known_circles.iter().any(|(kc, kr)| {
+                            (kc.x - center.x).powi(2) + (kc.y - center.y).powi(2)
+                                < (r * 1e-8).powi(2)
+                                && (kr - r).abs() < r * 1e-8
+                        });
+                        if !already {
+                            known_circles.push((center, r));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Build adjusted expected circles for the buffered geometry.
+        //    Exterior arcs grow by +distance, hole arcs shrink by -distance;
+        //    provide both candidates and let ring_to_segments match whichever fits.
+        let adjusted: Vec<(Point2<f64>, f64)> = known_circles
+            .iter()
+            .flat_map(|&(center, radius)| {
+                [radius + distance, radius - distance]
+                    .into_iter()
+                    .filter(|&r| r > 0.0)
+                    .map(move |r| (center, r))
+            })
+            .collect();
+
+        // 3. Discretize to polygons and buffer them
+        let polygons = self.polygons();
+        let mut results: Vec<Path2D> = Vec::new();
+
+        for poly in polygons {
+            let buffered = poly.buffer(distance);
+            for bp in &buffered {
+                let mut path = if adjusted.is_empty() {
+                    bp.to_path2d()
+                } else {
+                    polygon_to_path(bp, &adjusted, None)
+                };
+                path.to_3d = self.to_3d;
+                results.push(path);
+            }
+        }
+
+        results
+    }
+
     /// Get the area of the first ring
     ///
     /// Uses the shoelace formula. Returns 0 if no rings are found.
