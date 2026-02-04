@@ -9,6 +9,8 @@ pub mod decomposition;
 pub mod exchange;
 pub mod formatting;
 pub mod geometry;
+#[cfg(feature = "wgpu")]
+pub mod gpu;
 pub mod graph;
 pub mod image;
 pub mod mesh;

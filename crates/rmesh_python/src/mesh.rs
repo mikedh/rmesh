@@ -10,7 +10,9 @@ use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use rmesh::attributes::{AlphaMode, Attributes, Grouping, GroupingKind, Material, SimpleMaterial};
+use rmesh::attributes::{
+    AlphaMode, Attributes, Grouping, GroupingKind, Material, SimpleMaterial, UNSET,
+};
 use rmesh::boundary::faces;
 use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
 use rmesh::geometry::Geometry;
@@ -1558,7 +1560,11 @@ impl PyTrimesh {
             .iter()
             .find(|g| matches!(g.kind, GroupingKind::Surface))
             .map(|g| {
-                let indices: Vec<i64> = g.indices.iter().map(|&i| i as i64).collect();
+                let indices: Vec<i64> = g
+                    .indices
+                    .iter()
+                    .map(|&i| if i == UNSET { -1 } else { i as i64 })
+                    .collect();
                 let arr = PyArray1::from_vec(py, indices);
                 make_readonly(&arr);
                 arr.unbind()
@@ -1929,19 +1935,27 @@ fn parse_surface_dicts(
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'kind' key"))?
             .extract()?;
 
+        macro_rules! get_key {
+            ($dict:expr, $key:expr) => {
+                $dict.get_item($key)?.ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err(format!("surface missing '{}'", $key))
+                })
+            };
+        }
+
         let surface = match kind.as_str() {
             "Plane" => {
-                let origin: [f64; 3] = dict.get_item("origin")?.unwrap().extract()?;
-                let normal: [f64; 3] = dict.get_item("normal")?.unwrap().extract()?;
+                let origin: [f64; 3] = get_key!(dict, "origin")?.extract()?;
+                let normal: [f64; 3] = get_key!(dict, "normal")?.extract()?;
                 rmesh::boundary::Surface::Plane(faces::SurfacePlane {
                     origin: Point3::new(origin[0], origin[1], origin[2]),
                     normal: Vector3::new(normal[0], normal[1], normal[2]),
                 })
             }
             "Cylinder" => {
-                let origin: [f64; 3] = dict.get_item("origin")?.unwrap().extract()?;
-                let axis: [f64; 3] = dict.get_item("axis")?.unwrap().extract()?;
-                let radius: f64 = dict.get_item("radius")?.unwrap().extract()?;
+                let origin: [f64; 3] = get_key!(dict, "origin")?.extract()?;
+                let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
+                let radius: f64 = get_key!(dict, "radius")?.extract()?;
                 rmesh::boundary::Surface::Cylinder(faces::Cylinder {
                     origin: Point3::new(origin[0], origin[1], origin[2]),
                     axis: Vector3::new(axis[0], axis[1], axis[2]),
@@ -1949,9 +1963,9 @@ fn parse_surface_dicts(
                 })
             }
             "Cone" => {
-                let apex: [f64; 3] = dict.get_item("apex")?.unwrap().extract()?;
-                let axis: [f64; 3] = dict.get_item("axis")?.unwrap().extract()?;
-                let half_angle: f64 = dict.get_item("half_angle")?.unwrap().extract()?;
+                let apex: [f64; 3] = get_key!(dict, "apex")?.extract()?;
+                let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
+                let half_angle: f64 = get_key!(dict, "half_angle")?.extract()?;
                 rmesh::boundary::Surface::Cone(faces::Cone {
                     apex: Point3::new(apex[0], apex[1], apex[2]),
                     axis: Vector3::new(axis[0], axis[1], axis[2]),
@@ -1959,18 +1973,18 @@ fn parse_surface_dicts(
                 })
             }
             "Sphere" => {
-                let center: [f64; 3] = dict.get_item("center")?.unwrap().extract()?;
-                let radius: f64 = dict.get_item("radius")?.unwrap().extract()?;
+                let center: [f64; 3] = get_key!(dict, "center")?.extract()?;
+                let radius: f64 = get_key!(dict, "radius")?.extract()?;
                 rmesh::boundary::Surface::Sphere(faces::Sphere {
                     center: Point3::new(center[0], center[1], center[2]),
                     radius,
                 })
             }
             "Torus" => {
-                let center: [f64; 3] = dict.get_item("center")?.unwrap().extract()?;
-                let axis: [f64; 3] = dict.get_item("axis")?.unwrap().extract()?;
-                let major_radius: f64 = dict.get_item("major_radius")?.unwrap().extract()?;
-                let minor_radius: f64 = dict.get_item("minor_radius")?.unwrap().extract()?;
+                let center: [f64; 3] = get_key!(dict, "center")?.extract()?;
+                let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
+                let major_radius: f64 = get_key!(dict, "major_radius")?.extract()?;
+                let minor_radius: f64 = get_key!(dict, "minor_radius")?.extract()?;
                 rmesh::boundary::Surface::Torus(faces::Torus {
                     center: Point3::new(center[0], center[1], center[2]),
                     axis: Vector3::new(axis[0], axis[1], axis[2]),

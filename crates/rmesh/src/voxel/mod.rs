@@ -555,19 +555,8 @@ impl VoxelGrid {
 
             // Read changed count
             let changed = {
-                let slice = readback.slice(..);
-                slice.map_async(wgpu::MapMode::Read, |_| {});
-                self.device
-                    .poll(wgpu::PollType::Wait {
-                        timeout: None,
-                        submission_index: None,
-                    })
-                    .ok();
-                let data = slice.get_mapped_range();
-                let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                drop(data);
-                readback.unmap();
-                val
+                let data = crate::gpu::gpu_read_buffer(&self.device, &readback);
+                u32::from_le_bytes([data[0], data[1], data[2], data[3]])
             };
 
             forward = !forward;
@@ -809,19 +798,9 @@ impl VoxelGrid {
         encoder.copy_buffer_to_buffer(&counters_buffer, 0, &readback, 0, 8);
         self.queue.submit(Some(encoder.finish()));
 
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::Wait {
-                timeout: None,
-                submission_index: None,
-            })
-            .ok();
-        let data = slice.get_mapped_range();
+        let data = crate::gpu::gpu_read_buffer(&self.device, &readback);
         let filled = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let faces = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        drop(data);
-        readback.unmap();
 
         (filled, faces)
     }
@@ -1165,20 +1144,7 @@ impl VoxelGrid {
         encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
         self.queue.submit(Some(encoder.finish()));
 
-        let slice = staging.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::Wait {
-                timeout: None,
-                submission_index: None,
-            })
-            .ok();
-
-        let data = slice.get_mapped_range();
-        let result = data.to_vec();
-        drop(data);
-        staging.unmap();
-        result
+        crate::gpu::gpu_read_buffer(&self.device, &staging)
     }
 
     fn voxels_with_value(&self, value: VoxelValue) -> Vec<[u32; 3]> {
@@ -1257,32 +1223,10 @@ fn compute_aabb(vertices: &[Point3<f64>]) -> (Point3<f64>, Point3<f64>) {
 
 /// Request a WGPU device and queue suitable for compute work.
 ///
-/// This is a convenience function for creating the GPU context needed
-/// by `VoxelGrid` and the decomposition module.
+/// Returns a process-wide shared device to avoid driver-level deadlocks
+/// when multiple threads do GPU work in parallel (see [`crate::gpu`]).
 pub fn request_device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..wgpu::InstanceDescriptor::default()
-    });
-
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .ok()?;
-
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("rmesh_compute"),
-        required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::default(),
-        memory_hints: wgpu::MemoryHints::default(),
-        experimental_features: wgpu::ExperimentalFeatures::default(),
-        trace: wgpu::Trace::Off,
-    }))
-    .ok()?;
-
-    Some((Arc::new(device), Arc::new(queue)))
+    crate::gpu::request_device()
 }
 
 // Re-export wgpu buffer init for convenience

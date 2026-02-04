@@ -22,11 +22,14 @@ use rayon::prelude::*;
 type Contour = Vec<[f64; 2]>;
 type Shape = Vec<Contour>;
 
-/// Merge tolerance for vertex snapping and segment matching.
+/// Absolute tolerance for vertex snapping (tied to i_overlay MEDIUM_HIGH precision).
 const EPSILON_MERGE: f64 = 1e-8;
 
 /// Squared merge tolerance, used for distance² comparisons.
 const EPSILON_MERGE_SQ: f64 = EPSILON_MERGE * EPSILON_MERGE;
+
+/// Relative tolerance for comparing values like radii and circle positions.
+pub(crate) const EPSILON_RELATIVE: f64 = 1e-8;
 
 /// Minimum consecutive points on a circle required to emit an arc.
 /// Shorter runs are demoted to line segments to avoid spurious micro-arcs
@@ -145,7 +148,7 @@ fn compute_containment(
         }
     }
 
-    // Phase 4: for each triangle, look up centroid cell and check containers (parallel)
+    // Phase 3: for each triangle, look up centroid cell and check containers (parallel)
     let contained_by: Vec<Option<usize>> = (0..n)
         .into_par_iter()
         .map(|j| {
@@ -563,7 +566,7 @@ pub fn ring_to_segments(
     // analytical circles, all circle-boundary points are within
     // f64 precision of the exact circle. 1e-8 relative tolerance
     // provides margin without false positives.
-    let circle_tol = EPSILON_MERGE;
+    let circle_tol = EPSILON_RELATIVE;
     let assignments: Vec<Option<usize>> = ring
         .iter()
         .map(|pt| {

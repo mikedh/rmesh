@@ -66,8 +66,10 @@ def from_trimesh(mesh):
         remapped = np.array([valid.get(int(i), -1) for i in raw_index],
                             dtype=np.int64)
         if clean_faces and (remapped >= 0).any():
-            # Drop faces with unmapped surfaces by clamping to 0
-            remapped = np.clip(remapped, 0, len(clean_faces) - 1)
+            # Map unmapped faces (-1) to max int64 so the Rust side
+            # sees them as usize::MAX == UNSET after the i64→usize cast.
+            remapped = np.where(
+                remapped >= 0, remapped, np.iinfo(np.int64).max)
             face_surfaces = (clean_faces, remapped)
 
     return rmesh.Trimesh(vertices, faces, face_surfaces=face_surfaces)

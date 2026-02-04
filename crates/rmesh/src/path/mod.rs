@@ -95,6 +95,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::Cache;
 use crate::creation::Triangulator;
+use crate::project::EPSILON_RELATIVE;
 
 // Re-export commonly used types
 pub use entity::arc::{arc_center, arc_center_from_3_points};
@@ -780,9 +781,9 @@ impl Path2D {
                     {
                         // Only add unique circles
                         let already = known_circles.iter().any(|(kc, kr)| {
-                            (kc.x - center.x).powi(2) + (kc.y - center.y).powi(2)
-                                < (r * 1e-8).powi(2)
-                                && (kr - r).abs() < r * 1e-8
+                            let tol = (r * EPSILON_RELATIVE).max(f64::EPSILON * 100.0);
+                            (kc.x - center.x).powi(2) + (kc.y - center.y).powi(2) < tol * tol
+                                && (kr - r).abs() < tol
                         });
                         if !already {
                             known_circles.push((center, r));

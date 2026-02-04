@@ -279,15 +279,7 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
         queue.submit(Some(encoder.finish()));
 
         // Read back split decisions
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device
-            .poll(wgpu::PollType::Wait {
-                timeout: None,
-                submission_index: None,
-            })
-            .ok();
-        let data = slice.get_mapped_range();
+        let data = crate::gpu::gpu_read_buffer(&device, &readback);
         let results: &[GpuSplitResult] = bytemuck::cast_slice(&data);
         let decisions: Vec<SplitDecision> = results
             .iter()
@@ -298,8 +290,6 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
                 region_id: r.region_id,
             })
             .collect();
-        drop(data);
-        readback.unmap();
 
         // Decide which regions to split
         let mut splits = Vec::new();
@@ -616,23 +606,10 @@ fn readback_buffer(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Bu
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
     queue.submit(Some(encoder.finish()));
 
-    let slice = staging.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    device
-        .poll(wgpu::PollType::Wait {
-            timeout: None,
-            submission_index: None,
-        })
-        .ok();
-
-    let data = slice.get_mapped_range();
-    let result: Vec<u32> = data
-        .chunks_exact(4)
+    let data = crate::gpu::gpu_read_buffer(device, &staging);
+    data.chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    drop(data);
-    staging.unmap();
-    result
+        .collect()
 }
 
 fn bgl_uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {

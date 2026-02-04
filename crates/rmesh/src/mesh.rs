@@ -8,7 +8,7 @@ use crate::{
     creation::Plane,
     graph::{EdgeGroups, ManifoldStatus, SortedEdge, adjacency},
     path::Path2D,
-    project::CircleWithEdges,
+    project::{CircleWithEdges, EPSILON_RELATIVE},
     simplify::{SimplifyOptions, SimplifyResult, simplify_mesh},
     triangles::{
         bvh::TriangleBvh,
@@ -881,7 +881,7 @@ impl Trimesh {
                 )
         });
         expected_circles.dedup_by(|a, b| {
-            let tol = b.1.abs() * 1e-8;
+            let tol = (b.1.abs() * EPSILON_RELATIVE).max(f64::EPSILON * 100.0);
             (a.1 - b.1).abs() < tol && (a.0.x - b.0.x).abs() < tol && (a.0.y - b.0.y).abs() < tol
         });
 
@@ -911,7 +911,7 @@ impl Trimesh {
                     if let Some((center, radius)) = self.face_surfaces[si].project_as_circle(&plane)
                     {
                         if let Some(ci) = result.iter().position(|c| {
-                            let tol = c.radius.abs() * 1e-8;
+                            let tol = (c.radius.abs() * EPSILON_RELATIVE).max(f64::EPSILON * 100.0);
                             (c.center.x - center.x).abs() < tol
                                 && (c.center.y - center.y).abs() < tol
                                 && (c.radius - radius).abs() < tol

@@ -372,6 +372,10 @@ impl GltfLoader {
                         ),
                     );
                 }
+            } else if !surface_indices.is_empty() {
+                // Primitive has no BREP data but earlier primitives did;
+                // pad with UNSET so the index array stays aligned with faces.
+                surface_indices.extend(std::iter::repeat_n(UNSET, num_faces));
             }
 
             // Handle materials from this primitive

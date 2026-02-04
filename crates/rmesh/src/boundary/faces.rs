@@ -65,7 +65,8 @@ impl Surface {
             Surface::Cylinder(c) => {
                 let axis_norm = c.axis.normalize();
                 // Cylinder axis must be ~parallel to the plane normal
-                if axis_norm.dot(&plane.normal).abs() > 1.0 - 1e-6 {
+                const AXIS_PARALLEL_TOL: f64 = 1e-6;
+                if axis_norm.dot(&plane.normal).abs() > 1.0 - AXIS_PARALLEL_TOL {
                     let center_2d = plane.to_2d(&[c.origin]);
                     Some((center_2d[0], c.radius))
                 } else {

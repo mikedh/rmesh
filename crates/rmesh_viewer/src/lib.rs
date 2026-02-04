@@ -392,7 +392,11 @@ impl SceneViewer for Scene {
 
         // Map and strip padding
         let slice = output_buffer.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
+        #[allow(clippy::disallowed_methods)] // viewer has its own rendering device
+        {
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+        }
+        #[allow(clippy::disallowed_methods)]
         device
             .poll(wgpu::PollType::Wait {
                 timeout: None,
