@@ -76,11 +76,6 @@ pub fn parse_mtl(data: &str, resolver: Option<&dyn Resolver>) -> Vec<Material> {
                     mat.alpha = Some(d);
                 }
             }
-            "Tr" => {
-                // Non-standard: not in the official spec (paulbourke.net/dataformats/mtl).
-                // Different exporters disagree on meaning (transparency vs dissolve),
-                // so we ignore it and only honor "d".
-            }
             "map_Kd" if parts.len() >= 2 => {
                 // Diffuse texture map
                 if let (Some(mat), Some(res)) = (&mut current, resolver) {
@@ -91,7 +86,9 @@ pub fn parse_mtl(data: &str, resolver: Option<&dyn Resolver>) -> Vec<Material> {
                 }
             }
             _ => {
-                // Ignore unknown directives (Ka, illum, etc.)
+                // Ignore unknown directives (Ka, illum, Tr, etc.)
+                // Note: "Tr" is non-standard and different exporters disagree
+                // on meaning (transparency vs dissolve), so we only honor "d".
             }
         }
     }

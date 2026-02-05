@@ -299,7 +299,7 @@ fn render_frame(state: &ViewerState) {
 /// Uses a singleton viewer thread so the event loop can be reused
 /// across multiple calls (winit only allows one EventLoop per process).
 pub fn run(scene: &Scene, options: ViewerOptions) {
-    crate::viewer_thread::show_scene(scene.clone(), options);
+    crate::viewer_thread::show_scene(scene, options);
 }
 
 /// Run on an existing event loop (called from viewer thread).

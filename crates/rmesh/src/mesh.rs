@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +41,7 @@ use rayon::prelude::*;
 ///
 /// If you mutate `vertices` or `faces` after calling any cached method,
 /// the cached values will be stale. Create a new `Trimesh` instead of mutating.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Trimesh {
     /// Vertex positions
     pub vertices: Vec<Point3<f64>>,
@@ -98,37 +100,6 @@ pub struct Trimesh {
     cache_convex_hull: Cache<Box<Trimesh>>,
     #[serde(skip)]
     cache_obb: Cache<crate::convex::OrientedBoundingBox>,
-}
-
-impl Default for Trimesh {
-    fn default() -> Self {
-        Self {
-            vertices: Vec::new(),
-            faces: Vec::new(),
-            attributes_vertex: Attributes::default(),
-            attributes_face: Attributes::default(),
-            source: LoadSource::default(),
-            materials: Vec::new(),
-            face_surfaces: Vec::new(),
-            density: None,
-            cache_faces_cross: Cache::new(),
-            cache_face_normals: Cache::new(),
-            cache_faces_area: Cache::new(),
-            cache_area: Cache::new(),
-            cache_edges: Cache::new(),
-            cache_face_adjacency: Cache::new(),
-            cache_edges_unique: Cache::new(),
-            cache_edges_sorted: Cache::new(),
-            cache_edges_grouped: Cache::new(),
-            cache_edges_unique_inverse: Cache::new(),
-            cache_mass_properties: Cache::new(),
-            cache_manifold_status: Cache::new(),
-            cache_vertex_mask: Cache::new(),
-            cache_bvh: Cache::new(),
-            cache_convex_hull: Cache::new(),
-            cache_obb: Cache::new(),
-        }
-    }
 }
 
 impl Clone for Trimesh {
@@ -594,8 +565,9 @@ impl Trimesh {
     /// Get the extents of the bounding box (max - min for each axis).
     ///
     /// Returns None if the mesh is empty.
-    pub fn extents(&self) -> Option<Vector3<f64>> {
-        self.bounds().map(|(min, max)| max - min)
+    pub fn extents(&self) -> Option<[f64; 3]> {
+        self.bounds()
+            .map(|(min, max)| [max.x - min.x, max.y - min.y, max.z - min.z])
     }
 
     /// Get the geometric center of the vertices (mean position).
@@ -761,25 +733,63 @@ impl Trimesh {
 
     /// Compute the convex hull of the mesh vertices.
     ///
-    /// Returns a cached reference to a `Trimesh` representing the convex hull
-    /// with outward-facing CCW normals and consistent winding. The resulting
-    /// mesh will be watertight and convex.
+    /// # Parameters
+    /// - `compact`: When `true`, only hull-surface vertices are kept (cached).
+    ///   When `false`, all *referenced* source vertices are preserved.
+    ///   Both modes filter unreferenced vertices.
     ///
-    /// Cached on first access.
-    pub fn convex_hull(&self) -> &Trimesh {
-        self.cache_convex_hull.get_or_init(|| {
-            let mask = self.vertex_mask();
-            let points: Vec<Point3<f64>> = self
-                .vertices
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| mask[*i])
-                .map(|(_, v)| *v)
-                .collect();
-            let faces =
-                crate::convex::convex_hull_3d(&points).expect("convex hull computation failed");
-            Box::new(
+    /// The resulting mesh will be watertight and convex with outward-facing
+    /// CCW normals and consistent winding.
+    ///
+    /// Returns `Cow::Borrowed` for compact=true (references cached hull),
+    /// `Cow::Owned` for compact=false (fresh computation).
+    pub fn convex_hull(&self, compact: bool) -> Cow<'_, Trimesh> {
+        if compact {
+            Cow::Borrowed(self.convex_hull_cached())
+        } else {
+            let (points, faces) = self.convex_hull_raw();
+            Cow::Owned(
                 Trimesh::new(points, faces, None, None).expect("convex hull mesh creation failed"),
+            )
+        }
+    }
+
+    /// Raw convex hull: returns all referenced vertices and unremapped faces.
+    fn convex_hull_raw(&self) -> (Vec<Point3<f64>>, Vec<[usize; 3]>) {
+        let mask = self.vertex_mask();
+        let points: Vec<Point3<f64>> = self
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask[*i])
+            .map(|(_, v)| *v)
+            .collect();
+        let faces = crate::convex::convex_hull_3d(&points).expect("convex hull computation failed");
+        (points, faces)
+    }
+
+    /// Cached compact convex hull used by internal callers (e.g. OBB).
+    fn convex_hull_cached(&self) -> &Trimesh {
+        self.cache_convex_hull.get_or_init(|| {
+            let (points, mut faces) = self.convex_hull_raw();
+
+            // Remap faces to reference only hull vertices, discarding interior points.
+            // Capacity based on Euler's formula: V = F/2 + 2 for convex polyhedra.
+            let mut map = vec![usize::MAX; points.len()];
+            let mut new_points = Vec::with_capacity(faces.len() * 2 / 3 + 2);
+            for face in faces.iter_mut() {
+                for idx in face.iter_mut() {
+                    if map[*idx] == usize::MAX {
+                        map[*idx] = new_points.len();
+                        new_points.push(points[*idx]);
+                    }
+                    *idx = map[*idx];
+                }
+            }
+
+            Box::new(
+                Trimesh::new(new_points, faces, None, None)
+                    .expect("convex hull mesh creation failed"),
             )
         })
     }
@@ -792,7 +802,7 @@ impl Trimesh {
     /// Cached on first access.
     pub fn oriented_bounding_box(&self) -> &crate::convex::OrientedBoundingBox {
         self.cache_obb.get_or_init(|| {
-            let hull = self.convex_hull();
+            let hull = self.convex_hull_cached();
             crate::convex::oriented_bounding_box(&hull.vertices, &hull.faces)
         })
     }
@@ -909,19 +919,18 @@ impl Trimesh {
                         continue;
                     }
                     if let Some((center, radius)) = self.face_surfaces[si].project_as_circle(&plane)
-                    {
-                        if let Some(ci) = result.iter().position(|c| {
+                        && let Some(ci) = result.iter().position(|c| {
                             let tol = (c.radius.abs() * EPSILON_RELATIVE).max(f64::EPSILON * 100.0);
                             (c.center.x - center.x).abs() < tol
                                 && (c.center.y - center.y).abs() < tol
                                 && (c.radius - radius).abs() < tol
-                        }) {
-                            let face = self.faces[fi];
-                            for &(a, b) in
-                                &[(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
-                            {
-                                result[ci].edges.push((vertices_2d[a], vertices_2d[b]));
-                            }
+                        })
+                    {
+                        let face = self.faces[fi];
+                        for &(a, b) in
+                            &[(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+                        {
+                            result[ci].edges.push((vertices_2d[a], vertices_2d[b]));
                         }
                     }
                 }

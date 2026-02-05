@@ -108,6 +108,8 @@ pub fn create_tetrahedron(edge: f64) -> Trimesh {
 ///
 /// 12 vertices, 20 faces, inscribed in a sphere of the given radius.
 pub fn create_icosahedron(radius: f64) -> Trimesh {
+    // Golden ratio φ = (1 + √5) / 2, not a midpoint calculation
+    #[allow(clippy::manual_midpoint)]
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
     let len = (1.0 + phi * phi).sqrt();
     let a = radius / len;

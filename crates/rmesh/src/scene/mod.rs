@@ -327,6 +327,12 @@ impl Scene {
             None
         }
     }
+
+    /// Get the extents of the scene bounding box (max - min per axis).
+    pub fn extents(&self) -> Option<[f64; 3]> {
+        self.bounds()
+            .map(|(min, max)| [max.x - min.x, max.y - min.y, max.z - min.z])
+    }
 }
 
 /// Transform the 8 corners of an AABB and update global min/max.

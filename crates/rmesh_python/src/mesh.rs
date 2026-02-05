@@ -59,9 +59,7 @@ impl PyMaterial {
             diffuse: Some(d), ..
         }) = &self.data
         {
-            let arr = PyArray1::from_vec(py, vec![d.x, d.y, d.z]);
-            make_readonly(&arr);
-            Some(arr.unbind())
+            Some(readonly_1d(py, vec![d.x, d.y, d.z]))
         } else {
             None
         }
@@ -74,9 +72,7 @@ impl PyMaterial {
             specular: Some(s), ..
         }) = &self.data
         {
-            let arr = PyArray1::from_vec(py, vec![s.x, s.y, s.z]);
-            make_readonly(&arr);
-            Some(arr.unbind())
+            Some(readonly_1d(py, vec![s.x, s.y, s.z]))
         } else {
             None
         }
@@ -117,9 +113,7 @@ impl PyMaterial {
     fn base_color_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
         if let Material::PBR(pbr) = &self.data {
             let c = &pbr.base_color_factor;
-            let arr = PyArray1::from_vec(py, vec![c.x, c.y, c.z, c.w]);
-            make_readonly(&arr);
-            Some(arr.unbind())
+            Some(readonly_1d(py, vec![c.x, c.y, c.z, c.w]))
         } else {
             None
         }
@@ -170,9 +164,7 @@ impl PyMaterial {
     fn emissive_factor(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
         if let Material::PBR(pbr) = &self.data {
             let e = &pbr.emissive_factor;
-            let arr = PyArray1::from_vec(py, vec![e.x, e.y, e.z]);
-            make_readonly(&arr);
-            Some(arr.unbind())
+            Some(readonly_1d(py, vec![e.x, e.y, e.z]))
         } else {
             None
         }
@@ -314,12 +306,10 @@ impl PyGrouping {
             .unwrap()
             .unbind();
         let indices: Vec<i64> = grouping.indices.iter().map(|&i| i as i64).collect();
-        let indices_arr = PyArray1::from_vec(py, indices);
-        make_readonly(&indices_arr);
         Self {
             kind: kind.to_string(),
             names,
-            indices: indices_arr.unbind(),
+            indices: readonly_1d(py, indices),
         }
     }
 }
@@ -630,6 +620,22 @@ impl PyPolygon2D {
         self.data.area()
     }
 
+    /// Axis-aligned bounding box as a (2, 2) array [[min_x, min_y], [max_x, max_y]],
+    /// or None if the polygon has no vertices.
+    #[getter]
+    fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data
+            .bounds()
+            .map(|(min, max)| readonly_bounds(py, vec![min.x, min.y, max.x, max.y], 2))
+    }
+
+    /// Extents of the bounding box [width, height] as a (2,) array,
+    /// or None if the polygon has no vertices.
+    #[getter]
+    fn extents(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        self.data.extents().map(|e| readonly_1d(py, e.to_vec()))
+    }
+
     /// Compute the union of this polygon with another.
     fn union(&self, py: Python<'_>, other: &PyPolygon2D) -> Vec<Py<PyPolygon2D>> {
         self.data
@@ -738,7 +744,7 @@ impl PyPath2D {
     fn polygons(&self, py: Python<'_>) -> Vec<Py<PyPolygon2D>> {
         self.data
             .polygons()
-            .into_iter()
+            .iter()
             .map(|p| wrap_polygon(py, p.clone()))
             .collect()
     }
@@ -864,6 +870,22 @@ impl PyPath2D {
             .collect()
     }
 
+    /// Axis-aligned bounding box as a (2, 2) array [[min_x, min_y], [max_x, max_y]],
+    /// or None if the path has no vertices.
+    #[getter]
+    fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data
+            .bounds()
+            .map(|(min, max)| readonly_bounds(py, vec![min.x, min.y, max.x, max.y], 2))
+    }
+
+    /// Extents of the bounding box [width, height] as a (2,) array,
+    /// or None if the path has no vertices.
+    #[getter]
+    fn extents(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        self.data.extents().map(|e| readonly_1d(py, e.to_vec()))
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<rmesh.Path2D vertices: {} segments: {}>",
@@ -918,6 +940,22 @@ impl PyPath3D {
                 arr.unbind()
             })
             .collect()
+    }
+
+    /// Axis-aligned bounding box as a (2, 3) array [[min_x, min_y, min_z], [max_x, max_y, max_z]],
+    /// or None if the path has no vertices.
+    #[getter]
+    fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
+        self.data.bounds().map(|(min, max)| {
+            readonly_bounds(py, vec![min.x, min.y, min.z, max.x, max.y, max.z], 3)
+        })
+    }
+
+    /// Extents of the bounding box [x, y, z] as a (3,) array,
+    /// or None if the path has no vertices.
+    #[getter]
+    fn extents(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
+        self.data.extents().map(|e| readonly_1d(py, e.to_vec()))
     }
 
     fn __repr__(&self) -> String {
@@ -977,6 +1015,21 @@ pub(crate) fn make_readonly<T: numpy::Element, D: numpy::ndarray::Dimension>(
     unsafe {
         (*arr.as_array_ptr()).flags &= !npyffi::flags::NPY_ARRAY_WRITEABLE;
     }
+}
+
+/// Create a read-only 1D numpy array from a Vec.
+pub(crate) fn readonly_1d<T: numpy::Element>(py: Python<'_>, data: Vec<T>) -> Py<PyArray1<T>> {
+    let arr = PyArray1::from_vec(py, data);
+    make_readonly(&arr);
+    arr.unbind()
+}
+
+/// Create a read-only (2, cols) numpy array for bounds data.
+pub(crate) fn readonly_bounds(py: Python<'_>, data: Vec<f64>, cols: usize) -> Py<PyArray2<f64>> {
+    let nd = Array2::from_shape_vec((2, cols), data).unwrap();
+    let arr = PyArray2::from_array(py, &nd);
+    make_readonly(&arr);
+    arr.unbind()
 }
 
 macro_rules! cached_array {
@@ -1196,11 +1249,7 @@ impl PyTrimesh {
     #[getter]
     fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
         self.data.bounds().map(|(min, max)| {
-            let data = vec![min.x, min.y, min.z, max.x, max.y, max.z];
-            let nd = Array2::from_shape_vec((2, 3), data).unwrap();
-            let arr = PyArray2::from_array(py, &nd);
-            make_readonly(&arr);
-            arr.unbind()
+            readonly_bounds(py, vec![min.x, min.y, min.z, max.x, max.y, max.z], 3)
         })
     }
 
@@ -1222,9 +1271,7 @@ impl PyTrimesh {
     #[getter]
     fn center_mass(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
         let cm = self.data.center_mass();
-        let arr = PyArray1::from_vec(py, vec![cm.x, cm.y, cm.z]);
-        make_readonly(&arr);
-        arr.unbind()
+        readonly_1d(py, vec![cm.x, cm.y, cm.z])
     }
 
     #[getter]
@@ -1299,30 +1346,27 @@ impl PyTrimesh {
     /// Geometric length of each unique edge, shape (n_edges_unique,).
     #[getter]
     fn edges_unique_length(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
-        let lengths = self.data.edges_unique_length();
-        let arr = PyArray1::from_vec(py, lengths);
-        make_readonly(&arr);
-        arr.unbind()
+        readonly_1d(py, self.data.edges_unique_length())
     }
 
     /// Index mapping: edges_sorted[i] -> edges_unique index, shape (n_faces * 3,).
     #[getter]
     fn edges_unique_inverse(&self, py: Python<'_>) -> Py<PyArray1<i64>> {
-        let inverse = self.data.edges_unique_inverse();
-        let flat: Vec<i64> = inverse.iter().map(|&i| i as i64).collect();
-        let arr = PyArray1::from_vec(py, flat);
-        make_readonly(&arr);
-        arr.unbind()
+        let flat: Vec<i64> = self
+            .data
+            .edges_unique_inverse()
+            .iter()
+            .map(|&i| i as i64)
+            .collect();
+        readonly_1d(py, flat)
     }
 
     /// Principal inertia components (eigenvalues of inertia tensor, sorted descending).
     #[getter]
     fn principal_inertia_components(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        self.data.principal_inertia_components().map(|v| {
-            let arr = PyArray1::from_vec(py, vec![v.x, v.y, v.z]);
-            make_readonly(&arr);
-            arr.unbind()
-        })
+        self.data
+            .principal_inertia_components()
+            .map(|v| readonly_1d(py, vec![v.x, v.y, v.z]))
     }
 
     /// Principal inertia vectors (eigenvectors as matrix columns), shape (3, 3).
@@ -1367,22 +1411,15 @@ impl PyTrimesh {
     #[getter]
     fn face_adjacency_angles(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
         self.face_adjacency_angles_cache
-            .get_or_init(|| {
-                let angles = self.data.face_adjacency_angles();
-                let arr = PyArray1::from_vec(py, angles);
-                make_readonly(&arr);
-                arr.unbind()
-            })
+            .get_or_init(|| readonly_1d(py, self.data.face_adjacency_angles()))
             .clone_ref(py)
     }
 
     /// Per-face areas.
     #[getter]
     fn area_faces(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
-        let areas = self.data.faces_area();
-        let arr = PyArray1::from_slice(py, areas);
-        make_readonly(&arr);
-        arr.unbind()
+        // Copy data into numpy-owned memory to avoid use-after-free if mesh is GC'd
+        readonly_1d(py, self.data.faces_area().to_vec())
     }
 
     /// Cross product vectors for each face (unnormalized face normals * 2 * area).
@@ -1399,21 +1436,15 @@ impl PyTrimesh {
     /// Extents of the bounding box (max - min for each axis).
     #[getter]
     fn extents(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        self.data.extents().map(|e| {
-            let arr = PyArray1::from_vec(py, vec![e.x, e.y, e.z]);
-            make_readonly(&arr);
-            arr.unbind()
-        })
+        self.data.extents().map(|e| readonly_1d(py, e.to_vec()))
     }
 
     /// Geometric center of the vertices (mean position).
     #[getter]
     fn centroid(&self, py: Python<'_>) -> Option<Py<PyArray1<f64>>> {
-        self.data.centroid().map(|c| {
-            let arr = PyArray1::from_vec(py, vec![c.x, c.y, c.z]);
-            make_readonly(&arr);
-            arr.unbind()
-        })
+        self.data
+            .centroid()
+            .map(|c| readonly_1d(py, vec![c.x, c.y, c.z]))
     }
 
     /// Actual vertex positions for each face, shape (n_faces, 3, 3).
@@ -1458,19 +1489,13 @@ impl PyTrimesh {
     /// Negative values indicate locally convex geometry.
     #[getter]
     fn face_adjacency_projections(&self, py: Python<'_>) -> Py<PyArray1<f64>> {
-        let projections = self.data.face_adjacency_projections();
-        let arr = PyArray1::from_vec(py, projections);
-        make_readonly(&arr);
-        arr.unbind()
+        readonly_1d(py, self.data.face_adjacency_projections())
     }
 
     /// Boolean array indicating whether each adjacent face pair is locally convex.
     #[getter]
     fn face_adjacency_convex(&self, py: Python<'_>) -> Py<PyArray1<bool>> {
-        let convex = self.data.face_adjacency_convex();
-        let arr = PyArray1::from_vec(py, convex);
-        make_readonly(&arr);
-        arr.unbind()
+        readonly_1d(py, self.data.face_adjacency_convex())
     }
 
     /// Check if the mesh is convex.
@@ -1490,9 +1515,16 @@ impl PyTrimesh {
     }
 
     /// The convex hull of this mesh as a new Trimesh.
-    #[getter]
-    fn convex_hull(&self) -> Self {
-        Self::new_from_trimesh(self.data.convex_hull().clone())
+    ///
+    /// Parameters
+    /// ----------
+    /// compact : bool
+    ///     If true (default) only vertices on the hull are kept and face
+    ///     indices are remapped.  Set to false to preserve all referenced
+    ///     source vertices. Both modes filter unreferenced vertices.
+    #[pyo3(signature = (compact = true))]
+    fn convex_hull(&self, compact: bool) -> Self {
+        Self::new_from_trimesh(self.data.convex_hull(compact).into_owned())
     }
 
     /// Face surface data from BREP/CAD source, if available.
@@ -1565,9 +1597,7 @@ impl PyTrimesh {
                     .iter()
                     .map(|&i| if i == UNSET { -1 } else { i as i64 })
                     .collect();
-                let arr = PyArray1::from_vec(py, indices);
-                make_readonly(&arr);
-                arr.unbind()
+                readonly_1d(py, indices)
             });
 
         let result = pyo3::types::PyTuple::new(

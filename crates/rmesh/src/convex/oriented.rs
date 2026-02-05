@@ -59,6 +59,7 @@ fn hull_edge_loop_to_vertices(points: &[Point2<f64>], edges: &[[usize; 2]]) -> V
 /// using the O(h) rotating calipers algorithm.
 ///
 /// `hull_verts` must be a CCW-ordered convex polygon with at least 3 vertices.
+#[allow(clippy::float_cmp)] // Intentional exact comparisons for tie-breaking in rotating calipers
 fn min_area_rectangle_2d(hull_verts: &[Point2<f64>]) -> MinRect2D {
     let h = hull_verts.len();
     assert!(h >= 3, "need at least 3 hull vertices");
@@ -141,8 +142,8 @@ fn min_area_rectangle_2d(hull_verts: &[Point2<f64>]) -> MinRect2D {
         if area < best_area {
             best_area = area;
             best_angle = dir.y.atan2(dir.x);
-            let center_d = (proj_left + proj_right) / 2.0;
-            let center_p = (proj_bottom + proj_top) / 2.0;
+            let center_d = f64::midpoint(proj_left, proj_right);
+            let center_p = f64::midpoint(proj_bottom, proj_top);
             best_center = Point2::new(
                 dir.x * center_d + perp.x * center_p,
                 dir.y * center_d + perp.y * center_p,
@@ -189,7 +190,7 @@ fn evaluate_candidate(vertices: &[Point3<f64>], w: Vector3<f64>) -> CandidateRes
         .collect();
 
     let height = w_max - w_min;
-    let w_center = (w_min + w_max) / 2.0;
+    let w_center = f64::midpoint(w_min, w_max);
 
     // 2D convex hull of projected points
     let edges = convex_hull_2d(&projected);
@@ -257,6 +258,7 @@ pub fn oriented_bounding_box(
 
     let eps = 1e-10;
 
+    #[allow(clippy::cast_possible_truncation)] // Intentional rounding for discretization
     let discretize = |v: Vector3<f64>| -> (i64, i64, i64) {
         let scale = 1_000_000.0;
         let c = canonicalize_direction(v);
@@ -331,9 +333,11 @@ pub fn oriented_bounding_box(
     // If we have too many candidates, subsample uniformly
     if candidates.len() > MAX_CANDIDATES {
         let step = candidates.len() as f64 / MAX_CANDIDATES as f64;
-        candidates = (0..MAX_CANDIDATES)
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Intentional index calculation
+        let subsampled = (0..MAX_CANDIDATES)
             .map(|i| candidates[(i as f64 * step) as usize])
             .collect();
+        candidates = subsampled;
     }
 
     // Evaluate all candidates in parallel
@@ -580,7 +584,7 @@ mod tests {
             let sphere = create_icosphere(1.0, subdivisions);
             timer.record(&format!("create icosphere ({} faces)", sphere.faces.len()));
 
-            let hull = sphere.convex_hull();
+            let hull = sphere.convex_hull(true);
             timer.record(&format!(
                 "convex hull ({} verts, {} faces)",
                 hull.vertices.len(),

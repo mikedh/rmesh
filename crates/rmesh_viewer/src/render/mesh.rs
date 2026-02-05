@@ -10,6 +10,7 @@ use crate::render::shaders::{MaterialUniforms, ModelUniforms};
 use crate::upload::{GpuMesh, MeshVertex};
 
 /// Pre-created bind groups for a single mesh draw call.
+#[allow(clippy::struct_field_names)]
 pub struct MeshBindGroups {
     pub model_bind_group: wgpu::BindGroup,
     pub material_bind_group: wgpu::BindGroup,

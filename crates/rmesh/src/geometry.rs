@@ -40,8 +40,8 @@ impl PointCloud {
 pub enum Geometry {
     /// A triangle mesh
     Mesh(Box<Trimesh>),
-    /// A 2D path (curves in a plane)
-    Path2D(Path2D),
+    /// A 2D path (curves in a plane) - boxed due to size (336 bytes)
+    Path2D(Box<Path2D>),
     /// A 3D path (curves in space)
     Path3D(Path3D),
     /// A feature-based CAD model
@@ -58,7 +58,7 @@ impl Geometry {
     pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
         match self {
             Geometry::Mesh(mesh) => mesh.bounds(),
-            Geometry::Path2D(path) => path.bounds().map(|(min, max)| {
+            Geometry::Path2D(path) => path.as_ref().bounds().map(|(min, max)| {
                 (
                     Point3::new(min.x, min.y, 0.0),
                     Point3::new(max.x, max.y, 0.0),

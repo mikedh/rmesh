@@ -194,16 +194,16 @@ impl ApplicationHandler for Viewer2DApp<'_> {
                 ));
 
                 // Pan with left drag
-                if state.left_down {
-                    if let Some((lx, ly)) = state.last_mouse {
+                if state.left_down
+                    && let Some((lx, ly)) = state.last_mouse
+                {
                         let w = f64::from(state.gpu.surface_config.width);
                         let h = f64::from(state.gpu.surface_config.height);
                         let dx = (x - lx) / w;
                         let dy = (y - ly) / h;
                         state.view.pan(dx, dy, aspect);
                         regenerate_overlays(state);
-                        state.window.request_redraw();
-                    }
+                    state.window.request_redraw();
                 }
 
                 // Update zoom box
@@ -414,8 +414,11 @@ fn nice_ticks(min: f64, max: f64, max_ticks: usize) -> Vec<f64> {
         10.0 * base
     };
 
-    let start = (min / nice_step).ceil() as i64;
-    let end = (max / nice_step).floor() as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    let (start, end) = (
+        (min / nice_step).ceil() as i64,
+        (max / nice_step).floor() as i64,
+    );
     (start..=end).map(|i| i as f64 * nice_step).collect()
 }
 
@@ -608,7 +611,7 @@ fn update_zoom_box_gpu(state: &mut Viewer2DState) {
 /// Uses a singleton viewer thread so the event loop can be reused
 /// across multiple calls (winit only allows one EventLoop per process).
 pub fn run(data: &View2DData, options: ViewerOptions) {
-    crate::viewer_thread::show_2d(data.clone(), options);
+    crate::viewer_thread::show_2d(data, options);
 }
 
 /// Run on an existing event loop (called from viewer thread).

@@ -17,6 +17,9 @@ use gpu::GpuContext;
 use input::RenderToggles;
 use render::SceneRenderer;
 
+/// A filled polygon: (vertices, triangle indices, RGBA color)
+pub type FilledPolygon = (Vec<Point2<f64>>, Vec<[usize; 3]>, [f32; 4]);
+
 /// Options for configuring the viewer window.
 pub struct ViewerOptions {
     pub title: String,
@@ -71,7 +74,7 @@ pub struct View2DData {
     /// Polylines: each is (points, RGBA color).
     pub lines: Vec<(Vec<Point2<f64>>, [f32; 4])>,
     /// Filled polygons: each is (vertices, triangles, RGBA color).
-    pub fills: Vec<(Vec<Point2<f64>>, Vec<[usize; 3]>, [f32; 4])>,
+    pub fills: Vec<FilledPolygon>,
     /// Axis-aligned bounding box.
     pub bounds: (Point2<f64>, Point2<f64>),
 }
@@ -213,10 +216,7 @@ impl Viewer2D for [Polygon2D] {
 }
 
 /// Triangulate a single polygon into fill data using earcut.
-fn triangulate_polygon(
-    poly: &Polygon2D,
-    color: [f32; 4],
-) -> Vec<(Vec<Point2<f64>>, Vec<[usize; 3]>, [f32; 4])> {
+fn triangulate_polygon(poly: &Polygon2D, color: [f32; 4]) -> Vec<FilledPolygon> {
     // Build a flat vertex array and use earcut
     let mut flat: Vec<[f64; 2]> = Vec::new();
     let mut hole_starts = Vec::new();

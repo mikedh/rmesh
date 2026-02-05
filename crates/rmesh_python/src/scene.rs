@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use rmesh::geometry::Geometry;
 use rmesh_viewer::{RenderOptions, SceneViewer, ViewerOptions};
 
-use crate::mesh::{PyPath2D, PyPath3D, PyPolygon2D, PyTrimesh, make_readonly};
+use crate::mesh::{PyPath2D, PyPath3D, PyPolygon2D, PyTrimesh, readonly_1d, readonly_bounds};
 
 // ============================================================================
 // PyGeometryDict
@@ -154,13 +154,13 @@ impl PyScene {
         } else if let Ok(p) = geometry.cast::<PyPath3D>() {
             Geometry::Path3D(p.borrow().data.clone())
         } else if let Ok(p) = geometry.cast::<PyPath2D>() {
-            Geometry::Path2D(p.borrow().data.clone())
+            Geometry::Path2D(Box::new(p.borrow().data.clone()))
         } else if let Ok(p) = geometry.cast::<PyPolygon2D>() {
             let poly = &p.borrow().data;
             if let Some(path3d) = poly.to_path3d() {
                 Geometry::Path3D(path3d)
             } else {
-                Geometry::Path2D(poly.to_path2d())
+                Geometry::Path2D(Box::new(poly.to_path2d()))
             }
         } else {
             return Err(PyTypeError::new_err(
@@ -271,12 +271,15 @@ impl PyScene {
     #[getter]
     fn bounds(&self, py: Python<'_>) -> Option<Py<numpy::PyArray2<f64>>> {
         self.data.bounds().map(|(min, max)| {
-            let data = vec![min.x, min.y, min.z, max.x, max.y, max.z];
-            let nd = numpy::ndarray::Array2::from_shape_vec((2, 3), data).unwrap();
-            let arr = numpy::PyArray2::from_array(py, &nd);
-            make_readonly(&arr);
-            arr.unbind()
+            readonly_bounds(py, vec![min.x, min.y, min.z, max.x, max.y, max.z], 3)
         })
+    }
+
+    /// Extents of the bounding box [x, y, z] as a (3,) array,
+    /// or None if the scene has no geometry with valid bounds.
+    #[getter]
+    fn extents(&self, py: Python<'_>) -> Option<Py<numpy::PyArray1<f64>>> {
+        self.data.extents().map(|e| readonly_1d(py, e.to_vec()))
     }
 
     /// Render this scene to a PNG image (headless, no window).

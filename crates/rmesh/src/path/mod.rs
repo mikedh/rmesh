@@ -80,9 +80,7 @@ macro_rules! resolve_deviation {
         $self.deviation.unwrap_or_else(|| {
             ($self
                 .extents()
-                .iter()
-                .copied()
-                .reduce(f64::max)
+                .map(|e| e.iter().copied().reduce(f64::max).unwrap_or(0.0))
                 .unwrap_or(0.0)
                 * DEVIATION_RATIO)
                 .max(MIN_TOLERANCE)
@@ -268,7 +266,7 @@ impl Segment3D {
 ///
 /// Derived properties like `bounds()` and `extents()` are lazily computed
 /// and cached on first access. The cache is thread-safe and uses `OnceLock`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Path2D {
     /// Shared vertex array
     pub vertices: Vec<Point2<f64>>,
@@ -288,27 +286,10 @@ pub struct Path2D {
     #[serde(skip)]
     cache_bounds: Cache<Option<(Point2<f64>, Point2<f64>)>>,
     #[serde(skip)]
-    cache_extents: Cache<[f64; 2]>,
-    #[serde(skip)]
     cache_polygons: Cache<Vec<Polygon2D>>,
     #[serde(skip)]
     #[allow(clippy::type_complexity)]
     cache_triangulation: Cache<(Vec<Point2<f64>>, Vec<[usize; 3]>)>,
-}
-
-impl Default for Path2D {
-    fn default() -> Self {
-        Self {
-            vertices: Vec::new(),
-            segments: Vec::new(),
-            deviation: None,
-            to_3d: None,
-            cache_bounds: Cache::new(),
-            cache_extents: Cache::new(),
-            cache_polygons: Cache::new(),
-            cache_triangulation: Cache::new(),
-        }
-    }
 }
 
 impl Clone for Path2D {
@@ -320,7 +301,6 @@ impl Clone for Path2D {
             to_3d: self.to_3d,
             // Fresh caches - will recompute on demand
             cache_bounds: Cache::new(),
-            cache_extents: Cache::new(),
             cache_polygons: Cache::new(),
             cache_triangulation: Cache::new(),
         }
@@ -353,7 +333,6 @@ impl Path2D {
             deviation: None,
             to_3d: None,
             cache_bounds: Cache::new(),
-            cache_extents: Cache::new(),
             cache_polygons: Cache::new(),
             cache_triangulation: Cache::new(),
         }
@@ -551,12 +530,10 @@ impl Path2D {
 
     /// Get the extents (dimensions) of this path as [width, height]
     ///
-    /// Returns [0.0, 0.0] for empty paths. Cached on first access.
-    pub fn extents(&self) -> [f64; 2] {
-        *self.cache_extents.get_or_init(|| match self.bounds() {
-            Some((min, max)) => [max.x - min.x, max.y - min.y],
-            None => [0.0, 0.0],
-        })
+    /// Returns None for empty paths.
+    pub fn extents(&self) -> Option<[f64; 2]> {
+        self.bounds()
+            .map(|(min, max)| [max.x - min.x, max.y - min.y])
     }
 
     // === Discretization ===
@@ -746,8 +723,8 @@ impl Path2D {
             .iter()
             .filter_map(|s| match s {
                 Segment2D::Line(l) => Some(Segment3D::Line(l.clone())),
-                Segment2D::CubicBezier(b) => Some(Segment3D::CubicBezier(b.clone())),
-                Segment2D::QuadraticBezier(b) => Some(Segment3D::QuadraticBezier(b.clone())),
+                Segment2D::CubicBezier(b) => Some(Segment3D::CubicBezier(*b)),
+                Segment2D::QuadraticBezier(b) => Some(Segment3D::QuadraticBezier(*b)),
                 Segment2D::BSpline(b) => Some(Segment3D::BSpline(b.clone())),
                 _ => None,
             })
@@ -845,7 +822,7 @@ impl Path2D {
 ///
 /// Derived properties like `bounds()` and `extents()` are lazily computed
 /// and cached on first access. The cache is thread-safe and uses `OnceLock`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Path3D {
     /// Shared vertex array
     pub vertices: Vec<Point3<f64>>,
@@ -860,20 +837,6 @@ pub struct Path3D {
     // Cached - computed lazily on first access (skip in serde)
     #[serde(skip)]
     cache_bounds: Cache<Option<(Point3<f64>, Point3<f64>)>>,
-    #[serde(skip)]
-    cache_extents: Cache<[f64; 3]>,
-}
-
-impl Default for Path3D {
-    fn default() -> Self {
-        Self {
-            vertices: Vec::new(),
-            segments: Vec::new(),
-            deviation: None,
-            cache_bounds: Cache::new(),
-            cache_extents: Cache::new(),
-        }
-    }
 }
 
 impl Clone for Path3D {
@@ -884,7 +847,6 @@ impl Clone for Path3D {
             deviation: self.deviation,
             // Fresh caches - will recompute on demand
             cache_bounds: Cache::new(),
-            cache_extents: Cache::new(),
         }
     }
 }
@@ -913,7 +875,6 @@ impl Path3D {
             segments,
             deviation: None,
             cache_bounds: Cache::new(),
-            cache_extents: Cache::new(),
         }
     }
 
@@ -1014,12 +975,10 @@ impl Path3D {
 
     /// Get the extents (dimensions) of this path as [width, height, depth]
     ///
-    /// Returns [0.0, 0.0, 0.0] for empty paths. Cached on first access.
-    pub fn extents(&self) -> [f64; 3] {
-        *self.cache_extents.get_or_init(|| match self.bounds() {
-            Some((min, max)) => [max.x - min.x, max.y - min.y, max.z - min.z],
-            None => [0.0, 0.0, 0.0],
-        })
+    /// Returns None for empty paths.
+    pub fn extents(&self) -> Option<[f64; 3]> {
+        self.bounds()
+            .map(|(min, max)| [max.x - min.x, max.y - min.y, max.z - min.z])
     }
 
     // === Discretization ===
@@ -1264,9 +1223,13 @@ mod tests {
     #[test]
     fn test_extents() {
         let path = Path2D::rectangle(10.0, 5.0);
-        let extents = path.extents();
+        let extents = path.extents().unwrap();
         assert_relative_eq!(extents[0], 10.0, epsilon = 1e-10);
         assert_relative_eq!(extents[1], 5.0, epsilon = 1e-10);
+
+        // Empty path should return None
+        let empty = Path2D::new();
+        assert!(empty.extents().is_none());
     }
 
     #[test]
@@ -1275,10 +1238,14 @@ mod tests {
             vec![Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 5.0, 3.0)],
             vec![Segment3D::Line(Line::new(0, 1))],
         );
-        let extents = path.extents();
+        let extents = path.extents().unwrap();
         assert_relative_eq!(extents[0], 10.0, epsilon = 1e-10);
         assert_relative_eq!(extents[1], 5.0, epsilon = 1e-10);
         assert_relative_eq!(extents[2], 3.0, epsilon = 1e-10);
+
+        // Empty path should return None
+        let empty = Path3D::new();
+        assert!(empty.extents().is_none());
     }
 
     #[test]

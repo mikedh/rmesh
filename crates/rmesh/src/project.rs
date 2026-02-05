@@ -126,6 +126,7 @@ fn compute_containment(
     // because if j is fully inside i, j's centroid is inside i's AABB,
     // so i is guaranteed to be in that cell. The narrow phase skips
     // candidates where areas[i] <= areas[j].
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let grid_side = (n as f64).sqrt().ceil().max(1.0) as usize;
     let dx = (bb_max_x - bb_min_x) + 1e-10;
     let dy = (bb_max_y - bb_min_y) + 1e-10;
@@ -137,10 +138,13 @@ fn compute_containment(
         if areas[i] < 1e-30 {
             continue;
         }
-        let gx0 = ((aabbs[i][0] - bb_min_x) * inv_cx) as usize;
-        let gy0 = ((aabbs[i][1] - bb_min_y) * inv_cy) as usize;
-        let gx1 = ((aabbs[i][2] - bb_min_x) * inv_cx) as usize;
-        let gy1 = ((aabbs[i][3] - bb_min_y) * inv_cy) as usize;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (gx0, gy0, gx1, gy1) = (
+            ((aabbs[i][0] - bb_min_x) * inv_cx) as usize,
+            ((aabbs[i][1] - bb_min_y) * inv_cy) as usize,
+            ((aabbs[i][2] - bb_min_x) * inv_cx) as usize,
+            ((aabbs[i][3] - bb_min_y) * inv_cy) as usize,
+        );
         for gy in gy0..=gy1.min(grid_side - 1) {
             for gx in gx0..=gx1.min(grid_side - 1) {
                 grid[gy * grid_side + gx].push(i);
@@ -158,8 +162,11 @@ fn compute_containment(
             let tj = &tris[j];
             let cx = (tj[0].x + tj[1].x + tj[2].x) / 3.0;
             let cy = (tj[0].y + tj[1].y + tj[2].y) / 3.0;
-            let gx = ((cx - bb_min_x) * inv_cx) as usize;
-            let gy = ((cy - bb_min_y) * inv_cy) as usize;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let (gx, gy) = (
+                ((cx - bb_min_x) * inv_cx) as usize,
+                ((cy - bb_min_y) * inv_cy) as usize,
+            );
             let gx = gx.min(grid_side - 1);
             let gy = gy.min(grid_side - 1);
 
@@ -242,6 +249,7 @@ fn snap_to_original(
             for pt in contour.iter_mut() {
                 let nearest = tree.nearest_one::<SquaredEuclidean>(&[pt[0], pt[1]]);
                 if nearest.distance < threshold_sq {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let v = &vertices[nearest.item as usize];
                     pt[0] = v.x;
                     pt[1] = v.y;
@@ -270,6 +278,7 @@ fn snap_to_cylinder_edges(
     }
     for pt in ring.iter_mut() {
         let nearest = circle_tree.nearest_one::<SquaredEuclidean>(&[pt.x, pt.y]);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let circle = &circles[nearest.item as usize];
         let offset = pt.coords - circle.center.coords;
         let d = offset.norm();
@@ -587,10 +596,10 @@ pub fn ring_to_segments(
     let mut runs: Vec<(Option<usize>, usize, usize)> = Vec::new();
     let mut run_start = 0;
     let mut current = assignments[0];
-    for i in 1..ring.len() {
-        if assignments[i] != current {
+    for (i, &assign) in assignments.iter().enumerate().skip(1) {
+        if assign != current {
             runs.push((current, run_start, i));
-            current = assignments[i];
+            current = assign;
             run_start = i;
         }
     }

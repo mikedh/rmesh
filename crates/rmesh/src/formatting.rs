@@ -55,18 +55,18 @@ impl fmt::Display for Table {
 
         // Header
         write!(f, "|")?;
-        for i in 0..ncols {
-            write!(f, " {:>w$} |", self.headers[i], w = widths[i])?;
+        for (i, width) in widths.iter().enumerate().take(ncols) {
+            write!(f, " {:>w$} |", self.headers[i], w = *width)?;
         }
         writeln!(f)?;
 
         // Separator
         write!(f, "|")?;
-        for i in 0..ncols {
+        for (i, width) in widths.iter().enumerate().take(ncols) {
             if self.left[i] {
-                write!(f, ":{}-|", "-".repeat(widths[i]))?;
+                write!(f, ":{}-|", "-".repeat(*width))?;
             } else {
-                write!(f, "-{}:|", "-".repeat(widths[i]))?;
+                write!(f, "-{}:|", "-".repeat(*width))?;
             }
         }
         writeln!(f)?;
@@ -74,12 +74,12 @@ impl fmt::Display for Table {
         // Rows
         for row in &self.rows {
             write!(f, "|")?;
-            for i in 0..ncols {
+            for (i, width) in widths.iter().enumerate().take(ncols) {
                 let cell = row.get(i).map_or("", |c| c.as_str());
                 if self.left[i] {
-                    write!(f, " {:<w$} |", cell, w = widths[i])?;
+                    write!(f, " {:<w$} |", cell, w = *width)?;
                 } else {
-                    write!(f, " {:>w$} |", cell, w = widths[i])?;
+                    write!(f, " {:>w$} |", cell, w = *width)?;
                 }
             }
             writeln!(f)?;

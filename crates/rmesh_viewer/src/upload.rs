@@ -36,6 +36,7 @@ pub struct PointVertex {
 
 /// Material converted for GPU use.
 #[derive(Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct GpuMaterial {
     pub base_color: [f32; 4],
     pub metallic: f32,

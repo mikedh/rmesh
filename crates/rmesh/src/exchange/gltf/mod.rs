@@ -297,9 +297,9 @@ impl GltfLoader {
             .enumerate()
             .filter_map(|(idx, prim)| match self.load_primitive(prim, materials) {
                 Ok(m) => Some((idx, m)),
-                Err(_e) => {
+                Err(e) => {
                     #[cfg(debug_assertions)]
-                    eprintln!("[gltf] failed to load primitive {idx}: {_e:?}");
+                    eprintln!("[gltf] failed to load primitive {idx}: {e:?}");
                     None
                 }
             })

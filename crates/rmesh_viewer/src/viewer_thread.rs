@@ -20,15 +20,15 @@ thread_local! {
 }
 
 /// Show a 3D scene. Blocks until the window is closed.
-pub(crate) fn show_scene(scene: Scene, options: ViewerOptions) {
+pub(crate) fn show_scene(scene: &Scene, options: ViewerOptions) {
     EVENT_LOOP.with(|el| {
-        crate::app::run_on(&mut el.borrow_mut(), &scene, options);
+        crate::app::run_on(&mut el.borrow_mut(), scene, options);
     });
 }
 
 /// Show 2D geometry. Blocks until the window is closed.
-pub(crate) fn show_2d(data: View2DData, options: ViewerOptions) {
+pub(crate) fn show_2d(data: &View2DData, options: ViewerOptions) {
     EVENT_LOOP.with(|el| {
-        crate::app2d::run_on(&mut el.borrow_mut(), &data, options);
+        crate::app2d::run_on(&mut el.borrow_mut(), data, options);
     });
 }

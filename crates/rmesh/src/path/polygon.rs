@@ -94,6 +94,14 @@ impl Polygon2D {
         Some((Point2::new(min_x, min_y), Point2::new(max_x, max_y)))
     }
 
+    /// Get the extents (width, height) of the bounding box.
+    ///
+    /// Returns None for empty polygons.
+    pub fn extents(&self) -> Option<[f64; 2]> {
+        self.bounds()
+            .map(|(min, max)| [max.x - min.x, max.y - min.y])
+    }
+
     /// Get the number of vertices in the exterior ring
     pub fn num_exterior_vertices(&self) -> usize {
         self.exterior.len()
