@@ -402,48 +402,38 @@ pub fn hierarchical_split(grid: &mut VoxelGrid, params: &SplitParams) -> Vec<Con
     // Any remaining active regions are completed
     completed_regions.extend(active_regions);
 
-    // Read back final region_ids and grid data
-    let region_data = readback_buffer(&device, &queue, &region_ids_buf);
+    // GPU-compacted convex hull candidates (boundary + support-plane filter)
+    let candidates = grid.convex_candidates(&region_ids_buf, next_region_id);
 
-    // Extract surface voxels per region and compute hulls
-    extract_hulls(grid, &region_data, &completed_regions, params)
+    // Extract hulls from the compact candidate list
+    extract_hulls_from_candidates(grid, &candidates, &completed_regions, params)
 }
 
-/// Extract convex hulls from finalized regions.
-fn extract_hulls(
+/// Extract convex hulls from GPU-compacted hull candidates.
+fn extract_hulls_from_candidates(
     grid: &VoxelGrid,
-    region_data: &[u32],
+    candidates: &[crate::voxel::HullCandidate],
     regions: &[u32],
     params: &SplitParams,
 ) -> Vec<ConvexHull> {
-    let dims = grid.dims();
-    let dx = dims[0] as usize;
-    let dy = dims[1] as usize;
+    // Sort candidates by (region_id, coords) for deterministic ordering.
+    // GPU atomic compaction does not guarantee order, so we sort here.
+    let mut sorted: Vec<_> = candidates
+        .iter()
+        .filter(|c| regions.contains(&c.region_id))
+        .collect();
+    sorted.sort_unstable_by_key(|c| (c.region_id, c.coords));
 
-    // Group voxels by region
-    let mut region_voxels: AHashMap<u32, Vec<Point3<f64>>> = AHashMap::new();
+    // Group candidates by region
+    let mut region_points: AHashMap<u32, Vec<Point3<f64>>> = AHashMap::new();
 
-    for (idx, &region_id) in region_data.iter().enumerate() {
-        if region_id == u32::MAX {
-            continue;
-        }
-        if !regions.contains(&region_id) {
-            continue;
-        }
-
-        #[allow(clippy::cast_possible_truncation)]
-        let x = (idx % dx) as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let y = ((idx / dx) % dy) as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let z = (idx / (dx * dy)) as u32;
-        let world = grid.voxel_to_world(x, y, z);
-
-        region_voxels.entry(region_id).or_default().push(world);
+    for c in &sorted {
+        let world = grid.voxel_to_world(c.coords[0], c.coords[1], c.coords[2]);
+        region_points.entry(c.region_id).or_default().push(world);
     }
 
-    // Compute convex hulls in parallel
-    let region_list: Vec<(u32, Vec<Point3<f64>>)> = region_voxels.into_iter().collect();
+    let mut region_list: Vec<(u32, Vec<Point3<f64>>)> = region_points.into_iter().collect();
+    region_list.sort_unstable_by_key(|(rid, _)| *rid);
 
     region_list
         .into_par_iter()
@@ -451,7 +441,6 @@ fn extract_hulls(
             if points.len() < 4 {
                 return None;
             }
-
             build_hull_from_points(&points, params.max_vertices_per_hull)
         })
         .collect()
@@ -587,29 +576,6 @@ fn centroid(points: &[Point3<f64>]) -> Point3<f64> {
         .iter()
         .fold(nalgebra::Vector3::zeros(), |acc, p| acc + p.coords);
     Point3::from(sum / points.len() as f64)
-}
-
-// ── Buffer helpers ──────────────────────────────────────────────────────
-
-fn readback_buffer(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> Vec<u32> {
-    let size = buffer.size();
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("split_readback"),
-        size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("split_readback_enc"),
-    });
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
-    queue.submit(Some(encoder.finish()));
-
-    let data = crate::gpu::gpu_read_buffer(device, &staging);
-    data.chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
 }
 
 fn bgl_uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {

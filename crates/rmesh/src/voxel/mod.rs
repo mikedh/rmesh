@@ -8,9 +8,20 @@
 //!
 //! This module requires the `wgpu` feature.
 
+mod marching_cubes;
+
 use std::sync::Arc;
 
 use nalgebra::Point3;
+
+/// A hull candidate voxel from GPU-side convex candidate extraction.
+#[derive(Debug, Clone, Copy)]
+pub struct HullCandidate {
+    /// The region this voxel belongs to.
+    pub region_id: u32,
+    /// Voxel grid coordinates.
+    pub coords: [u32; 3],
+}
 
 /// Voxel classification values matching the GPU shader conventions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +125,11 @@ impl VoxelGrid {
             mapped_at_creation: false,
         });
 
+        // Explicit zero-init: wgpu spec says buffers are zero-initialized, but
+        // some backends may recycle memory. A stale voxel propagates through
+        // flood-fill → region splitting → non-deterministic decomposition.
+        queue.write_buffer(&grid_buffer, 0, &vec![0u8; (total_voxels * 4) as usize]);
+
         let grid = Self {
             dims,
             origin,
@@ -134,6 +150,150 @@ impl VoxelGrid {
             FillMode::SurfaceOnly => {}
         }
 
+        grid
+    }
+
+    /// Create an empty (all-Undefined) voxel grid with the given dimensions.
+    pub fn empty(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        dims: [u32; 3],
+        origin: Point3<f64>,
+        pitch: f64,
+    ) -> Self {
+        let dims = [dims[0].min(1023), dims[1].min(1023), dims[2].min(1023)];
+        let total_voxels = u64::from(dims[0]) * u64::from(dims[1]) * u64::from(dims[2]);
+
+        let grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("voxel_grid_empty"),
+            size: total_voxels * 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&grid_buffer, 0, &vec![0u8; (total_voxels * 4) as usize]);
+
+        Self {
+            dims,
+            origin,
+            scale: pitch,
+            buffer: grid_buffer,
+            distance: None,
+            device,
+            queue,
+        }
+    }
+
+    /// Create a voxel grid of a sphere from its analytic SDF.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn sphere(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        center: Point3<f64>,
+        radius: f64,
+        pitch: f64,
+    ) -> Self {
+        let pad = pitch;
+        let origin = Point3::new(
+            center.x - radius - pad,
+            center.y - radius - pad,
+            center.z - radius - pad,
+        );
+        let extent = 2.0 * (radius + pad);
+        let dim = (extent / pitch).ceil() as u32 + 2;
+        let dims = [dim.min(1023), dim.min(1023), dim.min(1023)];
+
+        let grid = Self::empty(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            dims,
+            origin,
+            pitch,
+        );
+        // mode=0 (sphere), params=[radius, 0, 0, 0]
+        grid.run_sdf_fill(0, center, [radius as f32, 0.0, 0.0, 0.0]);
+        grid
+    }
+
+    /// Create a voxel grid of an axis-aligned cuboid from its analytic SDF.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn cuboid(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        center: Point3<f64>,
+        extents: [f64; 3],
+        pitch: f64,
+    ) -> Self {
+        let pad = pitch;
+        let hx = extents[0] / 2.0;
+        let hy = extents[1] / 2.0;
+        let hz = extents[2] / 2.0;
+        let origin = Point3::new(
+            center.x - hx - pad,
+            center.y - hy - pad,
+            center.z - hz - pad,
+        );
+        let dims = [
+            ((extents[0] + 2.0 * pad) / pitch).ceil() as u32 + 2,
+            ((extents[1] + 2.0 * pad) / pitch).ceil() as u32 + 2,
+            ((extents[2] + 2.0 * pad) / pitch).ceil() as u32 + 2,
+        ];
+        let dims = [dims[0].min(1023), dims[1].min(1023), dims[2].min(1023)];
+
+        let grid = Self::empty(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            dims,
+            origin,
+            pitch,
+        );
+        // mode=1 (box), params=[hx, hy, hz, 0]
+        grid.run_sdf_fill(1, center, [hx as f32, hy as f32, hz as f32, 0.0]);
+        grid
+    }
+
+    /// Create a voxel grid of an axis-aligned cylinder from its analytic SDF.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn cylinder(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        center: Point3<f64>,
+        axis: u8,
+        radius: f64,
+        height: f64,
+        pitch: f64,
+    ) -> Self {
+        let pad = pitch;
+        let hh = height / 2.0;
+        let mut extents = [radius + pad, radius + pad, radius + pad];
+        extents[axis as usize] = hh + pad;
+
+        let origin = Point3::new(
+            center.x - extents[0],
+            center.y - extents[1],
+            center.z - extents[2],
+        );
+        let dims = [
+            (2.0 * extents[0] / pitch).ceil() as u32 + 2,
+            (2.0 * extents[1] / pitch).ceil() as u32 + 2,
+            (2.0 * extents[2] / pitch).ceil() as u32 + 2,
+        ];
+        let dims = [dims[0].min(1023), dims[1].min(1023), dims[2].min(1023)];
+
+        let grid = Self::empty(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            dims,
+            origin,
+            pitch,
+        );
+        // mode=2 (cylinder), params=[radius, half_height, axis, 0]
+        grid.run_sdf_fill(
+            2,
+            center,
+            [radius as f32, hh as f32, f32::from(axis), 0.0],
+        );
         grid
     }
 
@@ -258,7 +418,970 @@ impl VoxelGrid {
         self.measure().1
     }
 
+    /// Return a new `VoxelGrid` with interior voxels zeroed out.
+    ///
+    /// A filled voxel is "shell" if at least one 6-neighbor is unfilled.
+    /// Interior filled voxels become `Undefined` (0). The result is a
+    /// GPU-resident grid — no readback occurs.
+    pub fn shell(&self) -> VoxelGrid {
+        let total = self.total_voxels();
+
+        // Copy grid to read-only input
+        let grid_ro = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shell_grid_ro"),
+            size: total * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let grid_out = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shell_grid_out"),
+            size: total * 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        {
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("shell_copy_enc"),
+                });
+            enc.copy_buffer_to_buffer(&self.buffer, 0, &grid_ro, 0, total * 4);
+            self.queue.submit(Some(enc.finish()));
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Dims {
+            dims: [u32; 3],
+            _pad: u32,
+        }
+
+        let dims_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shell_dims"),
+                contents: bytemuck::bytes_of(&Dims {
+                    dims: self.dims,
+                    _pad: 0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cs_shell"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cs_shell.wgsl").into()),
+            });
+
+        let bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shell_bgl"),
+                entries: &[bgl_storage_ro(0), bgl_storage_rw(1), bgl_uniform(2)],
+            });
+
+        let pl = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shell_pl"),
+                bind_group_layouts: &[&bgl],
+                immediate_size: 0,
+            });
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("shell_pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shell_bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: grid_ro.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: grid_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: dims_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("shell_enc"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("shell_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(
+                self.dims[0].div_ceil(4),
+                self.dims[1].div_ceil(4),
+                self.dims[2].div_ceil(4),
+            );
+        }
+        self.queue.submit(Some(enc.finish()));
+
+        VoxelGrid {
+            dims: self.dims,
+            origin: self.origin,
+            scale: self.scale,
+            buffer: grid_out,
+            distance: None,
+            device: Arc::clone(&self.device),
+            queue: Arc::clone(&self.queue),
+        }
+    }
+
+    /// Boolean union: combine two grids, keeping voxels from either.
+    pub fn union(&self, other: &VoxelGrid) -> VoxelGrid {
+        self.run_boolean(other, 0)
+    }
+
+    /// Boolean intersection: keep only voxels present in both grids.
+    pub fn intersection(&self, other: &VoxelGrid) -> VoxelGrid {
+        self.run_boolean(other, 1)
+    }
+
+    /// Boolean difference: keep voxels from self that are not in other.
+    pub fn difference(&self, other: &VoxelGrid) -> VoxelGrid {
+        self.run_boolean(other, 2)
+    }
+
+    /// GPU-compacted list of all filled voxel coordinates.
+    ///
+    /// Uses atomic append on the GPU — no full-grid readback.
+    pub fn compact(&self) -> Vec<[u32; 3]> {
+        let total = self.total_voxels();
+
+        // Copy grid to read-only input
+        let grid_ro = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("compact_grid_ro"),
+            size: total * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        {
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compact_copy_enc"),
+                });
+            enc.copy_buffer_to_buffer(&self.buffer, 0, &grid_ro, 0, total * 4);
+            self.queue.submit(Some(enc.finish()));
+        }
+
+        // Output buffer: 1 counter + up to total_voxels * 3 coords
+        let max_entries = total;
+        let output_size = (1 + max_entries * 3) * 4;
+        let output_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("compact_output"),
+            size: output_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Zero-initialize counter
+        self.queue.write_buffer(&output_buf, 0, &[0u8; 4]);
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Dims {
+            dims: [u32; 3],
+            _pad: u32,
+        }
+
+        let dims_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("compact_dims"),
+                contents: bytemuck::bytes_of(&Dims {
+                    dims: self.dims,
+                    _pad: 0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cs_compact"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cs_compact.wgsl").into()),
+            });
+
+        let bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("compact_bgl"),
+                entries: &[bgl_storage_ro(0), bgl_storage_rw(1), bgl_uniform(2)],
+            });
+
+        let pl = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("compact_pl"),
+                bind_group_layouts: &[&bgl],
+                immediate_size: 0,
+            });
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("compact_pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compact_bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: grid_ro.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: dims_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("compact_enc"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("compact_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(
+                self.dims[0].div_ceil(4),
+                self.dims[1].div_ceil(4),
+                self.dims[2].div_ceil(4),
+            );
+        }
+
+        // Readback
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("compact_readback"),
+            size: output_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        enc.copy_buffer_to_buffer(&output_buf, 0, &readback, 0, output_size);
+        self.queue.submit(Some(enc.finish()));
+
+        let data = crate::gpu::gpu_read_buffer(&self.device, &readback);
+        let count =
+            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            let base = 4 + i * 12; // skip 4-byte counter, each entry is 3 × u32
+            if base + 12 > data.len() {
+                break;
+            }
+            let x = u32::from_le_bytes([data[base], data[base + 1], data[base + 2], data[base + 3]]);
+            let y = u32::from_le_bytes([
+                data[base + 4],
+                data[base + 5],
+                data[base + 6],
+                data[base + 7],
+            ]);
+            let z = u32::from_le_bytes([
+                data[base + 8],
+                data[base + 9],
+                data[base + 10],
+                data[base + 11],
+            ]);
+            result.push([x, y, z]);
+        }
+        result
+    }
+
+    /// GPU-compacted convex hull candidates from a region_ids buffer.
+    ///
+    /// Two-pass pipeline: boundary detection + 26-direction support-plane
+    /// culling + compaction. Returns only the ~1-3% of voxels that could
+    /// be convex hull vertices.
+    pub fn convex_candidates(
+        &self,
+        region_ids: &wgpu::Buffer,
+        max_region_id: u32,
+    ) -> Vec<HullCandidate> {
+        let total = self.total_voxels();
+        let dims = self.dims;
+        let max_dim = dims[0].max(dims[1]).max(dims[2]);
+
+        // Copy region_ids to read-only buffer
+        let region_ro = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("convex_region_ro"),
+            size: total * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        {
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("convex_copy_enc"),
+                });
+            enc.copy_buffer_to_buffer(region_ids, 0, &region_ro, 0, total * 4);
+            self.queue.submit(Some(enc.finish()));
+        }
+
+        // Extremes buffer: (max_region_id + 1) × 26 × 4 bytes, zero-initialized
+        let extremes_count = (u64::from(max_region_id) + 1) * 26;
+        let extremes_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("convex_extremes"),
+            size: extremes_count * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Zero-initialize (atomicMax starts from 0)
+        let zeros = vec![0u8; (extremes_count * 4) as usize];
+        self.queue.write_buffer(&extremes_buf, 0, &zeros);
+
+        // Output buffer: generous ceiling at total/10, each entry is 4 × u32 + 1 counter
+        let max_entries = (total / 10).max(64);
+        let output_size = (1 + max_entries * 4) * 4;
+        let output_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("convex_output"),
+            size: output_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&output_buf, 0, &[0u8; 4]);
+
+        // ── Pass 1: cs_convex_support ──
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct SupportParams {
+            dims: [u32; 3],
+            max_dim: u32,
+        }
+
+        let support_params_buf =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("convex_support_params"),
+                    contents: bytemuck::bytes_of(&SupportParams { dims, max_dim }),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+        let support_shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cs_convex_support"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/cs_convex_support.wgsl").into(),
+                ),
+            });
+
+        let support_bgl =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("convex_support_bgl"),
+                    entries: &[bgl_uniform(0), bgl_storage_ro(1), bgl_storage_rw(2)],
+                });
+
+        let support_pl = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("convex_support_pl"),
+                bind_group_layouts: &[&support_bgl],
+                immediate_size: 0,
+            });
+
+        let support_pipeline =
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("convex_support_pipeline"),
+                    layout: Some(&support_pl),
+                    module: &support_shader,
+                    entry_point: Some("main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
+                });
+
+        let support_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("convex_support_bg"),
+            layout: &support_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: support_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: region_ro.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: extremes_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        // ── Pass 2: cs_convex_compact ──
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct CompactParams {
+            dims: [u32; 3],
+            max_dim: u32,
+            margin: u32,
+            _pad0: u32,
+            _pad1: u32,
+            _pad2: u32,
+        }
+
+        let compact_params_buf =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("convex_compact_params"),
+                    contents: bytemuck::bytes_of(&CompactParams {
+                        dims,
+                        max_dim,
+                        margin: 1,
+                        _pad0: 0,
+                        _pad1: 0,
+                        _pad2: 0,
+                    }),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+        let compact_shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cs_convex_compact"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/cs_convex_compact.wgsl").into(),
+                ),
+            });
+
+        let compact_bgl =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("convex_compact_bgl"),
+                    entries: &[
+                        bgl_uniform(0),
+                        bgl_storage_ro(1),
+                        bgl_storage_ro(2),
+                        bgl_storage_rw(3),
+                    ],
+                });
+
+        let compact_pl = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("convex_compact_pl"),
+                bind_group_layouts: &[&compact_bgl],
+                immediate_size: 0,
+            });
+
+        let compact_pipeline =
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("convex_compact_pipeline"),
+                    layout: Some(&compact_pl),
+                    module: &compact_shader,
+                    entry_point: Some("main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
+                });
+
+        let compact_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("convex_compact_bg"),
+            layout: &compact_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: compact_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: region_ro.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: extremes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: output_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Dispatch both passes in a single encoder submit
+        let wg = [
+            dims[0].div_ceil(4),
+            dims[1].div_ceil(4),
+            dims[2].div_ceil(4),
+        ];
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("convex_enc"),
+            });
+
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("convex_support_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&support_pipeline);
+            pass.set_bind_group(0, &support_bg, &[]);
+            pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
+        }
+
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("convex_compact_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&compact_pipeline);
+            pass.set_bind_group(0, &compact_bg, &[]);
+            pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
+        }
+
+        // Readback
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("convex_readback"),
+            size: output_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        enc.copy_buffer_to_buffer(&output_buf, 0, &readback, 0, output_size);
+        self.queue.submit(Some(enc.finish()));
+
+        let data = crate::gpu::gpu_read_buffer(&self.device, &readback);
+        let count =
+            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            let base = 4 + i * 16; // skip 4-byte counter, each entry is 4 × u32
+            if base + 16 > data.len() {
+                break;
+            }
+            let rid = u32::from_le_bytes([
+                data[base],
+                data[base + 1],
+                data[base + 2],
+                data[base + 3],
+            ]);
+            let x = u32::from_le_bytes([
+                data[base + 4],
+                data[base + 5],
+                data[base + 6],
+                data[base + 7],
+            ]);
+            let y = u32::from_le_bytes([
+                data[base + 8],
+                data[base + 9],
+                data[base + 10],
+                data[base + 11],
+            ]);
+            let z = u32::from_le_bytes([
+                data[base + 12],
+                data[base + 13],
+                data[base + 14],
+                data[base + 15],
+            ]);
+            result.push(HullCandidate {
+                region_id: rid,
+                coords: [x, y, z],
+            });
+        }
+        result
+    }
+
     // ── GPU Pipeline Internals ──────────────────────────────────────────
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn run_sdf_fill(&self, mode: u32, center: Point3<f64>, params: [f32; 4]) {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct SdfFillParams {
+            dims: [u32; 3],
+            mode: u32,
+            origin: [f32; 3],
+            pitch: f32,
+            center: [f32; 3],
+            _pad: u32,
+            params: [f32; 4],
+        }
+
+        let uniform = SdfFillParams {
+            dims: self.dims,
+            mode,
+            origin: [
+                self.origin.x as f32,
+                self.origin.y as f32,
+                self.origin.z as f32,
+            ],
+            pitch: self.scale as f32,
+            center: [center.x as f32, center.y as f32, center.z as f32],
+            _pad: 0,
+            params,
+        };
+
+        let params_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("sdf_fill_params"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cs_sdf_fill"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/cs_sdf_fill.wgsl").into(),
+                ),
+            });
+
+        let bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sdf_fill_bgl"),
+                entries: &[bgl_uniform(0), bgl_storage_rw(1)],
+            });
+
+        let pl = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("sdf_fill_pl"),
+                bind_group_layouts: &[&bgl],
+                immediate_size: 0,
+            });
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("sdf_fill_pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sdf_fill_bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("sdf_fill_enc"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sdf_fill_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(
+                self.dims[0].div_ceil(4),
+                self.dims[1].div_ceil(4),
+                self.dims[2].div_ceil(4),
+            );
+        }
+        self.queue.submit(Some(enc.finish()));
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn run_boolean(&self, other: &VoxelGrid, mode: u32) -> VoxelGrid {
+        // Compute output AABB based on operation type
+        let (out_min, out_max) = match mode {
+            0 => {
+                // Union: combined AABB
+                let a_max = Point3::new(
+                    self.origin.x + f64::from(self.dims[0]) * self.scale,
+                    self.origin.y + f64::from(self.dims[1]) * self.scale,
+                    self.origin.z + f64::from(self.dims[2]) * self.scale,
+                );
+                let b_max = Point3::new(
+                    other.origin.x + f64::from(other.dims[0]) * other.scale,
+                    other.origin.y + f64::from(other.dims[1]) * other.scale,
+                    other.origin.z + f64::from(other.dims[2]) * other.scale,
+                );
+                (self.origin.inf(&other.origin), a_max.sup(&b_max))
+            }
+            1 => {
+                // Intersection: overlapping AABB
+                let a_max = Point3::new(
+                    self.origin.x + f64::from(self.dims[0]) * self.scale,
+                    self.origin.y + f64::from(self.dims[1]) * self.scale,
+                    self.origin.z + f64::from(self.dims[2]) * self.scale,
+                );
+                let b_max = Point3::new(
+                    other.origin.x + f64::from(other.dims[0]) * other.scale,
+                    other.origin.y + f64::from(other.dims[1]) * other.scale,
+                    other.origin.z + f64::from(other.dims[2]) * other.scale,
+                );
+                let lo = self.origin.sup(&other.origin);
+                let hi = a_max.inf(&b_max);
+                // If no overlap, return empty grid
+                if lo.x >= hi.x || lo.y >= hi.y || lo.z >= hi.z {
+                    return VoxelGrid::empty(
+                        Arc::clone(&self.device),
+                        Arc::clone(&self.queue),
+                        [2, 2, 2],
+                        self.origin,
+                        self.scale,
+                    );
+                }
+                (lo, hi)
+            }
+            _ => {
+                // Difference: self's AABB
+                let a_max = Point3::new(
+                    self.origin.x + f64::from(self.dims[0]) * self.scale,
+                    self.origin.y + f64::from(self.dims[1]) * self.scale,
+                    self.origin.z + f64::from(self.dims[2]) * self.scale,
+                );
+                (self.origin, a_max)
+            }
+        };
+
+        // Use the finer pitch
+        let pitch = self.scale.min(other.scale);
+
+        #[allow(clippy::cast_sign_loss)]
+        let out_dims = [
+            2u32.max(((out_max.x - out_min.x) / pitch).ceil() as u32 + 1).min(1023),
+            2u32.max(((out_max.y - out_min.y) / pitch).ceil() as u32 + 1).min(1023),
+            2u32.max(((out_max.z - out_min.z) / pitch).ceil() as u32 + 1).min(1023),
+        ];
+
+        let out_grid = VoxelGrid::empty(
+            Arc::clone(&self.device),
+            Arc::clone(&self.queue),
+            out_dims,
+            out_min,
+            pitch,
+        );
+
+        // Copy both input grids to read-only buffers
+        let total_a = self.total_voxels();
+        let total_b = other.total_voxels();
+
+        let grid_a_ro = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bool_grid_a_ro"),
+            size: total_a * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let grid_b_ro = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bool_grid_b_ro"),
+            size: total_b * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        {
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bool_copy_enc"),
+                });
+            enc.copy_buffer_to_buffer(&self.buffer, 0, &grid_a_ro, 0, total_a * 4);
+            enc.copy_buffer_to_buffer(&other.buffer, 0, &grid_b_ro, 0, total_b * 4);
+            self.queue.submit(Some(enc.finish()));
+        }
+
+        // Uniform
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct BooleanParams {
+            out_dims: [u32; 3],
+            mode: u32,
+            out_origin: [f32; 3],
+            pitch: f32,
+            a_dims: [u32; 3],
+            _pad0: u32,
+            a_origin: [f32; 3],
+            _pad1: u32,
+            b_dims: [u32; 3],
+            _pad2: u32,
+            b_origin: [f32; 3],
+            _pad3: u32,
+        }
+
+        let uniform = BooleanParams {
+            out_dims: out_grid.dims,
+            mode,
+            out_origin: [
+                out_grid.origin.x as f32,
+                out_grid.origin.y as f32,
+                out_grid.origin.z as f32,
+            ],
+            pitch: pitch as f32,
+            a_dims: self.dims,
+            _pad0: 0,
+            a_origin: [
+                self.origin.x as f32,
+                self.origin.y as f32,
+                self.origin.z as f32,
+            ],
+            _pad1: 0,
+            b_dims: other.dims,
+            _pad2: 0,
+            b_origin: [
+                other.origin.x as f32,
+                other.origin.y as f32,
+                other.origin.z as f32,
+            ],
+            _pad3: 0,
+        };
+
+        let params_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bool_params"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cs_boolean"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/cs_boolean.wgsl").into(),
+                ),
+            });
+
+        let bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bool_bgl"),
+                entries: &[
+                    bgl_uniform(0),
+                    bgl_storage_ro(1),
+                    bgl_storage_ro(2),
+                    bgl_storage_rw(3),
+                ],
+            });
+
+        let pl = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bool_pl"),
+                bind_group_layouts: &[&bgl],
+                immediate_size: 0,
+            });
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("bool_pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bool_bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: grid_a_ro.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: grid_b_ro.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: out_grid.buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bool_enc"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bool_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(
+                out_grid.dims[0].div_ceil(4),
+                out_grid.dims[1].div_ceil(4),
+                out_grid.dims[2].div_ceil(4),
+            );
+        }
+        self.queue.submit(Some(enc.finish()));
+
+        out_grid
+    }
 
     fn run_voxelize(&self, vertices: &[Point3<f64>], faces: &[[usize; 3]]) {
         if faces.is_empty() {
@@ -1520,6 +2643,125 @@ mod tests {
     }
 
     #[test]
+    fn test_shell_boundary_only() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let (v, f) = unit_cube_mesh();
+        let grid = VoxelGrid::from_mesh(dev, queue, &v, &f, 100_000, FillMode::FloodFill);
+
+        let original_filled = grid.compact().len();
+        let shell_grid = grid.shell();
+        let shell_filled = shell_grid.compact().len();
+
+        println!(
+            "test_shell_boundary_only: original={}, shell={}",
+            original_filled, shell_filled
+        );
+
+        assert!(
+            shell_filled < original_filled,
+            "Shell ({}) should have fewer filled voxels than original ({})",
+            shell_filled,
+            original_filled
+        );
+        assert!(
+            shell_filled > 0,
+            "Shell should have at least some filled voxels"
+        );
+    }
+
+    #[test]
+    fn test_compact_matches_readback() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let (v, f) = unit_cube_mesh();
+        let grid = VoxelGrid::from_mesh(dev, queue, &v, &f, 10_000, FillMode::FloodFill);
+
+        // Get filled voxels via full readback
+        let mut readback_coords: Vec<[u32; 3]> = grid.surface_voxels();
+        readback_coords.extend(grid.interior_voxels());
+        readback_coords.sort();
+
+        // Get filled voxels via GPU compact
+        let mut compact_coords = grid.compact();
+        compact_coords.sort();
+
+        assert_eq!(
+            compact_coords.len(),
+            readback_coords.len(),
+            "compact() count ({}) should match readback count ({})",
+            compact_coords.len(),
+            readback_coords.len()
+        );
+        assert_eq!(
+            compact_coords, readback_coords,
+            "compact() coordinates should match readback coordinates"
+        );
+    }
+
+    #[test]
+    fn test_convex_candidates_culling() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let (v, f) = unit_cube_mesh();
+        let grid = VoxelGrid::from_mesh(
+            Arc::clone(&dev),
+            Arc::clone(&queue),
+            &v,
+            &f,
+            100_000,
+            FillMode::FloodFill,
+        );
+
+        let total_filled = grid.compact().len();
+
+        // Create a single-region region_ids buffer (all filled voxels = region 0)
+        let grid_data = grid.to_array();
+        let region_init: Vec<u32> = grid_data
+            .iter()
+            .map(|v| match v {
+                VoxelValue::Surface | VoxelValue::Inside => 0,
+                _ => u32::MAX,
+            })
+            .collect();
+        let region_ids_buf = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test_region_ids"),
+            contents: bytemuck::cast_slice(&region_init),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let candidates = grid.convex_candidates(&region_ids_buf, 1);
+
+        println!(
+            "test_convex_candidates_culling: total_filled={}, candidates={}",
+            total_filled,
+            candidates.len()
+        );
+
+        assert!(
+            !candidates.is_empty(),
+            "Should have at least some convex candidates"
+        );
+        assert!(
+            candidates.len() < total_filled,
+            "Candidates ({}) should be fewer than total filled voxels ({})",
+            candidates.len(),
+            total_filled
+        );
+    }
+
+    #[test]
     fn test_area_surface_only() {
         let (dev, queue) = match get_device() {
             Some(dq) => dq,
@@ -1551,6 +2793,304 @@ mod tests {
             "SurfaceOnly volume ({:.4}) should be much less than FloodFill volume ({:.4})",
             vol_shell,
             vol_full
+        );
+    }
+
+    #[test]
+    fn test_empty_grid() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let grid = VoxelGrid::empty(
+            dev,
+            queue,
+            [10, 10, 10],
+            Point3::origin(),
+            0.1,
+        );
+        assert_eq!(grid.dims(), [10, 10, 10]);
+        assert_eq!(grid.volume(), 0.0);
+        let data = grid.to_array();
+        assert!(data.iter().all(|v| *v == VoxelValue::Undefined));
+    }
+
+    #[test]
+    fn test_sphere_volume() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let r = 1.0;
+        let pitch = 0.05;
+        let grid = VoxelGrid::sphere(dev, queue, Point3::origin(), r, pitch);
+        let vol = grid.volume();
+        let expected = 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
+        let error = (vol - expected).abs() / expected;
+
+        println!(
+            "test_sphere_volume: volume={:.4}, expected={:.4}, error={:.2}%",
+            vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.05,
+            "Sphere volume should be ~{:.4}, got {:.4} (error {:.2}%)",
+            expected, vol, error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_cuboid_volume() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let extents = [2.0, 3.0, 4.0];
+        let pitch = 0.1;
+        let grid = VoxelGrid::cuboid(dev, queue, Point3::origin(), extents, pitch);
+        let vol = grid.volume();
+        let expected = 24.0;
+        let error = (vol - expected).abs() / expected;
+
+        println!(
+            "test_cuboid_volume: volume={:.4}, expected={:.4}, error={:.2}%",
+            vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.05,
+            "Cuboid volume should be ~{:.1}, got {:.4} (error {:.2}%)",
+            expected, vol, error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_cylinder_volume() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let r = 1.0;
+        let h = 3.0;
+        let pitch = 0.1;
+        let grid = VoxelGrid::cylinder(dev, queue, Point3::origin(), 2, r, h, pitch);
+        let vol = grid.volume();
+        let expected = std::f64::consts::PI * r.powi(2) * h;
+        let error = (vol - expected).abs() / expected;
+
+        println!(
+            "test_cylinder_volume: volume={:.4}, expected={:.4}, error={:.2}%",
+            vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.05,
+            "Cylinder volume should be ~{:.4}, got {:.4} (error {:.2}%)",
+            expected, vol, error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_sphere_shell_hollow() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let grid = VoxelGrid::sphere(dev, queue, Point3::origin(), 1.0, 0.05);
+        let shell_grid = grid.shell();
+        let interior = shell_grid.interior_voxels();
+
+        println!(
+            "test_sphere_shell_hollow: interior_count={}",
+            interior.len()
+        );
+        assert!(
+            interior.is_empty(),
+            "Shell of sphere should have no interior voxels, found {}",
+            interior.len()
+        );
+    }
+
+    #[test]
+    fn test_boolean_union_volume() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let pitch = 0.05;
+        // Two cuboids: [0,1]^3 and [0.5,1.5]^3 => overlap 0.5^3 = 0.125
+        // Union volume = 2.0 - 0.125 = 1.875... but extents-based:
+        // A centered at (0.5, 0.5, 0.5) extents [1,1,1]
+        // B centered at (1.0, 0.5, 0.5) extents [1,1,1]
+        // => A covers [0,1], B covers [0.5,1.5] in X. Union = [0,1.5] in X, [0,1] in Y,Z
+        // Union vol = 1.5
+        let a = VoxelGrid::cuboid(
+            Arc::clone(&dev),
+            Arc::clone(&queue),
+            Point3::new(0.5, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
+        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let u = a.union(&b);
+        let vol = u.volume();
+        let expected = 1.5;
+        let error = (vol - expected).abs() / expected;
+
+        println!(
+            "test_boolean_union_volume: vol={:.4}, expected={:.4}, error={:.2}%",
+            vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.10,
+            "Union volume should be ~{:.2}, got {:.4} (error {:.2}%)",
+            expected,
+            vol,
+            error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_boolean_intersection_volume() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let pitch = 0.05;
+        let a = VoxelGrid::cuboid(
+            Arc::clone(&dev),
+            Arc::clone(&queue),
+            Point3::new(0.5, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
+        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let inter = a.intersection(&b);
+        let vol = inter.volume();
+        let expected = 0.5; // overlap region: [0.5,1.0] in X, [0,1] in Y,Z
+        let error = (vol - expected).abs() / expected;
+
+        println!(
+            "test_boolean_intersection_volume: vol={:.4}, expected={:.4}, error={:.2}%",
+            vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.10,
+            "Intersection volume should be ~{:.2}, got {:.4} (error {:.2}%)",
+            expected,
+            vol,
+            error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_boolean_difference_volume() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let pitch = 0.05;
+        let a = VoxelGrid::cuboid(
+            Arc::clone(&dev),
+            Arc::clone(&queue),
+            Point3::new(0.5, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
+        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let diff = a.difference(&b);
+        let vol = diff.volume();
+        let expected = 0.5; // A minus overlap: 1.0 - 0.5 = 0.5
+        let error = (vol - expected).abs() / expected;
+
+        println!(
+            "test_boolean_difference_volume: vol={:.4}, expected={:.4}, error={:.2}%",
+            vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.10,
+            "Difference volume should be ~{:.2}, got {:.4} (error {:.2}%)",
+            expected,
+            vol,
+            error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_boolean_union_to_mesh() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let pitch = 0.05;
+        let a = VoxelGrid::cuboid(
+            Arc::clone(&dev),
+            Arc::clone(&queue),
+            Point3::new(0.5, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
+        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let u = a.union(&b);
+
+        let (verts, faces) = u.to_mesh();
+        assert!(!verts.is_empty(), "Mesh should have vertices");
+        assert!(!faces.is_empty(), "Mesh should have faces");
+
+        // Check volume via signed tetrahedra
+        let mesh_vol = crate::triangles::inertia::volume(&verts, &faces).abs();
+        let expected = 1.5;
+        let error = (mesh_vol - expected).abs() / expected;
+
+        println!(
+            "test_boolean_union_to_mesh: verts={}, faces={}, mesh_vol={:.4}, expected={:.2}, error={:.2}%",
+            verts.len(), faces.len(), mesh_vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.15,
+            "Union mesh volume should be ~{:.2}, got {:.4} (error {:.2}%)",
+            expected,
+            mesh_vol,
+            error * 100.0
+        );
+    }
+
+    #[test]
+    fn test_marching_cubes_sphere() {
+        let (dev, queue) = match get_device() {
+            Some(dq) => dq,
+            None => return,
+        };
+
+        let r = 1.0;
+        let pitch = 0.05;
+        let grid = VoxelGrid::sphere(dev, queue, Point3::origin(), r, pitch);
+        let (verts, faces) = grid.to_mesh();
+
+        assert!(!verts.is_empty(), "Sphere mesh should have vertices");
+        assert!(!faces.is_empty(), "Sphere mesh should have faces");
+
+        let mesh_vol = crate::triangles::inertia::volume(&verts, &faces).abs();
+        let expected = 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
+        let error = (mesh_vol - expected).abs() / expected;
+
+        println!(
+            "test_marching_cubes_sphere: verts={}, faces={}, mesh_vol={:.4}, expected={:.4}, error={:.2}%",
+            verts.len(), faces.len(), mesh_vol, expected, error * 100.0
+        );
+        assert!(
+            error < 0.10,
+            "Sphere mesh volume should be ~{:.4}, got {:.4} (error {:.2}%)",
+            expected,
+            mesh_vol,
+            error * 100.0
         );
     }
 }
