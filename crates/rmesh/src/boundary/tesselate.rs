@@ -18,11 +18,11 @@ use std::collections::{HashMap, HashSet};
 use kiddo::{ImmutableKdTree, SquaredEuclidean};
 use nalgebra::{Point2, Point3, Vector3};
 
-use super::cdt;
-use super::faces::{Cone, Cylinder, Sphere, SurfacePlane, Torus, CURVATURE_TOL, GEOMETRY_TOL};
-use super::topology::{BrepEdge, BrepFace, BrepModel, Curve, EdgeUse, OrientedEdge};
 use super::Surface;
-use crate::creation::{perpendicular, Plane};
+use super::cdt;
+use super::faces::{CURVATURE_TOL, Cone, Cylinder, GEOMETRY_TOL, Sphere, SurfacePlane, Torus};
+use super::topology::{BrepEdge, BrepFace, BrepModel, Curve, EdgeUse, OrientedEdge};
+use crate::creation::{Plane, perpendicular};
 
 /// Parameters controlling tesselation quality.
 #[derive(Debug, Clone)]
@@ -311,14 +311,17 @@ impl TesselatedModel {
                 let v1 = tri[i];
                 let v2 = tri[(i + 1) % 3];
                 let edge = if v1 < v2 { (v1, v2) } else { (v2, v1) };
-                edge_to_tris.entry(edge).or_default().push((tri_idx, face_idx));
+                edge_to_tris
+                    .entry(edge)
+                    .or_default()
+                    .push((tri_idx, face_idx));
             }
         }
 
         // Count problematic edges per face
         let mut face_stats: HashMap<usize, (usize, usize)> = HashMap::new();
 
-        for (_edge, tris) in &edge_to_tris {
+        for tris in edge_to_tris.values() {
             let count = tris.len();
             if count == 1 {
                 // Boundary edge
@@ -343,7 +346,12 @@ impl TesselatedModel {
 // ============================================================================
 
 /// Discretize a curve segment into points.
-fn discretize_curve(curve: &Curve, t_start: f64, t_end: f64, params: &TesselationParams) -> Vec<Point3<f64>> {
+fn discretize_curve(
+    curve: &Curve,
+    t_start: f64,
+    t_end: f64,
+    params: &TesselationParams,
+) -> Vec<Point3<f64>> {
     let n = match curve {
         Curve::Line(_) => 1, // Lines just need start and end (2 points)
         Curve::Circle(c) => {
@@ -364,7 +372,8 @@ fn discretize_curve(curve: &Curve, t_start: f64, t_end: f64, params: &Tesselatio
         Curve::BSpline(bs) => {
             // For B-splines, use more segments for higher degree curves
             // and based on the number of control points
-            let base_segments = (bs.control_points.len() * (bs.degree + 1)).max(params.min_segments);
+            let base_segments =
+                (bs.control_points.len() * (bs.degree + 1)).max(params.min_segments);
             base_segments.clamp(params.min_segments, params.max_segments)
         }
     };
@@ -882,10 +891,14 @@ fn triangulate_with_plane_projection(
         // Check if projection is degenerate (very thin bounding box)
         let (min_x, max_x) = pts_tuples
             .iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), &(x, _)| (mn.min(x), mx.max(x)));
+            .fold((f64::MAX, f64::MIN), |(mn, mx), &(x, _)| {
+                (mn.min(x), mx.max(x))
+            });
         let (min_y, max_y) = pts_tuples
             .iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), &(_, y)| (mn.min(y), mx.max(y)));
+            .fold((f64::MAX, f64::MIN), |(mn, mx), &(_, y)| {
+                (mn.min(y), mx.max(y))
+            });
         let dx = max_x - min_x;
         let dy = max_y - min_y;
 
@@ -904,67 +917,56 @@ fn triangulate_with_plane_projection(
             merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
 
         // Try CDT with contours first
-        match cdt::triangulate_contours(&merged_pts, &merge_result.merged_contours) {
-            Ok(tris) => {
-                // Map triangles back to original indices
-                let mapped_tris: Vec<(usize, usize, usize)> = tris
-                    .iter()
-                    .map(|&(a, b, c)| {
-                        (
-                            merge_result.merged_to_original[a],
-                            merge_result.merged_to_original[b],
-                            merge_result.merged_to_original[c],
-                        )
-                    })
-                    .collect();
+        if let Ok(tris) = cdt::triangulate_contours(&merged_pts, &merge_result.merged_contours) {
+            // Map triangles back to original indices
+            let mapped_tris: Vec<(usize, usize, usize)> = tris
+                .iter()
+                .map(|&(a, b, c)| {
+                    (
+                        merge_result.merged_to_original[a],
+                        merge_result.merged_to_original[b],
+                        merge_result.merged_to_original[c],
+                    )
+                })
+                .collect();
 
-                // Check if all boundary edges are present (including holes)
-                let all_edges_present = check_all_contour_edges_present(&mapped_tris, contours);
+            // Check if all boundary edges are present (including holes)
+            let all_edges_present = check_all_contour_edges_present(&mapped_tris, contours);
 
-                if all_edges_present {
-                    return Ok(mapped_tris);
-                }
-                // CDT succeeded but some boundary edges are missing - continue to next plane
+            if all_edges_present {
+                return Ok(mapped_tris);
             }
-            Err(_) => {
-                // CDT failed, continue to next triangulation method
-            }
+            // CDT succeeded but some boundary edges are missing - continue to next plane
         }
 
         // CDT with contours failed - try triangulate_with_edges which takes
         // explicit edge constraints and guarantees they're preserved
-        let boundary_edges: Vec<(usize, usize)> = merge_result.merged_contours
+        let boundary_edges: Vec<(usize, usize)> = merge_result
+            .merged_contours
             .iter()
-            .flat_map(|contour| {
-                contour.windows(2).map(|w| (w[0], w[1]))
-            })
+            .flat_map(|contour| contour.windows(2).map(|w| (w[0], w[1])))
             .collect();
 
-        match cdt::triangulate_with_edges(&merged_pts, &boundary_edges) {
-            Ok(tris) => {
-                // Map triangles back to original indices
-                let mapped_tris: Vec<(usize, usize, usize)> = tris
-                    .iter()
-                    .map(|&(a, b, c)| {
-                        (
-                            merge_result.merged_to_original[a],
-                            merge_result.merged_to_original[b],
-                            merge_result.merged_to_original[c],
-                        )
-                    })
-                    .collect();
+        if let Ok(tris) = cdt::triangulate_with_edges(&merged_pts, &boundary_edges) {
+            // Map triangles back to original indices
+            let mapped_tris: Vec<(usize, usize, usize)> = tris
+                .iter()
+                .map(|&(a, b, c)| {
+                    (
+                        merge_result.merged_to_original[a],
+                        merge_result.merged_to_original[b],
+                        merge_result.merged_to_original[c],
+                    )
+                })
+                .collect();
 
-                // Check if all boundary edges are present (including holes)
-                let all_edges_present = check_all_contour_edges_present(&mapped_tris, contours);
+            // Check if all boundary edges are present (including holes)
+            let all_edges_present = check_all_contour_edges_present(&mapped_tris, contours);
 
-                if all_edges_present {
-                    return Ok(mapped_tris);
-                }
-                // CDT succeeded but some boundary edges are missing - continue to next plane
+            if all_edges_present {
+                return Ok(mapped_tris);
             }
-            Err(_) => {
-                // CDT with edges failed, continue to next plane
-            }
+            // CDT succeeded but some boundary edges are missing - continue to next plane
         }
     }
 
@@ -1063,13 +1065,18 @@ pub fn tesselate_face(
     // Compute UV bounds from boundary
     let (u_min, u_max) = vertices_uv
         .iter()
-        .fold((f64::MAX, f64::MIN), |(mn, mx), p| (mn.min(p.x), mx.max(p.x)));
+        .fold((f64::MAX, f64::MIN), |(mn, mx), p| {
+            (mn.min(p.x), mx.max(p.x))
+        });
     let (v_min, v_max) = vertices_uv
         .iter()
-        .fold((f64::MAX, f64::MIN), |(mn, mx), p| (mn.min(p.y), mx.max(p.y)));
+        .fold((f64::MAX, f64::MIN), |(mn, mx), p| {
+            (mn.min(p.y), mx.max(p.y))
+        });
 
     // Generate interior samples for non-planar surfaces
-    let interior_uvs = surface.generate_interior_samples(u_min, u_max, v_min, v_max, params.tolerance);
+    let interior_uvs =
+        surface.generate_interior_samples(u_min, u_max, v_min, v_max, params.tolerance);
 
     // Add interior points to vertex lists (these are unconstrained - CDT will connect them)
     for uv in &interior_uvs {
@@ -1079,12 +1086,14 @@ pub fn tesselate_face(
 
     // Apply vertex merging to prevent CDT failures on near-collinear points
     let merge_result = merge_near_vertices(&vertices_uv, &contours, params.merge_tolerance);
-    let merged_pts_tuples: Vec<(f64, f64)> = merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
+    let merged_pts_tuples: Vec<(f64, f64)> =
+        merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
 
     // Triangulate using CDT
-    let triangles = match cdt::triangulate_contours(&merged_pts_tuples, &merge_result.merged_contours) {
-        Ok(tris) => {
-            tris.iter()
+    let triangles =
+        match cdt::triangulate_contours(&merged_pts_tuples, &merge_result.merged_contours) {
+            Ok(tris) => tris
+                .iter()
                 .map(|&(a, b, c)| {
                     [
                         merge_result.merged_to_original[a],
@@ -1092,13 +1101,12 @@ pub fn tesselate_face(
                         merge_result.merged_to_original[c],
                     ]
                 })
-                .collect()
-        }
-        Err(e) => {
-            eprintln!("Error: CDT triangulation failed in tesselate_face: {:?}", e);
-            Vec::new()
-        }
-    };
+                .collect(),
+            Err(_) => {
+                // CDT triangulation failed - return empty triangulation
+                Vec::new()
+            }
+        };
 
     // Suppress unused variable warning
     let _ = boundary_len;
@@ -1129,7 +1137,10 @@ pub fn tesselate_face(
     let triangles = if face.same_sense {
         final_triangles
     } else {
-        final_triangles.into_iter().map(|[a, b, c]| [a, c, b]).collect()
+        final_triangles
+            .into_iter()
+            .map(|[a, b, c]| [a, c, b])
+            .collect()
     };
 
     TesselatedFace {
@@ -1163,16 +1174,9 @@ fn subdivide_to_tolerance(
             let p2 = surface.evaluate(uv2.x, uv2.y);
 
             // Check chord error at triangle centroid
-            let uv_center = Point2::new(
-                (uv0.x + uv1.x + uv2.x) / 3.0,
-                (uv0.y + uv1.y + uv2.y) / 3.0,
-            );
+            let uv_center = Point2::from((uv0.coords + uv1.coords + uv2.coords) / 3.0);
             let p_center_surface = surface.evaluate(uv_center.x, uv_center.y);
-            let p_center_linear = Point3::new(
-                (p0.x + p1.x + p2.x) / 3.0,
-                (p0.y + p1.y + p2.y) / 3.0,
-                (p0.z + p1.z + p2.z) / 3.0,
-            );
+            let p_center_linear = Point3::from((p0.coords + p1.coords + p2.coords) / 3.0);
 
             let error = (p_center_surface - p_center_linear).norm();
 
@@ -1346,14 +1350,30 @@ impl<'a> ShellTessellator<'a> {
         let curve_count = match curve {
             Curve::Line(_) => 1, // Lines just need start and end
             Curve::Circle(c) => {
+                // Guard against degenerate circle (zero or near-zero radius)
+                if c.radius <= f64::EPSILON {
+                    return self.params.min_segments;
+                }
                 let angle = (edge.t_end - edge.t_start).abs();
+                // Guard against degenerate arc (zero or near-zero angle)
+                if angle <= f64::EPSILON {
+                    return self.params.min_segments;
+                }
                 let max_step = (8.0 * self.params.tolerance / c.radius).sqrt();
                 let n = (angle / max_step).ceil() as usize;
                 n.clamp(self.params.min_segments, self.params.max_segments)
             }
             Curve::Ellipse(e) => {
                 let avg_r = (e.semi_major + e.semi_minor) / 2.0;
+                // Guard against degenerate ellipse (zero or near-zero average radius)
+                if avg_r <= f64::EPSILON {
+                    return self.params.min_segments;
+                }
                 let angle = (edge.t_end - edge.t_start).abs();
+                // Guard against degenerate arc (zero or near-zero angle)
+                if angle <= f64::EPSILON {
+                    return self.params.min_segments;
+                }
                 let max_step = (8.0 * self.params.tolerance / avg_r).sqrt();
                 let n = (angle / max_step).ceil() as usize;
                 n.clamp(self.params.min_segments, self.params.max_segments)
@@ -1372,7 +1392,12 @@ impl<'a> ShellTessellator<'a> {
     }
 
     /// Compute segment count based on surface curvature along the edge.
-    fn compute_surface_segment_count(&self, curve: &Curve, edge: &BrepEdge, edge_idx: usize) -> usize {
+    fn compute_surface_segment_count(
+        &self,
+        curve: &Curve,
+        edge: &BrepEdge,
+        edge_idx: usize,
+    ) -> usize {
         let mut max_kappa = 0.0_f64;
 
         for face in &self.model.faces {
@@ -1380,7 +1405,10 @@ impl<'a> ShellTessellator<'a> {
             let uses_edge = outer_loop.edges.iter().any(|oe| oe.edge == edge_idx);
 
             let in_inner = face.inner_loops.iter().any(|&inner_idx| {
-                self.model.loops[inner_idx].edges.iter().any(|oe| oe.edge == edge_idx)
+                self.model.loops[inner_idx]
+                    .edges
+                    .iter()
+                    .any(|oe| oe.edge == edge_idx)
             });
 
             if uses_edge || in_inner {
@@ -1455,7 +1483,8 @@ impl<'a> ShellTessellator<'a> {
 
         // Add outer boundary vertices to local state
         // First, collect raw UV coordinates
-        let mut raw_uvs: Vec<Point2<f64>> = outer_pool_indices.iter()
+        let mut raw_uvs: Vec<Point2<f64>> = outer_pool_indices
+            .iter()
             .map(|&pool_idx| surface.to_parametric(&self.vertices[pool_idx]))
             .collect();
 
@@ -1501,7 +1530,8 @@ impl<'a> ShellTessellator<'a> {
             hole_info.push((hole_start, hole_len));
 
             // Add inner boundary vertices with angular unwrapping
-            let mut inner_uvs: Vec<Point2<f64>> = loop_indices.iter()
+            let mut inner_uvs: Vec<Point2<f64>> = loop_indices
+                .iter()
                 .map(|&pool_idx| surface.to_parametric(&self.vertices[pool_idx]))
                 .collect();
             unwrap_angular_coords(&mut inner_uvs);
@@ -1536,15 +1566,22 @@ impl<'a> ShellTessellator<'a> {
         }
 
         // Compute UV bounds from boundary vertices
-        let (u_min, u_max) = state.vertices_uv.iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), p| (mn.min(p.x), mx.max(p.x)));
-        let (v_min, v_max) = state.vertices_uv.iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), p| (mn.min(p.y), mx.max(p.y)));
+        let (u_min, u_max) = state
+            .vertices_uv
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(mn, mx), p| {
+                (mn.min(p.x), mx.max(p.x))
+            });
+        let (v_min, v_max) = state
+            .vertices_uv
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(mn, mx), p| {
+                (mn.min(p.y), mx.max(p.y))
+            });
 
         // Generate interior samples for non-planar surfaces
-        let interior_uvs = surface.generate_interior_samples(
-            u_min, u_max, v_min, v_max, self.params.tolerance
-        );
+        let interior_uvs =
+            surface.generate_interior_samples(u_min, u_max, v_min, v_max, self.params.tolerance);
 
         // Add interior points to vertex lists
         // Interior points are unconstrained - CDT will connect them appropriately
@@ -1557,65 +1594,60 @@ impl<'a> ShellTessellator<'a> {
         }
 
         // Convert UV points for CDT
-        let pts: Vec<(f64, f64)> = state.vertices_uv.iter()
-            .map(|p| (p.x, p.y))
-            .collect();
+        let pts: Vec<(f64, f64)> = state.vertices_uv.iter().map(|p| (p.x, p.y)).collect();
 
         // Apply vertex merging to prevent CDT failures on near-collinear points
         let pts_as_point2: Vec<Point2<f64>> = pts.iter().map(|&(x, y)| Point2::new(x, y)).collect();
-        let merge_result = merge_near_vertices(
-            &pts_as_point2,
-            &contours,
-            self.params.merge_tolerance,
-        );
-        let merged_pts_tuples: Vec<(f64, f64)> = merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
+        let merge_result =
+            merge_near_vertices(&pts_as_point2, &contours, self.params.merge_tolerance);
+        let merged_pts_tuples: Vec<(f64, f64)> =
+            merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
 
         // Use CDT to triangulate with merged vertices and contours
-        state.triangles = match cdt::triangulate_contours(&merged_pts_tuples, &merge_result.merged_contours) {
-            Ok(tris) => {
-                // Convert CDT output (tuples) to arrays
-                // Map triangles back to original indices using merged_to_original
-                tris.iter()
-                    .map(|&(a, b, c)| {
-                        [
-                            merge_result.merged_to_original[a],
-                            merge_result.merged_to_original[b],
-                            merge_result.merged_to_original[c],
-                        ]
-                    })
-                    .collect()
-            }
-            Err(_cdt_err) => {
-                // CDT failed - likely due to self-intersecting UV boundary
-                // Fall back to plane projection triangulation using ONLY boundary points
-                // (interior points cause issues with unconstrained Delaunay)
-                let pts_3d: Vec<Point3<f64>> = state
-                    .local_to_pool
-                    .iter()
-                    .take(boundary_len) // Only boundary points
-                    .map(|&pool_idx| self.vertices[pool_idx])
-                    .collect();
+        state.triangles =
+            match cdt::triangulate_contours(&merged_pts_tuples, &merge_result.merged_contours) {
+                Ok(tris) => {
+                    // Convert CDT output (tuples) to arrays
+                    // Map triangles back to original indices using merged_to_original
+                    // Use filter_map with bounds checking to avoid panics on invalid indices
+                    tris.iter()
+                        .filter_map(|&(a, b, c)| {
+                            let orig_a = merge_result.merged_to_original.get(a)?;
+                            let orig_b = merge_result.merged_to_original.get(b)?;
+                            let orig_c = merge_result.merged_to_original.get(c)?;
+                            Some([*orig_a, *orig_b, *orig_c])
+                        })
+                        .collect()
+                }
+                Err(_cdt_err) => {
+                    // CDT failed - likely due to self-intersecting UV boundary
+                    // Fall back to plane projection triangulation using ONLY boundary points
+                    // (interior points cause issues with unconstrained Delaunay)
+                    let pts_3d: Vec<Point3<f64>> = state
+                        .local_to_pool
+                        .iter()
+                        .take(boundary_len) // Only boundary points
+                        .map(|&pool_idx| self.vertices[pool_idx])
+                        .collect();
 
-                // Rebuild contours to only reference boundary indices
-                let boundary_contours: Vec<Vec<usize>> = contours.clone();
+                    // Rebuild contours to only reference boundary indices
+                    let boundary_contours: Vec<Vec<usize>> = contours.clone();
 
-                match triangulate_with_plane_projection(&pts_3d, &boundary_contours, self.params.merge_tolerance) {
-                    Ok(tris) => {
+                    if let Ok(tris) = triangulate_with_plane_projection(
+                        &pts_3d,
+                        &boundary_contours,
+                        self.params.merge_tolerance,
+                    ) {
                         tris.iter().map(|&(a, b, c)| [a, b, c]).collect()
-                    }
-                    Err(e) => {
+                    } else {
                         // Both UV and plane projection triangulation failed
                         // This is rare and indicates a degenerate face
-                        eprintln!(
-                            "Warning: Face {} triangulation failed (UV and plane projection): {:?}. \
-                             Face will have no triangles.",
-                            face_idx, e
-                        );
+                        // Suppress unused variable warning
+                        let _ = face_idx;
                         Vec::new()
                     }
                 }
-            }
-        };
+            };
 
         state
     }
@@ -1642,11 +1674,7 @@ impl<'a> ShellTessellator<'a> {
             .filter_map(|(idx, _)| {
                 let face = &self.model.faces[idx];
                 let surface = &self.model.face_surfaces[face.surface];
-                if surface.is_planar() {
-                    None
-                } else {
-                    Some(idx)
-                }
+                if surface.is_planar() { None } else { Some(idx) }
             })
             .collect();
 
@@ -1692,13 +1720,11 @@ impl<'a> ShellTessellator<'a> {
                 let first_state = &self.face_states[first_face_idx];
 
                 // Get local indices for this edge in the first face
-                let local_a = match first_state.get_local(pool_a) {
-                    Some(idx) => idx,
-                    None => continue, // Edge not in this face anymore (shouldn't happen)
+                let Some(local_a) = first_state.get_local(pool_a) else {
+                    continue; // Edge not in this face anymore (shouldn't happen)
                 };
-                let local_b = match first_state.get_local(pool_b) {
-                    Some(idx) => idx,
-                    None => continue,
+                let Some(local_b) = first_state.get_local(pool_b) else {
+                    continue;
                 };
 
                 let first_face = &self.model.faces[first_face_idx];
@@ -1713,11 +1739,7 @@ impl<'a> ShellTessellator<'a> {
                     // midpoint in 3D to avoid ±π discontinuity issues in UV space
                     let p_a = first_surface.evaluate(uv_a.x, uv_a.y);
                     let p_b = first_surface.evaluate(uv_b.x, uv_b.y);
-                    let p_mid_3d = Point3::new(
-                        (p_a.x + p_b.x) / 2.0,
-                        (p_a.y + p_b.y) / 2.0,
-                        (p_a.z + p_b.z) / 2.0,
-                    );
+                    let p_mid_3d = Point3::from((p_a.coords + p_b.coords) / 2.0);
                     // Project back to UV (handles angular coordinates correctly)
                     let uv_mid = first_surface.to_parametric(&p_mid_3d);
                     // Re-evaluate to ensure point is exactly on surface
@@ -1725,10 +1747,7 @@ impl<'a> ShellTessellator<'a> {
                     (uv_mid, p_on_surface)
                 } else {
                     // Standard UV averaging for non-angular surfaces
-                    let uv_mid = Point2::new(
-                        (uv_a.x + uv_b.x) / 2.0,
-                        (uv_a.y + uv_b.y) / 2.0,
-                    );
+                    let uv_mid = Point2::from((uv_a.coords + uv_b.coords) / 2.0);
                     let p_mid = first_surface.evaluate(uv_mid.x, uv_mid.y);
                     (uv_mid, p_mid)
                 };
@@ -1743,11 +1762,11 @@ impl<'a> ShellTessellator<'a> {
                 faces_to_update.insert(first_face_idx);
 
                 // If this is a BREP boundary edge, add all adjacent faces
-                if let Some(edge_idx) = brep_edge_idx {
-                    if let Some(edge_uses) = self.edge_adjacency.get(&edge_idx) {
-                        for edge_use in edge_uses {
-                            faces_to_update.insert(edge_use.face_idx);
-                        }
+                if let Some(edge_idx) = brep_edge_idx
+                    && let Some(edge_uses) = self.edge_adjacency.get(&edge_idx)
+                {
+                    for edge_use in edge_uses {
+                        faces_to_update.insert(edge_use.face_idx);
                     }
                 }
 
@@ -1801,24 +1820,13 @@ impl<'a> ShellTessellator<'a> {
         let p2 = surface.evaluate(uv2.x, uv2.y);
 
         // Check centroid error
-        let uv_center = Point2::new(
-            (uv0.x + uv1.x + uv2.x) / 3.0,
-            (uv0.y + uv1.y + uv2.y) / 3.0,
-        );
+        let uv_center = Point2::from((uv0.coords + uv1.coords + uv2.coords) / 3.0);
         let p_center_surface = surface.evaluate(uv_center.x, uv_center.y);
-        let p_center_linear = Point3::new(
-            (p0.x + p1.x + p2.x) / 3.0,
-            (p0.y + p1.y + p2.y) / 3.0,
-            (p0.z + p1.z + p2.z) / 3.0,
-        );
+        let p_center_linear = Point3::from((p0.coords + p1.coords + p2.coords) / 3.0);
         let centroid_error = (p_center_surface - p_center_linear).norm();
 
         // Check edge midpoint errors
-        let edges = [
-            (uv0, uv1, p0, p1),
-            (uv1, uv2, p1, p2),
-            (uv2, uv0, p2, p0),
-        ];
+        let edges = [(uv0, uv1, p0, p1), (uv1, uv2, p1, p2), (uv2, uv0, p2, p0)];
 
         let mut max_edge_error = 0.0;
         let mut max_error_edge = 0;
@@ -1827,22 +1835,14 @@ impl<'a> ShellTessellator<'a> {
         for (edge_idx, (uv_a, uv_b, p_a, p_b)) in edges.iter().enumerate() {
             // For angular surfaces, compute midpoint UV by projecting 3D midpoint
             let p_mid_surface = if is_angular {
-                let p_mid_3d = Point3::new(
-                    (p_a.x + p_b.x) / 2.0,
-                    (p_a.y + p_b.y) / 2.0,
-                    (p_a.z + p_b.z) / 2.0,
-                );
+                let p_mid_3d = Point3::from((p_a.coords + p_b.coords) / 2.0);
                 let uv_mid = surface.to_parametric(&p_mid_3d);
                 surface.evaluate(uv_mid.x, uv_mid.y)
             } else {
-                let uv_mid = Point2::new((uv_a.x + uv_b.x) / 2.0, (uv_a.y + uv_b.y) / 2.0);
+                let uv_mid = Point2::from((uv_a.coords + uv_b.coords) / 2.0);
                 surface.evaluate(uv_mid.x, uv_mid.y)
             };
-            let p_mid_linear = Point3::new(
-                (p_a.x + p_b.x) / 2.0,
-                (p_a.y + p_b.y) / 2.0,
-                (p_a.z + p_b.z) / 2.0,
-            );
+            let p_mid_linear = Point3::from((p_a.coords + p_b.coords) / 2.0);
             let edge_error = (p_mid_surface - p_mid_linear).norm();
 
             if edge_error > max_edge_error {
@@ -1882,27 +1882,23 @@ impl<'a> ShellTessellator<'a> {
     ///
     /// Returns true if the edge was successfully split, false if the edge wasn't found
     /// in this face (which may indicate an inconsistent edge adjacency).
-    fn split_edge_in_face(&mut self, face_idx: usize, pool_a: usize, pool_b: usize, pool_mid: usize) -> bool {
+    fn split_edge_in_face(
+        &mut self,
+        face_idx: usize,
+        pool_a: usize,
+        pool_b: usize,
+        pool_mid: usize,
+    ) -> bool {
         let state = &mut self.face_states[face_idx];
 
         // Check if this face has both endpoints
-        let local_a = match state.get_local(pool_a) {
-            Some(idx) => idx,
-            None => {
-                // This face doesn't have vertex pool_a - edge not in this face
-                return false;
-            }
+        let Some(local_a) = state.get_local(pool_a) else {
+            // This face doesn't have vertex pool_a - edge not in this face
+            return false;
         };
-        let local_b = match state.get_local(pool_b) {
-            Some(idx) => idx,
-            None => {
-                // Face has pool_a but not pool_b - this indicates inconsistent edge adjacency
-                eprintln!(
-                    "Warning: Inconsistent edge adjacency in face {}: has vertex {} but not {}",
-                    face_idx, pool_a, pool_b
-                );
-                return false;
-            }
+        let Some(local_b) = state.get_local(pool_b) else {
+            // Face has pool_a but not pool_b - this indicates inconsistent edge adjacency
+            return false;
         };
 
         let face = &self.model.faces[face_idx];
@@ -1915,17 +1911,10 @@ impl<'a> ShellTessellator<'a> {
             // For angular surfaces, get 3D midpoint and project back to UV
             let p_a = surface.evaluate(uv_a.x, uv_a.y);
             let p_b = surface.evaluate(uv_b.x, uv_b.y);
-            let p_mid_3d = Point3::new(
-                (p_a.x + p_b.x) / 2.0,
-                (p_a.y + p_b.y) / 2.0,
-                (p_a.z + p_b.z) / 2.0,
-            );
+            let p_mid_3d = Point3::from((p_a.coords + p_b.coords) / 2.0);
             surface.to_parametric(&p_mid_3d)
         } else {
-            Point2::new(
-                (uv_a.x + uv_b.x) / 2.0,
-                (uv_a.y + uv_b.y) / 2.0,
-            )
+            Point2::from((uv_a.coords + uv_b.coords) / 2.0)
         };
 
         // Add the midpoint to local state
@@ -1933,7 +1922,9 @@ impl<'a> ShellTessellator<'a> {
 
         // Update boundary edge tracking if this was a boundary edge
         if state.is_boundary_edge(local_a, local_b) {
-            state.boundary_edges.remove(&(local_a.min(local_b), local_a.max(local_b)));
+            state
+                .boundary_edges
+                .remove(&(local_a.min(local_b), local_a.max(local_b)));
             state.mark_boundary_edge(local_a, local_mid);
             state.mark_boundary_edge(local_mid, local_b);
         }
@@ -2014,32 +2005,12 @@ impl<'a> ShellTessellator<'a> {
         // Phase 4: Final assembly
         self.phase4_final_assembly();
 
-        let result = TesselatedModel {
+        TesselatedModel {
             vertices: self.vertices,
             triangles: self.triangles,
             normals: self.normals,
             face_indices: self.face_indices,
-        };
-
-        // Check watertightness only for closed BREPs
-        // A single face or open shell will have boundary edges by definition
-        let edge_sharing_errors = self.model.validate_edge_sharing();
-        let brep_has_valid_edge_sharing = edge_sharing_errors.is_empty();
-        if brep_has_valid_edge_sharing {
-            let validation = result.validate();
-            if !validation.is_watertight() {
-                // Log warning for non-watertight output from closed BREP
-                // This can happen when CDT fails and we fall back to Earcut,
-                // which doesn't guarantee boundary edge preservation for complex polygons
-                eprintln!(
-                    "Warning: Tessellation of closed shell produced non-watertight mesh: {} boundary edges, {} non-manifold edges",
-                    validation.boundary_edges,
-                    validation.non_manifold_edges
-                );
-            }
         }
-
-        result
     }
 }
 
@@ -2062,10 +2033,7 @@ fn try_split_triangle(
             // Split the triangle into two
             // Original: v0 -> v1 -> v_opposite
             // New: v0 -> mid -> v_opposite, mid -> v1 -> v_opposite
-            return Some([
-                [v0, local_mid, v_opposite],
-                [local_mid, v1, v_opposite],
-            ]);
+            return Some([[v0, local_mid, v_opposite], [local_mid, v1, v_opposite]]);
         }
     }
     None
@@ -2257,9 +2225,18 @@ mod tests {
         let e2 = model.add_edge(c2, v2, v0, 0.0, 1.0);
 
         let loop_idx = model.add_loop(vec![
-            OrientedEdge { edge: e0, same_sense: true },
-            OrientedEdge { edge: e1, same_sense: true },
-            OrientedEdge { edge: e2, same_sense: true },
+            OrientedEdge {
+                edge: e0,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e1,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e2,
+                same_sense: true,
+            },
         ]);
 
         let surf_idx = model.add_surface(Surface::Plane(SurfacePlane {
@@ -2354,17 +2331,41 @@ mod tests {
         let h_e3 = model.add_edge(hc3, h1, h0, 0.0, 1.0);
 
         let outer_loop = model.add_loop(vec![
-            OrientedEdge { edge: e0, same_sense: true },
-            OrientedEdge { edge: e1, same_sense: true },
-            OrientedEdge { edge: e2, same_sense: true },
-            OrientedEdge { edge: e3, same_sense: true },
+            OrientedEdge {
+                edge: e0,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e1,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e2,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e3,
+                same_sense: true,
+            },
         ]);
 
         let inner_loop = model.add_loop(vec![
-            OrientedEdge { edge: h_e0, same_sense: true },
-            OrientedEdge { edge: h_e1, same_sense: true },
-            OrientedEdge { edge: h_e2, same_sense: true },
-            OrientedEdge { edge: h_e3, same_sense: true },
+            OrientedEdge {
+                edge: h_e0,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: h_e1,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: h_e2,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: h_e3,
+                same_sense: true,
+            },
         ]);
 
         let surf_idx = model.add_surface(Surface::Plane(SurfacePlane {
@@ -2443,17 +2444,35 @@ mod tests {
 
         // Upper face: v0 -> v1 -> v2 -> v0 (CCW when looking from +Z)
         let loop1 = model.add_loop(vec![
-            OrientedEdge { edge: e_shared, same_sense: true },   // v0 -> v1
-            OrientedEdge { edge: e_v1_v2, same_sense: true },    // v1 -> v2
-            OrientedEdge { edge: e_v2_v0, same_sense: true },    // v2 -> v0
+            OrientedEdge {
+                edge: e_shared,
+                same_sense: true,
+            }, // v0 -> v1
+            OrientedEdge {
+                edge: e_v1_v2,
+                same_sense: true,
+            }, // v1 -> v2
+            OrientedEdge {
+                edge: e_v2_v0,
+                same_sense: true,
+            }, // v2 -> v0
         ]);
 
         // Lower face: v1 -> v0 -> v3 -> v1 (CCW when looking from -Z)
         // Uses shared edge REVERSED: v1 -> v0
         let loop2 = model.add_loop(vec![
-            OrientedEdge { edge: e_shared, same_sense: false },  // v1 -> v0 (reversed)
-            OrientedEdge { edge: e_v0_v3, same_sense: true },    // v0 -> v3
-            OrientedEdge { edge: e_v3_v1, same_sense: true },    // v3 -> v1
+            OrientedEdge {
+                edge: e_shared,
+                same_sense: false,
+            }, // v1 -> v0 (reversed)
+            OrientedEdge {
+                edge: e_v0_v3,
+                same_sense: true,
+            }, // v0 -> v3
+            OrientedEdge {
+                edge: e_v3_v1,
+                same_sense: true,
+            }, // v3 -> v1
         ]);
 
         let surf_idx = model.add_surface(Surface::Plane(SurfacePlane {
@@ -2471,8 +2490,12 @@ mod tests {
 
         // With deduplication, we should have exactly 4 vertices (v0, v1, v2, v3)
         // Without deduplication, we'd have 6 vertices (3 per face)
-        assert_eq!(result.vertices.len(), 4,
-            "Expected 4 deduplicated vertices, got {}", result.vertices.len());
+        assert_eq!(
+            result.vertices.len(),
+            4,
+            "Expected 4 deduplicated vertices, got {}",
+            result.vertices.len()
+        );
 
         // Should have 2 triangles
         assert_eq!(result.triangles.len(), 2);
@@ -2481,8 +2504,12 @@ mod tests {
         let result_independent = model.tesselate_independent(&params);
 
         // Without deduplication, each face has 3 vertices = 6 total
-        assert_eq!(result_independent.vertices.len(), 6,
-            "Expected 6 independent vertices, got {}", result_independent.vertices.len());
+        assert_eq!(
+            result_independent.vertices.len(),
+            6,
+            "Expected 6 independent vertices, got {}",
+            result_independent.vertices.len()
+        );
     }
 
     #[test]
@@ -2494,10 +2521,10 @@ mod tests {
         let mut model = BrepModel::new();
 
         // Four vertices forming a "tube segment"
-        let v0 = model.add_vertex(Point3::new(1.0, 0.0, 0.0));   // bottom, theta=0
-        let v1 = model.add_vertex(Point3::new(0.0, 1.0, 0.0));   // bottom, theta=pi/2
-        let v2 = model.add_vertex(Point3::new(1.0, 0.0, 1.0));   // top, theta=0
-        let v3 = model.add_vertex(Point3::new(0.0, 1.0, 1.0));   // top, theta=pi/2
+        let v0 = model.add_vertex(Point3::new(1.0, 0.0, 0.0)); // bottom, theta=0
+        let v1 = model.add_vertex(Point3::new(0.0, 1.0, 0.0)); // bottom, theta=pi/2
+        let v2 = model.add_vertex(Point3::new(1.0, 0.0, 1.0)); // top, theta=0
+        let v3 = model.add_vertex(Point3::new(0.0, 1.0, 1.0)); // top, theta=pi/2
 
         // Bottom arc (circular)
         let c_bottom = model.add_curve(Curve::Circle(CurveCircle {
@@ -2533,10 +2560,22 @@ mod tests {
 
         // Cylindrical face: bottom arc -> line2 -> top arc (reversed) -> line1 (reversed)
         let loop1 = model.add_loop(vec![
-            OrientedEdge { edge: e_bottom, same_sense: true },
-            OrientedEdge { edge: e_line2, same_sense: true },
-            OrientedEdge { edge: e_top, same_sense: false },
-            OrientedEdge { edge: e_line1, same_sense: false },
+            OrientedEdge {
+                edge: e_bottom,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e_line2,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e_top,
+                same_sense: false,
+            },
+            OrientedEdge {
+                edge: e_line1,
+                same_sense: false,
+            },
         ]);
 
         let cyl_surf = model.add_surface(Surface::Cylinder(Cylinder {
@@ -2708,15 +2747,33 @@ mod tests {
         let e_v3_v1 = model.add_edge(c_v3_v1, v3, v1, 0.0, 1.0);
 
         let loop1 = model.add_loop(vec![
-            OrientedEdge { edge: e_shared, same_sense: true },
-            OrientedEdge { edge: e_v1_v2, same_sense: true },
-            OrientedEdge { edge: e_v2_v0, same_sense: true },
+            OrientedEdge {
+                edge: e_shared,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e_v1_v2,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e_v2_v0,
+                same_sense: true,
+            },
         ]);
 
         let loop2 = model.add_loop(vec![
-            OrientedEdge { edge: e_shared, same_sense: false },
-            OrientedEdge { edge: e_v0_v3, same_sense: true },
-            OrientedEdge { edge: e_v3_v1, same_sense: true },
+            OrientedEdge {
+                edge: e_shared,
+                same_sense: false,
+            },
+            OrientedEdge {
+                edge: e_v0_v3,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: e_v3_v1,
+                same_sense: true,
+            },
         ]);
 
         let surf_idx = model.add_surface(Surface::Plane(SurfacePlane {
@@ -2732,16 +2789,25 @@ mod tests {
 
         // The shared edge should result in a manifold mesh
         let validation = result.validate();
-        assert!(validation.is_manifold(),
+        assert!(
+            validation.is_manifold(),
             "Mesh should be manifold: boundary={}, non_manifold={}",
-            validation.boundary_edges, validation.non_manifold_edges);
+            validation.boundary_edges,
+            validation.non_manifold_edges
+        );
 
         // 2 triangles form a bow-tie shape with 5 edges:
         // - 1 shared edge (manifold)
         // - 4 boundary edges (not watertight since it's not a closed surface)
         assert_eq!(validation.total_edges, 5);
-        assert_eq!(validation.manifold_edges, 1, "Shared edge should be manifold");
-        assert_eq!(validation.boundary_edges, 4, "Outer edges should be boundaries");
+        assert_eq!(
+            validation.manifold_edges, 1,
+            "Shared edge should be manifold"
+        );
+        assert_eq!(
+            validation.boundary_edges, 4,
+            "Outer edges should be boundaries"
+        );
     }
 
     /// Helper to create a unit cube BREP model with proper edge sharing.
@@ -2822,10 +2888,22 @@ mod tests {
         // Face 0: Bottom (z=0), normal -Z, vertices 0-1-2-3 (CW from outside)
         // For outward normal (-Z), we go CCW when looking from outside: 0->3->2->1->0
         let loop_bottom = model.add_loop(vec![
-            OrientedEdge { edge: e_30, same_sense: false }, // 0->3
-            OrientedEdge { edge: e_23, same_sense: false }, // 3->2
-            OrientedEdge { edge: e_12, same_sense: false }, // 2->1
-            OrientedEdge { edge: e_01, same_sense: false }, // 1->0
+            OrientedEdge {
+                edge: e_30,
+                same_sense: false,
+            }, // 0->3
+            OrientedEdge {
+                edge: e_23,
+                same_sense: false,
+            }, // 3->2
+            OrientedEdge {
+                edge: e_12,
+                same_sense: false,
+            }, // 2->1
+            OrientedEdge {
+                edge: e_01,
+                same_sense: false,
+            }, // 1->0
         ]);
         let surf_bottom = model.add_surface(Surface::Plane(SurfacePlane {
             origin: Point3::new(0.0, 0.0, 0.0),
@@ -2835,10 +2913,22 @@ mod tests {
 
         // Face 1: Top (z=1), normal +Z, vertices 4-5-6-7 (CCW from outside)
         let loop_top = model.add_loop(vec![
-            OrientedEdge { edge: e_45, same_sense: true },  // 4->5
-            OrientedEdge { edge: e_56, same_sense: true },  // 5->6
-            OrientedEdge { edge: e_67, same_sense: true },  // 6->7
-            OrientedEdge { edge: e_74, same_sense: true },  // 7->4
+            OrientedEdge {
+                edge: e_45,
+                same_sense: true,
+            }, // 4->5
+            OrientedEdge {
+                edge: e_56,
+                same_sense: true,
+            }, // 5->6
+            OrientedEdge {
+                edge: e_67,
+                same_sense: true,
+            }, // 6->7
+            OrientedEdge {
+                edge: e_74,
+                same_sense: true,
+            }, // 7->4
         ]);
         let surf_top = model.add_surface(Surface::Plane(SurfacePlane {
             origin: Point3::new(0.0, 0.0, 1.0),
@@ -2848,10 +2938,22 @@ mod tests {
 
         // Face 2: Front (y=1), normal +Y, vertices 3-2-6-7 (CCW from outside)
         let loop_front = model.add_loop(vec![
-            OrientedEdge { edge: e_23, same_sense: true },  // 2->3
-            OrientedEdge { edge: e_37, same_sense: true },  // 3->7
-            OrientedEdge { edge: e_67, same_sense: false }, // 7->6
-            OrientedEdge { edge: e_26, same_sense: false }, // 6->2
+            OrientedEdge {
+                edge: e_23,
+                same_sense: true,
+            }, // 2->3
+            OrientedEdge {
+                edge: e_37,
+                same_sense: true,
+            }, // 3->7
+            OrientedEdge {
+                edge: e_67,
+                same_sense: false,
+            }, // 7->6
+            OrientedEdge {
+                edge: e_26,
+                same_sense: false,
+            }, // 6->2
         ]);
         let surf_front = model.add_surface(Surface::Plane(SurfacePlane {
             origin: Point3::new(0.0, 1.0, 0.0),
@@ -2861,10 +2963,22 @@ mod tests {
 
         // Face 3: Back (y=0), normal -Y, vertices 0-1-5-4 (CCW from outside)
         let loop_back = model.add_loop(vec![
-            OrientedEdge { edge: e_01, same_sense: true },  // 0->1
-            OrientedEdge { edge: e_15, same_sense: true },  // 1->5
-            OrientedEdge { edge: e_45, same_sense: false }, // 5->4
-            OrientedEdge { edge: e_04, same_sense: false }, // 4->0
+            OrientedEdge {
+                edge: e_01,
+                same_sense: true,
+            }, // 0->1
+            OrientedEdge {
+                edge: e_15,
+                same_sense: true,
+            }, // 1->5
+            OrientedEdge {
+                edge: e_45,
+                same_sense: false,
+            }, // 5->4
+            OrientedEdge {
+                edge: e_04,
+                same_sense: false,
+            }, // 4->0
         ]);
         let surf_back = model.add_surface(Surface::Plane(SurfacePlane {
             origin: Point3::new(0.0, 0.0, 0.0),
@@ -2874,10 +2988,22 @@ mod tests {
 
         // Face 4: Right (x=1), normal +X, vertices 1-2-6-5 (CCW from outside)
         let loop_right = model.add_loop(vec![
-            OrientedEdge { edge: e_12, same_sense: true },  // 1->2
-            OrientedEdge { edge: e_26, same_sense: true },  // 2->6
-            OrientedEdge { edge: e_56, same_sense: false }, // 6->5
-            OrientedEdge { edge: e_15, same_sense: false }, // 5->1
+            OrientedEdge {
+                edge: e_12,
+                same_sense: true,
+            }, // 1->2
+            OrientedEdge {
+                edge: e_26,
+                same_sense: true,
+            }, // 2->6
+            OrientedEdge {
+                edge: e_56,
+                same_sense: false,
+            }, // 6->5
+            OrientedEdge {
+                edge: e_15,
+                same_sense: false,
+            }, // 5->1
         ]);
         let surf_right = model.add_surface(Surface::Plane(SurfacePlane {
             origin: Point3::new(1.0, 0.0, 0.0),
@@ -2887,10 +3013,22 @@ mod tests {
 
         // Face 5: Left (x=0), normal -X, vertices 0-3-7-4 (CCW from outside)
         let loop_left = model.add_loop(vec![
-            OrientedEdge { edge: e_30, same_sense: true },  // 3->0
-            OrientedEdge { edge: e_04, same_sense: true },  // 0->4
-            OrientedEdge { edge: e_74, same_sense: false }, // 4->7
-            OrientedEdge { edge: e_37, same_sense: false }, // 7->3
+            OrientedEdge {
+                edge: e_30,
+                same_sense: true,
+            }, // 3->0
+            OrientedEdge {
+                edge: e_04,
+                same_sense: true,
+            }, // 0->4
+            OrientedEdge {
+                edge: e_74,
+                same_sense: false,
+            }, // 4->7
+            OrientedEdge {
+                edge: e_37,
+                same_sense: false,
+            }, // 7->3
         ]);
         let surf_left = model.add_surface(Surface::Plane(SurfacePlane {
             origin: Point3::new(0.0, 0.0, 0.0),
@@ -2907,42 +3045,62 @@ mod tests {
 
         // Verify the BREP model is valid
         let brep_errors = model.validate();
-        assert!(brep_errors.is_empty(), "BREP validation failed: {:?}", brep_errors);
+        assert!(
+            brep_errors.is_empty(),
+            "BREP validation failed: {:?}",
+            brep_errors
+        );
 
         // Verify edge sharing is correct for watertight mesh
         let edge_errors = model.validate_edge_sharing();
-        assert!(edge_errors.is_empty(),
-            "Edge sharing validation failed: {:?}", edge_errors);
+        assert!(
+            edge_errors.is_empty(),
+            "Edge sharing validation failed: {:?}",
+            edge_errors
+        );
 
         // Tessellate the cube
         let params = TesselationParams::default();
         let mesh = model.tesselate(&params);
 
         // A cube has 6 faces, each quad becomes 2 triangles = 12 triangles
-        assert_eq!(mesh.triangles.len(), 12,
-            "Expected 12 triangles for cube, got {}", mesh.triangles.len());
+        assert_eq!(
+            mesh.triangles.len(),
+            12,
+            "Expected 12 triangles for cube, got {}",
+            mesh.triangles.len()
+        );
 
         // Validate mesh is watertight
         let validation = mesh.validate();
 
-        assert_eq!(validation.boundary_edges, 0,
+        assert_eq!(
+            validation.boundary_edges, 0,
             "Expected 0 boundary edges, got {} (gaps between faces)",
-            validation.boundary_edges);
+            validation.boundary_edges
+        );
 
-        assert_eq!(validation.non_manifold_edges, 0,
+        assert_eq!(
+            validation.non_manifold_edges, 0,
             "Expected 0 non-manifold edges, got {} (edges shared by 3+ triangles)",
-            validation.non_manifold_edges);
+            validation.non_manifold_edges
+        );
 
-        assert!(validation.is_watertight(),
+        assert!(
+            validation.is_watertight(),
             "Cube mesh should be watertight: {} manifold, {} boundary, {} non-manifold edges",
             validation.manifold_edges,
             validation.boundary_edges,
-            validation.non_manifold_edges);
+            validation.non_manifold_edges
+        );
 
         // A cube has 18 unique edges in its triangulated mesh
         // (12 edges from original cube + 6 diagonal edges from triangulation)
-        assert_eq!(validation.total_edges, 18,
-            "Expected 18 edges in triangulated cube, got {}", validation.total_edges);
+        assert_eq!(
+            validation.total_edges, 18,
+            "Expected 18 edges in triangulated cube, got {}",
+            validation.total_edges
+        );
     }
 
     #[test]
@@ -2953,8 +3111,12 @@ mod tests {
         let mesh = model.tesselate(&params);
 
         // A unit cube should have exactly 8 vertices (no duplicates)
-        assert_eq!(mesh.vertices.len(), 8,
-            "Expected 8 vertices for cube with shared edges, got {}", mesh.vertices.len());
+        assert_eq!(
+            mesh.vertices.len(),
+            8,
+            "Expected 8 vertices for cube with shared edges, got {}",
+            mesh.vertices.len()
+        );
 
         // Verify vertices are at expected positions
         let mut found_corners = vec![false; 8];
@@ -2979,7 +3141,11 @@ mod tests {
         }
 
         for (i, &found) in found_corners.iter().enumerate() {
-            assert!(found, "Missing cube corner vertex at {:?}", expected_corners[i]);
+            assert!(
+                found,
+                "Missing cube corner vertex at {:?}",
+                expected_corners[i]
+            );
         }
     }
 

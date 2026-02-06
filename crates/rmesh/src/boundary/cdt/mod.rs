@@ -19,10 +19,10 @@
 #![allow(dead_code)]
 
 mod contour;
-mod predicates;
 mod half;
 mod hull;
 mod indexes;
+mod predicates;
 mod triangulate;
 
 pub use triangulate::Triangulation;
@@ -94,9 +94,12 @@ pub fn triangulate_points(pts: &[Point]) -> Result<Vec<(usize, usize, usize)>, E
 /// Triangulates a set of contours, given as indexed paths into the point list.
 /// Each contour must be closed (i.e. the last point in the contour must equal
 /// the first point), otherwise [`Error::OpenContour`] will be returned.
-pub fn triangulate_contours<V>(pts: &[Point], contours: &[V])
-    -> Result<Vec<(usize, usize, usize)>, Error>
-    where for<'b> &'b V: IntoIterator<Item=&'b usize>
+pub fn triangulate_contours<V>(
+    pts: &[Point],
+    contours: &[V],
+) -> Result<Vec<(usize, usize, usize)>, Error>
+where
+    for<'b> &'b V: IntoIterator<Item = &'b usize>,
 {
     let t = Triangulation::build_from_contours(&pts, contours)?;
     Ok(t.triangles().collect())
@@ -105,9 +108,12 @@ pub fn triangulate_contours<V>(pts: &[Point], contours: &[V])
 /// Triangulates a set of points with certain fixed edges.  The edges are
 /// assumed to form closed boundaries; only triangles within those boundaries
 /// will be returned.
-pub fn triangulate_with_edges<'a, E>(pts: &[Point], edges: E)
-    -> Result<Vec<(usize, usize, usize)>, Error>
-    where E: IntoIterator<Item=&'a (usize, usize)> + Copy + Clone
+pub fn triangulate_with_edges<'a, E>(
+    pts: &[Point],
+    edges: E,
+) -> Result<Vec<(usize, usize, usize)>, Error>
+where
+    E: IntoIterator<Item = &'a (usize, usize)> + Copy + Clone,
 {
     let t = Triangulation::build_with_edges(&pts, edges)?;
     Ok(t.triangles().collect())
@@ -115,9 +121,9 @@ pub fn triangulate_with_edges<'a, E>(pts: &[Point], edges: E)
 
 /// Given a set of points and edges which are known to panic, figures out the
 /// max number of save steps, then saves an SVG right before the panic occurs
-pub fn save_debug_panic<'a, E>(pts: &[Point], edges: E, filename: &str)
-    -> std::io::Result<()>
-    where E: IntoIterator<Item=&'a (usize, usize)> + Copy + Clone + std::panic::UnwindSafe
+pub fn save_debug_panic<'a, E>(pts: &[Point], edges: E, filename: &str) -> std::io::Result<()>
+where
+    E: IntoIterator<Item = &'a (usize, usize)> + Copy + Clone + std::panic::UnwindSafe,
 {
     let mut safe_steps = 0;
     loop {
@@ -137,8 +143,8 @@ pub fn save_debug_panic<'a, E>(pts: &[Point], edges: E, filename: &str)
     }
 
     // This will still panic if we can't *construct* the initial triangulation
-    let mut t = Triangulation::new_with_edges(pts, edges)
-        .expect("Could not build CDT triangulation");
+    let mut t =
+        Triangulation::new_with_edges(pts, edges).expect("Could not build CDT triangulation");
     for _ in 0..safe_steps {
         t.step().expect("Step failed");
     }

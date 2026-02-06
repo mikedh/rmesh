@@ -2,7 +2,7 @@
 
 use super::ap214::Entity;
 use super::id::Id;
-use super::parse::{into_blocks, find_data_section, strip_flatten};
+use super::parse::{find_data_section, into_blocks, strip_flatten};
 
 /// A parsed STEP file containing a vector of entities indexed by ID.
 #[derive(Debug)]
@@ -74,10 +74,10 @@ pub trait FromEntity<'a> {
 fn parse_entity_decl(s: &[u8]) -> Result<(&[u8], (usize, Entity<'_>)), ()> {
     let s = std::str::from_utf8(s).map_err(|_| ())?;
 
+    use super::parse::Parse;
+    use nom::character::complete::char;
     use nom::combinator::map;
     use nom::sequence::tuple;
-    use nom::character::complete::char;
-    use super::parse::Parse;
 
     let result = map(
         tuple((Id::<()>::parse, char('='), Entity::parse)),
@@ -94,8 +94,8 @@ fn parse_entity_decl(s: &[u8]) -> Result<(&[u8], (usize, Entity<'_>)), ()> {
 fn parse_entity_fallback(s: &[u8]) -> Result<(&[u8], (usize, Entity<'_>)), ()> {
     let s = std::str::from_utf8(s).map_err(|_| ())?;
 
-    use nom::combinator::map;
     use super::parse::Parse;
+    use nom::combinator::map;
 
     let result = map(Id::<()>::parse, |i| (i.0, Entity::_FailedToParse))(s);
 

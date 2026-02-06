@@ -1,25 +1,25 @@
 use memchr::{memchr, memchr_iter};
 use nom::{
-    branch::{alt},
+    branch::alt,
     character::complete::{alpha1, multispace0},
-    combinator::{map, map_opt, recognize, opt, not, peek},
+    combinator::{map, map_opt, not, opt, peek, recognize},
     error::*,
-    multi::{fold_many1, fold_many0, many0_count, separated_list0, separated_list1, many0, many1},
-    sequence::{delimited, pair, preceded, tuple, terminated},
+    multi::{fold_many0, fold_many1, many0, many0_count, many1, separated_list0, separated_list1},
+    sequence::{delimited, pair, preceded, terminated, tuple},
 };
 
 pub type IResult<'a, U> = nom::IResult<&'a str, U, nom::error::VerboseError<&'a str>>;
 
 fn build_err<'a, U>(s: &'a str, msg: &'static str) -> IResult<'a, U> {
-    Err(nom::Err::Error(
-        VerboseError {
-            errors: vec![(s, VerboseErrorKind::Context(msg))]
-        }))
+    Err(nom::Err::Error(VerboseError {
+        errors: vec![(s, VerboseErrorKind::Context(msg))],
+    }))
 }
 
 /// Returns a parser which runs `p` then consumes all whitespace
 fn ws<'a, U, F>(p: F) -> impl FnMut(&'a str) -> IResult<'a, U>
-    where F: FnMut(&'a str) -> IResult<'a, U>
+where
+    F: FnMut(&'a str) -> IResult<'a, U>,
 {
     terminated(p, multispace0)
 }
@@ -38,27 +38,32 @@ fn tag<'a>(s: &'a str) -> impl FnMut(&'a str) -> IResult<&'a str> {
 /// a letter.  This avoids cases like `generic_expression` being parsed as
 /// `generic`, `_expression`.
 fn kw<'a>(s: &'a str) -> impl FnMut(&'a str) -> IResult<&'a str> {
-    ws(terminated(nom::bytes::complete::tag(s),
-                  not(alt((letter, digit, char('_'))))))
+    ws(terminated(
+        nom::bytes::complete::tag(s),
+        not(alt((letter, digit, char('_')))),
+    ))
 }
 
 /// Returns a parser which recognizes '(' p ')' with optional whitespace
 fn parens<'a, U, F>(p: F) -> impl FnMut(&'a str) -> IResult<'a, U>
-    where F: FnMut(&'a str) -> IResult<'a, U>
+where
+    F: FnMut(&'a str) -> IResult<'a, U>,
 {
     delimited(char('('), ws(p), char(')'))
 }
 
 /// Returns a parser for zero or more items p, delimited by c with whitespace
 fn list0<'a, U, F>(c: char, p: F) -> impl FnMut(&'a str) -> IResult<'a, Vec<U>>
-    where F: FnMut(&'a str) -> IResult<'a, U>
+where
+    F: FnMut(&'a str) -> IResult<'a, U>,
 {
     separated_list0(char(c), ws(p))
 }
 
 /// Returns a parser for zero or more items p, delimited by c with whitespace
 fn list1<'a, U, F>(c: char, p: F) -> impl FnMut(&'a str) -> IResult<'a, Vec<U>>
-    where F: FnMut(&'a str) -> IResult<'a, U>
+where
+    F: FnMut(&'a str) -> IResult<'a, U>,
 {
     separated_list1(char(c), ws(p))
 }
@@ -100,9 +105,8 @@ macro_rules! id_type {
     ($a:ident) => {
         #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
         pub struct $a<'a>(pub &'a str);
-    }
+    };
 }
-
 
 /// Remove comments from an EXPRESS file and converts to lower-case.  This
 /// should be run before any parsers.
@@ -119,13 +123,13 @@ pub fn strip_comments_and_lower(data: &[u8]) -> String {
                         break;
                     }
                 }
-            },
+            }
             // Single-line comments
             b'-' if i + 1 < data.len() && data[i + 1] == b'-' => {
                 let newline = memchr(b'\n', &data[i + 2..]);
                 i += newline.unwrap_or(0) + 2;
-            },
-            c => out.push(c.to_ascii_lowercase() as char)
+            }
+            c => out.push(c.to_ascii_lowercase() as char),
         }
         i += 1;
     }
@@ -149,9 +153,9 @@ fn digit(s: &str) -> IResult<char> {
 
 // 126
 fn encoded_character(s: &str) -> IResult<char> {
-    map(recognize(tuple((octet, octet, octet, octet))),
-        |v| std::char::from_u32(u32::from_str_radix(v, 16).unwrap()).unwrap())
-        (s)
+    map(recognize(tuple((octet, octet, octet, octet))), |v| {
+        std::char::from_u32(u32::from_str_radix(v, 16).unwrap()).unwrap()
+    })(s)
 }
 
 // 127
@@ -171,8 +175,12 @@ fn not_paren_star_quote_special(s: &str) -> IResult<char> {
 
 // 134
 fn not_quote(s: &str) -> IResult<char> {
-    alt((not_paren_star_quote_special, letter, digit,
-         nom::character::complete::one_of("()*")))(s)
+    alt((
+        not_paren_star_quote_special,
+        letter,
+        digit,
+        nom::character::complete::one_of("()*"),
+    ))(s)
 }
 
 // 136
@@ -182,8 +190,11 @@ fn octet(s: &str) -> IResult<&str> {
 
 // 139
 fn binary_literal(s: &str) -> IResult<usize> {
-    let bits = fold_many1(alt((char('0'), char('1'))), || 0,
-        |acc, item| acc * 2 + item.to_digit(10).unwrap() as usize);
+    let bits = fold_many1(
+        alt((char('0'), char('1'))),
+        || 0,
+        |acc, item| acc * 2 + item.to_digit(10).unwrap() as usize,
+    );
     preceded(char('%'), bits)(s)
 }
 
@@ -191,9 +202,12 @@ fn binary_literal(s: &str) -> IResult<usize> {
 fn encoded_string_literal(s: &str) -> IResult<String> {
     delimited(
         char('"'),
-        fold_many0(encoded_character, String::new,
-            |mut s: String, c: char| { s.push(c); s }),
-        char('"'))(s)
+        fold_many0(encoded_character, String::new, |mut s: String, c: char| {
+            s.push(c);
+            s
+        }),
+        char('"'),
+    )(s)
 }
 
 // 141 integer_literal = digits .
@@ -215,51 +229,150 @@ fn real_literal(s: &str) -> IResult<f64> {
 pub struct SimpleId<'a>(pub &'a str);
 impl<'a> SimpleId<'a> {
     fn parse(s: &'a str) -> IResult<Self> {
-        let r = ws(map(pair(
-                letter,
-                many0_count(alt((letter, digit, char('_'))))),
-            |(_c, i)| SimpleId(&s[..(i + 1)])))(s)?;
+        let r = ws(map(
+            pair(letter, many0_count(alt((letter, digit, char('_'))))),
+            |(_c, i)| SimpleId(&s[..(i + 1)]),
+        ))(s)?;
         // Refuse to match language keywords
         match r.1.0 {
-            "abs" | "abstract" | "acos" | "aggregate" | "alias" | "and" |
-            "andor" | "array" | "as" | "asin" | "atan" | "bag" | "based_on" |
-            "begin" | "binary" | "blength" | "boolean" | "by" | "case" |
-            "const_e" | "constant" | "cos" | "derive" | "div" | "else" |
-            "end" | "end_case" | "end_constant" | "end_entity" |
-            "end_function" | "end_if" | "end_local" | "end_procedure" |
-            "end_repeat" | "end_rule" | "end_schema" |
-            "end_subtype_constraint escape" | "end_type" | "entity" |
-            "enumeration" | "exists" | "exp" | "extensible" | "false" |
-            "fixed" | "for" | "format" | "from" | "function" | "generic" |
-            "generic_entity list" | "hibound" | "hiindex" | "if" | "in" |
-            "integer" | "inverse" | "length" | "like" | "lobound" | "local" |
-            "log" | "log10" | "log2" | "logical" | "loindex" | "mod" | "not" |
-            "number" | "nvl" | "odd" | "of" | "oneof" | "optional" | "or" |
-            "otherwise" | "pi" | "procedure reference schema" | "query" |
-            "real" | "renamed" | "repeat" | "return" | "rolesof" | "rule" |
-            "select" | "self" | "set" | "sin" | "sizeof" | "skip" | "sqrt" |
-            "string" | "subtype" | "subtype_constraint" | "supertype" | "tan" |
-            "then" | "to" | "total_over" | "true" | "type" | "unique" |
-            "unknown" | "until" | "use" | "usedin" | "value" | "value_in" |
-            "value_unique" | "var" | "where" | "while" | "with" | "xor"
-              => build_err(s, "keyword"),
-            _ => Ok(r)
+            "abs"
+            | "abstract"
+            | "acos"
+            | "aggregate"
+            | "alias"
+            | "and"
+            | "andor"
+            | "array"
+            | "as"
+            | "asin"
+            | "atan"
+            | "bag"
+            | "based_on"
+            | "begin"
+            | "binary"
+            | "blength"
+            | "boolean"
+            | "by"
+            | "case"
+            | "const_e"
+            | "constant"
+            | "cos"
+            | "derive"
+            | "div"
+            | "else"
+            | "end"
+            | "end_case"
+            | "end_constant"
+            | "end_entity"
+            | "end_function"
+            | "end_if"
+            | "end_local"
+            | "end_procedure"
+            | "end_repeat"
+            | "end_rule"
+            | "end_schema"
+            | "end_subtype_constraint escape"
+            | "end_type"
+            | "entity"
+            | "enumeration"
+            | "exists"
+            | "exp"
+            | "extensible"
+            | "false"
+            | "fixed"
+            | "for"
+            | "format"
+            | "from"
+            | "function"
+            | "generic"
+            | "generic_entity list"
+            | "hibound"
+            | "hiindex"
+            | "if"
+            | "in"
+            | "integer"
+            | "inverse"
+            | "length"
+            | "like"
+            | "lobound"
+            | "local"
+            | "log"
+            | "log10"
+            | "log2"
+            | "logical"
+            | "loindex"
+            | "mod"
+            | "not"
+            | "number"
+            | "nvl"
+            | "odd"
+            | "of"
+            | "oneof"
+            | "optional"
+            | "or"
+            | "otherwise"
+            | "pi"
+            | "procedure reference schema"
+            | "query"
+            | "real"
+            | "renamed"
+            | "repeat"
+            | "return"
+            | "rolesof"
+            | "rule"
+            | "select"
+            | "self"
+            | "set"
+            | "sin"
+            | "sizeof"
+            | "skip"
+            | "sqrt"
+            | "string"
+            | "subtype"
+            | "subtype_constraint"
+            | "supertype"
+            | "tan"
+            | "then"
+            | "to"
+            | "total_over"
+            | "true"
+            | "type"
+            | "unique"
+            | "unknown"
+            | "until"
+            | "use"
+            | "usedin"
+            | "value"
+            | "value_in"
+            | "value_unique"
+            | "var"
+            | "where"
+            | "while"
+            | "with"
+            | "xor" => build_err(s, "keyword"),
+            _ => Ok(r),
         }
     }
 }
-fn simple_id(s: &str) -> IResult<SimpleId> { SimpleId::parse(s) }
+fn simple_id(s: &str) -> IResult<SimpleId> {
+    SimpleId::parse(s)
+}
 
 // 144 simple_string_literal = \q { ( \q \q ) | not_quote | \s | \x9 | \xA | \xD } \q .
 fn simple_string_literal(s: &str) -> IResult<String> {
     let f = alt((
         map(tag("''"), |_| '\''),
         not_quote,
-        nom::character::complete::one_of(" \t\n\r")
+        nom::character::complete::one_of(" \t\n\r"),
     ));
     delimited(
-            char('\''),
-            fold_many0(f, String::new, |mut s, c| { s.push(c); s }),
-            char('\''))(s)
+        char('\''),
+        fold_many0(f, String::new, |mut s, c| {
+            s.push(c);
+            s
+        }),
+        char('\''),
+    )(s)
 }
 
 // 145-149 (remarks) are parsed beforehand
@@ -287,22 +400,17 @@ fn abstract_entity_declaration(s: &str) -> IResult<()> {
 
 // 165 abstract_supertype = ABSTRACT SUPERTYPE ’;’ .
 fn abstract_supertype(s: &str) -> IResult<()> {
-    map(tuple((
-        kw("abstract"),
-        kw("supertype"),
-        char(';')
-    )), |_| ())(s)
+    map(tuple((kw("abstract"), kw("supertype"), char(';'))), |_| ())(s)
 }
 
 // 166 abstract_supertype_declaration = ABSTRACT SUPERTYPE [ subtype_constraint ] .
 #[derive(Debug)]
 pub struct AbstractSupertypeDeclaration<'a>(Option<SubtypeConstraint<'a>>);
 fn abstract_supertype_declaration(s: &str) -> IResult<AbstractSupertypeDeclaration> {
-    map(tuple((
-        kw("abstract"),
-        kw("supertype"),
-        opt(subtype_constraint),
-    )), |(_, _, a)| AbstractSupertypeDeclaration(a))(s)
+    map(
+        tuple((kw("abstract"), kw("supertype"), opt(subtype_constraint))),
+        |(_, _, a)| AbstractSupertypeDeclaration(a),
+    )(s)
 }
 
 // 167 actual_parameter_list = ’(’ parameter { ’,’ parameter } ’)’ .
@@ -314,13 +422,18 @@ fn actual_parameter_list(s: &str) -> IResult<ActualParameterList> {
 
 // 168
 #[derive(Debug)]
-pub enum AddLikeOp { Add, Sub, Or, Xor }
+pub enum AddLikeOp {
+    Add,
+    Sub,
+    Or,
+    Xor,
+}
 fn add_like_op(s: &str) -> IResult<AddLikeOp> {
     use AddLikeOp::*;
     alt((
-        map(char('+'),  |_| Add),
-        map(char('-'),  |_| Sub),
-        map(kw("or"),  |_| Or),
+        map(char('+'), |_| Add),
+        map(char('-'), |_| Sub),
+        map(kw("or"), |_| Or),
         map(kw("xor"), |_| Xor),
     ))(s)
 }
@@ -329,11 +442,10 @@ fn add_like_op(s: &str) -> IResult<AddLikeOp> {
 #[derive(Debug)]
 pub struct AggregateInitializer<'a>(Vec<Element<'a>>);
 fn aggregate_initializer(s: &str) -> IResult<AggregateInitializer> {
-    map(delimited(
-            char('['),
-            list0(',', element),
-            char(']')),
-        AggregateInitializer)(s)
+    map(
+        delimited(char('['), list0(',', element), char(']')),
+        AggregateInitializer,
+    )(s)
 }
 
 // 170
@@ -343,12 +455,15 @@ alias!(AggregateSource<'a>, SimpleExpression, aggregate_source);
 #[derive(Debug)]
 pub struct AggregateType<'a>(Option<TypeLabel<'a>>, Box<ParameterType<'a>>);
 fn aggregate_type(s: &str) -> IResult<AggregateType> {
-    map(tuple((
-        kw("aggregate"),
-        opt(preceded(char(':'), type_label)),
-        kw("of"),
-        parameter_type,
-    )), |(_, t, _, p)| AggregateType(t, Box::new(p)))(s)
+    map(
+        tuple((
+            kw("aggregate"),
+            opt(preceded(char(':'), type_label)),
+            kw("of"),
+            parameter_type,
+        )),
+        |(_, t, _, p)| AggregateType(t, Box::new(p)),
+    )(s)
 }
 
 // 172
@@ -377,15 +492,14 @@ pub struct AlgorithmHead<'a> {
     pub local: Option<LocalDecl<'a>>,
 }
 fn algorithm_head(s: &str) -> IResult<AlgorithmHead> {
-    map(tuple((
-        many0(declaration),
-        opt(constant_decl),
-        opt(local_decl),
-    )), |(d, c, l)| AlgorithmHead {
-        declaration: d,
-        constant: c,
-        local: l
-    })(s)
+    map(
+        tuple((many0(declaration), opt(constant_decl), opt(local_decl))),
+        |(d, c, l)| AlgorithmHead {
+            declaration: d,
+            constant: c,
+            local: l,
+        },
+    )(s)
 }
 
 // 174 alias_stmt = ALIAS variable_id FOR general_ref { qualifier } ’;’ stmt { stmt }
@@ -398,20 +512,23 @@ pub struct AliasStmt<'a> {
     pub stmts: Vec<Stmt<'a>>,
 }
 fn alias_stmt(s: &str) -> IResult<AliasStmt> {
-    map(tuple((
-        kw("alias"),
-        variable_id,
-        kw("for"),
-        general_ref,
-        many0(qualifier),
-        char(';'),
-        many0(stmt),
-    )), |(_, v, _, g, q, _, s)| AliasStmt {
-        variable: v,
-        general: g,
-        qualifiers: q,
-        stmts: s,
-    })(s)
+    map(
+        tuple((
+            kw("alias"),
+            variable_id,
+            kw("for"),
+            general_ref,
+            many0(qualifier),
+            char(';'),
+            many0(stmt),
+        )),
+        |(_, v, _, g, q, _, s)| AliasStmt {
+            variable: v,
+            general: g,
+            qualifiers: q,
+            stmts: s,
+        },
+    )(s)
 }
 
 // 175
@@ -423,20 +540,22 @@ pub struct ArrayType<'a> {
     pub instantiable_type: Box<InstantiableType<'a>>,
 }
 fn array_type(s: &str) -> IResult<ArrayType> {
-    map(tuple((
-        kw("array"),
-        bound_spec,
-        kw("of"),
-        opt(kw("optional")),
-        opt(kw("unique")),
-        instantiable_type,
-    )),
-    |(_, b, _, opt, uniq, t)| ArrayType {
-        bounds: b,
-        optional: opt.is_some(),
-        unique: uniq.is_some(),
-        instantiable_type: Box::new(t),
-    })(s)
+    map(
+        tuple((
+            kw("array"),
+            bound_spec,
+            kw("of"),
+            opt(kw("optional")),
+            opt(kw("unique")),
+            instantiable_type,
+        )),
+        |(_, b, _, opt, uniq, t)| ArrayType {
+            bounds: b,
+            optional: opt.is_some(),
+            unique: uniq.is_some(),
+            instantiable_type: Box::new(t),
+        },
+    )(s)
 }
 
 // 176 assignment_stmt = general_ref { qualifier } ’:=’ expression ’;’ .
@@ -447,17 +566,20 @@ pub struct AssignmentStmt<'a> {
     pub expression: Expression<'a>,
 }
 fn assignment_stmt(s: &str) -> IResult<AssignmentStmt> {
-    map(tuple((
-        general_ref,
-        many0(qualifier),
-        tag(":="),
-        expression,
-        char(';'),
-    )), |(g, q, _, e, _)| AssignmentStmt {
-        general_ref: g,
-        qualifiers: q,
-        expression: e,
-    })(s)
+    map(
+        tuple((
+            general_ref,
+            many0(qualifier),
+            tag(":="),
+            expression,
+            char(';'),
+        )),
+        |(g, q, _, e, _)| AssignmentStmt {
+            general_ref: g,
+            qualifiers: q,
+            expression: e,
+        },
+    )(s)
 }
 
 // 177 attribute_decl = attribute_id | redeclared_attribute .
@@ -468,10 +590,7 @@ pub enum AttributeDecl<'a> {
 }
 fn attribute_decl(s: &str) -> IResult<AttributeDecl> {
     use AttributeDecl::*;
-    alt((
-        map(attribute_id, Id),
-        map(redeclared_attribute, Redeclared),
-    ))(s)
+    alt((map(attribute_id, Id), map(redeclared_attribute, Redeclared)))(s)
 }
 
 // 178
@@ -488,13 +607,10 @@ fn attribute_qualifier(s: &str) -> IResult<AttributeQualifier> {
 #[derive(Debug)]
 pub struct BagType<'a>(Option<BoundSpec<'a>>, pub Box<InstantiableType<'a>>);
 fn bag_type(s: &str) -> IResult<BagType> {
-    map(tuple((
-            kw("bag"),
-            opt(bound_spec),
-            kw("of"),
-            instantiable_type
-        )), |(_, b, _, t)| BagType(b, Box::new(t)))
-        (s)
+    map(
+        tuple((kw("bag"), opt(bound_spec), kw("of"), instantiable_type)),
+        |(_, b, _, t)| BagType(b, Box::new(t)),
+    )(s)
 }
 
 // 181 binary_type = BINARY [ width_spec ] .
@@ -519,34 +635,62 @@ alias!(Bound2<'a>, NumericExpression, bound_2);
 #[derive(Debug)]
 pub struct BoundSpec<'a>(Bound1<'a>, pub Bound2<'a>);
 fn bound_spec(s: &str) -> IResult<BoundSpec> {
-    map(tuple((
-        char('['),
-        bound_1,
-        char(':'),
-        bound_2,
-        char(']'),
-    )), |(_, b1, _, b2, _)| BoundSpec(b1, b2))(s)
+    map(
+        tuple((char('['), bound_1, char(':'), bound_2, char(']'))),
+        |(_, b1, _, b2, _)| BoundSpec(b1, b2),
+    )(s)
 }
 
 // 186
 #[derive(Debug)]
-pub enum BuiltInConstant { ConstE, Pi, Self_, Indeterminant }
+pub enum BuiltInConstant {
+    ConstE,
+    Pi,
+    Self_,
+    Indeterminant,
+}
 fn built_in_constant(s: &str) -> IResult<BuiltInConstant> {
     use BuiltInConstant::*;
     alt((
         map(kw("const_e"), |_| ConstE),
-        map(kw("pi"),      |_| Pi),
-        map(kw("self"),    |_| Self_),
-        map(char('?'),      |_| Indeterminant),
+        map(kw("pi"), |_| Pi),
+        map(kw("self"), |_| Self_),
+        map(char('?'), |_| Indeterminant),
     ))(s)
 }
 
 // 187
 #[derive(Debug)]
 pub enum BuiltInFunction {
-    Abs, Acos, Asin, Atan, Blength, Cos, Exists, Exp, Format, Hibound, HiIndex,
-    Length, LoBound, LoIndex, Log, Log2, Log10, Nvl, Odd, RolesOf, Sin, SizeOf,
-    Sqrt, Tan, Typeof, Usedin, Value, ValueIn, ValueUnique
+    Abs,
+    Acos,
+    Asin,
+    Atan,
+    Blength,
+    Cos,
+    Exists,
+    Exp,
+    Format,
+    Hibound,
+    HiIndex,
+    Length,
+    LoBound,
+    LoIndex,
+    Log,
+    Log2,
+    Log10,
+    Nvl,
+    Odd,
+    RolesOf,
+    Sin,
+    SizeOf,
+    Sqrt,
+    Tan,
+    Typeof,
+    Usedin,
+    Value,
+    ValueIn,
+    ValueUnique,
 }
 fn to_built_in_function(s: &str) -> Option<BuiltInFunction> {
     use BuiltInFunction::*;
@@ -592,24 +736,23 @@ fn built_in_function(s: &str) -> IResult<BuiltInFunction> {
 
 // 188 built_in_procedure = INSERT | REMOVE .
 #[derive(Debug)]
-pub enum BuiltInProcedure { Insert, Remove }
+pub enum BuiltInProcedure {
+    Insert,
+    Remove,
+}
 fn built_in_procedure(s: &str) -> IResult<BuiltInProcedure> {
     use BuiltInProcedure::*;
-    alt((
-        map(kw("insert"), |_| Insert),
-        map(kw("remove"), |_| Remove),
-    ))(s)
+    alt((map(kw("insert"), |_| Insert), map(kw("remove"), |_| Remove)))(s)
 }
 
 // 189 case_action = case_label { ’,’ case_label } ’:’ stmt .
 #[derive(Debug)]
 pub struct CaseAction<'a>(Vec<CaseLabel<'a>>, Stmt<'a>);
 fn case_action(s: &str) -> IResult<CaseAction> {
-    map(tuple((
-        list1(',', case_label),
-        char(':'),
-        stmt,
-    )), |(a, _, b)| CaseAction(a, b))(s)
+    map(
+        tuple((list1(',', case_label), char(':'), stmt)),
+        |(a, _, b)| CaseAction(a, b),
+    )(s)
 }
 
 // 190 case_label = expression .
@@ -624,33 +767,35 @@ pub struct CaseStmt<'a> {
     pub otherwise: Option<Box<Stmt<'a>>>,
 }
 fn case_stmt(s: &str) -> IResult<CaseStmt> {
-    map(tuple((
-        kw("case"),
-        selector,
-        kw("of"),
-        many0(case_action),
-        opt(map(tuple((
-            kw("otherwise"),
-            char(':'),
-            stmt)), |(_, _, s)| s)),
-        kw("end_case"),
-        char(';'))),
+    map(
+        tuple((
+            kw("case"),
+            selector,
+            kw("of"),
+            many0(case_action),
+            opt(map(
+                tuple((kw("otherwise"), char(':'), stmt)),
+                |(_, _, s)| s,
+            )),
+            kw("end_case"),
+            char(';'),
+        )),
         |(_, s, _, a, t, _, _)| CaseStmt {
             selector: s,
             actions: a,
             otherwise: t.map(Box::new),
-        })(s)
+        },
+    )(s)
 }
 
 // 192 compound_stmt = BEGIN stmt { stmt } END ’;’ .
 #[derive(Debug)]
 pub struct CompoundStmt<'a>(Vec<Stmt<'a>>);
 fn compound_stmt(s: &str) -> IResult<CompoundStmt> {
-    map(delimited(
-            kw("begin"),
-            many1(stmt),
-            pair(kw("end"), char(';'))),
-        CompoundStmt)(s)
+    map(
+        delimited(kw("begin"), many1(stmt), pair(kw("end"), char(';'))),
+        CompoundStmt,
+    )(s)
 }
 
 // 193
@@ -677,30 +822,36 @@ pub struct ConstantBody<'a> {
     pub expression: Expression<'a>,
 }
 fn constant_body(s: &str) -> IResult<ConstantBody> {
-    map(tuple((
-        constant_id,
-        char(':'),
-        instantiable_type,
-        tag(":="),
-        expression,
-        char(';')
-    )), |(a, _, t, _, e, _)| ConstantBody {
-        constant_id: a,
-        instantiable_type: t,
-        expression: e,
-    })(s)
+    map(
+        tuple((
+            constant_id,
+            char(':'),
+            instantiable_type,
+            tag(":="),
+            expression,
+            char(';'),
+        )),
+        |(a, _, t, _, e, _)| ConstantBody {
+            constant_id: a,
+            instantiable_type: t,
+            expression: e,
+        },
+    )(s)
 }
 
 // 195
 #[derive(Debug)]
 pub struct ConstantDecl<'a>(Vec<ConstantBody<'a>>);
 fn constant_decl(s: &str) -> IResult<ConstantDecl> {
-    map(tuple((
-        kw("constant"),
-        many1(constant_body),
-        kw("end_constant"),
-        char(';'),
-    )), |(_, b, _, _)| ConstantDecl(b))(s)
+    map(
+        tuple((
+            kw("constant"),
+            many1(constant_body),
+            kw("end_constant"),
+            char(';'),
+        )),
+        |(_, b, _, _)| ConstantDecl(b),
+    )(s)
 }
 
 // 196 constant_factor = built_in_constant | constant_ref .
@@ -728,10 +879,7 @@ pub enum ConstructedTypes<'a> {
 }
 fn constructed_types(s: &str) -> IResult<ConstructedTypes> {
     use ConstructedTypes::*;
-    alt((
-        map(enumeration_type, Enumeration),
-        map(select_type, Select),
-    ))(s)
+    alt((map(enumeration_type, Enumeration), map(select_type, Select)))(s)
 }
 
 // 199 declaration = entity_decl | function_decl | procedure_decl |
@@ -757,18 +905,19 @@ fn declaration(s: &str) -> IResult<Declaration> {
 
 // 200 derived_attr = attribute_decl ’:’ parameter_type ’:=’ expression ’;’ .
 #[derive(Debug)]
-pub struct DerivedAttr<'a>(pub AttributeDecl<'a>,
-                           ParameterType<'a>,
-                           Expression<'a>);
+pub struct DerivedAttr<'a>(pub AttributeDecl<'a>, ParameterType<'a>, Expression<'a>);
 fn derived_attr(s: &str) -> IResult<DerivedAttr> {
-    map(tuple((
-        attribute_decl,
-        char(':'),
-        parameter_type,
-        tag(":="),
-        expression,
-        char(';'),
-    )), |(a, _, b, _, e, _)| DerivedAttr(a, b, e))(s)
+    map(
+        tuple((
+            attribute_decl,
+            char(':'),
+            parameter_type,
+            tag(":="),
+            expression,
+            char(';'),
+        )),
+        |(a, _, b, _, e, _)| DerivedAttr(a, b, e),
+    )(s)
 }
 
 // 201 derive_clause = DERIVE derived_attr { derived_attr } .
@@ -787,15 +936,23 @@ pub struct DomainRule<'a> {
 fn domain_rule(s: &str) -> IResult<DomainRule> {
     let (s, rule_label_id) = opt(terminated(rule_label_id, char(':')))(s)?;
     let (s, expression) = expression(s)?;
-    Ok((s, DomainRule { rule_label_id, expression }))
+    Ok((
+        s,
+        DomainRule {
+            rule_label_id,
+            expression,
+        },
+    ))
 }
 
 // 203
 #[derive(Debug)]
 pub struct Element<'a>(Expression<'a>, Option<Repetition<'a>>);
 fn element(s: &str) -> IResult<Element> {
-    map(pair(expression, opt(preceded(char(':'), repetition))),
-        |(a, b)| Element(a, b))(s)
+    map(
+        pair(expression, opt(preceded(char(':'), repetition))),
+        |(a, b)| Element(a, b),
+    )(s)
 }
 
 // 204 entity_body = { explicit_attr } [ derive_clause ] [ inverse_clause ]
@@ -814,7 +971,16 @@ fn entity_body(s: &str) -> IResult<EntityBody> {
     let (s, inverse) = opt(inverse_clause)(s)?;
     let (s, unique) = opt(unique_clause)(s)?;
     let (s, where_) = opt(where_clause)(s)?;
-    Ok((s, EntityBody { explicit_attr, derive, inverse, unique, where_ }))
+    Ok((
+        s,
+        EntityBody {
+            explicit_attr,
+            derive,
+            inverse,
+            unique,
+            where_,
+        },
+    ))
 }
 
 // 205 entity_constructor = entity_ref ’(’ [ expression { ’,’ expression } ] ’)’ .
@@ -841,12 +1007,10 @@ fn entity_decl(s: &str) -> IResult<EntityDecl> {
 #[derive(Debug)]
 pub struct EntityHead<'a>(pub EntityId<'a>, pub Subsuper<'a>);
 fn entity_head(s: &str) -> IResult<EntityHead> {
-    map(tuple((
-        kw("entity"),
-        entity_id,
-        subsuper,
-        char(';'),
-    )), |(_, a, b, _)| EntityHead(a, b))(s)
+    map(
+        tuple((kw("entity"), entity_id, subsuper, char(';'))),
+        |(_, a, b, _)| EntityHead(a, b),
+    )(s)
 }
 
 // 208
@@ -859,10 +1023,16 @@ pub struct EnumerationExtension<'a> {
     pub enumeration_items: Option<EnumerationItems<'a>>,
 }
 fn enumeration_extension(s: &str) -> IResult<EnumerationExtension> {
-    map(preceded(
-        kw("based_on"),
-        pair(type_ref, opt(preceded(kw("with"), enumeration_items)))),
-        |(a, b)| EnumerationExtension { type_ref: a, enumeration_items: b })(s)
+    map(
+        preceded(
+            kw("based_on"),
+            pair(type_ref, opt(preceded(kw("with"), enumeration_items))),
+        ),
+        |(a, b)| EnumerationExtension {
+            type_ref: a,
+            enumeration_items: b,
+        },
+    )(s)
 }
 
 // 210
@@ -879,10 +1049,10 @@ fn enumeration_items(s: &str) -> IResult<EnumerationItems> {
 #[derive(Debug)]
 pub struct EnumerationReference<'a>(Option<TypeRef<'a>>, EnumerationRef<'a>);
 fn enumeration_reference(s: &str) -> IResult<EnumerationReference> {
-    map(tuple((
-        opt(terminated(type_ref, char('.'))),
-        enumeration_ref
-    )), |(a, b)| EnumerationReference(a, b))(s)
+    map(
+        tuple((opt(terminated(type_ref, char('.'))), enumeration_ref)),
+        |(a, b)| EnumerationReference(a, b),
+    )(s)
 }
 
 // 213
@@ -894,20 +1064,29 @@ pub enum EnumerationItemsOrExtension<'a> {
 #[derive(Debug)]
 pub struct EnumerationType<'a> {
     pub extensible: bool,
-    pub items_or_extension: Option<EnumerationItemsOrExtension<'a>>
+    pub items_or_extension: Option<EnumerationItemsOrExtension<'a>>,
 }
 fn enumeration_type(s: &str) -> IResult<EnumerationType> {
-    map(tuple((
-        opt(kw("extensible")),
-        kw("enumeration"),
-        opt(alt((
-            map(preceded(kw("of"), enumeration_items),
-                EnumerationItemsOrExtension::Items),
-            map(enumeration_extension,
-                EnumerationItemsOrExtension::Extension))))
-    )), |(e, _, p)| EnumerationType {
-        extensible: e.is_some(),
-        items_or_extension: p })(s)
+    map(
+        tuple((
+            opt(kw("extensible")),
+            kw("enumeration"),
+            opt(alt((
+                map(
+                    preceded(kw("of"), enumeration_items),
+                    EnumerationItemsOrExtension::Items,
+                ),
+                map(
+                    enumeration_extension,
+                    EnumerationItemsOrExtension::Extension,
+                ),
+            ))),
+        )),
+        |(e, _, p)| EnumerationType {
+            extensible: e.is_some(),
+            items_or_extension: p,
+        },
+    )(s)
 }
 
 // 214 escape_stmt = ESCAPE ’;’ .
@@ -924,22 +1103,28 @@ pub struct ExplicitAttr<'a> {
     pub parameter_type: ParameterType<'a>,
 }
 fn explicit_attr(s: &str) -> IResult<ExplicitAttr> {
-    map(tuple((
-        list1(',', attribute_decl),
-        char(':'),
-        opt(kw("optional")),
-        parameter_type,
-        char(';'),
-    )), |(a, _, o, t, _)| ExplicitAttr {
-        attributes: a,
-        optional: o.is_some(),
-        parameter_type: t,
-    })(s)
+    map(
+        tuple((
+            list1(',', attribute_decl),
+            char(':'),
+            opt(kw("optional")),
+            parameter_type,
+            char(';'),
+        )),
+        |(a, _, o, t, _)| ExplicitAttr {
+            attributes: a,
+            optional: o.is_some(),
+            parameter_type: t,
+        },
+    )(s)
 }
 
 // 216 expression = simple_expression [ rel_op_extended simple_expression ] .
 #[derive(Debug)]
-pub struct Expression<'a>(SimpleExpression<'a>, Option<(RelOpExtended, SimpleExpression<'a>)>);
+pub struct Expression<'a>(
+    SimpleExpression<'a>,
+    Option<(RelOpExtended, SimpleExpression<'a>)>,
+);
 impl<'a> Expression<'a> {
     fn parse(s: &'a str) -> IResult<Self> {
         let (s, a) = simple_expression(s)?;
@@ -947,25 +1132,28 @@ impl<'a> Expression<'a> {
         Ok((s, Self(a, b)))
     }
 }
-fn expression(s: &str) -> IResult<Expression> { Expression::parse(s) }
+fn expression(s: &str) -> IResult<Expression> {
+    Expression::parse(s)
+}
 
 // 217 factor = simple_factor [ ’**’ simple_factor ] .
 #[derive(Debug)]
 pub struct Factor<'a>(pub SimpleFactor<'a>, pub Option<SimpleFactor<'a>>);
 fn factor(s: &str) -> IResult<Factor> {
-    map(pair(simple_factor, opt(preceded(tag("**"), simple_factor))),
-        |(a, b)| Factor(a, b))(s)
+    map(
+        pair(simple_factor, opt(preceded(tag("**"), simple_factor))),
+        |(a, b)| Factor(a, b),
+    )(s)
 }
 
 // 218 formal_parameter = parameter_id { ’,’ parameter_id } ’:’ parameter_type .
 #[derive(Debug)]
 pub struct FormalParameter<'a>(Vec<ParameterId<'a>>, ParameterType<'a>);
 fn formal_parameter(s: &str) -> IResult<FormalParameter> {
-    map(tuple((
-        list1(',', parameter_id),
-        char(':'),
-        parameter_type
-    )), |(a, _, b)| FormalParameter(a, b))(s)
+    map(
+        tuple((list1(',', parameter_id), char(':'), parameter_type)),
+        |(a, _, b)| FormalParameter(a, b),
+    )(s)
 }
 
 // 219 function_call = ( built_in_function | function_ref ) [ actual_parameter_list ] .
@@ -977,11 +1165,16 @@ pub enum BuiltInOrFunctionRef<'a> {
 #[derive(Debug)]
 pub struct FunctionCall<'a>(BuiltInOrFunctionRef<'a>, ActualParameterList<'a>);
 fn function_call(s: &str) -> IResult<FunctionCall> {
-    map(pair(
-            alt((map(built_in_function, BuiltInOrFunctionRef::BuiltIn),
-                 map(function_ref, BuiltInOrFunctionRef::Ref))),
-            actual_parameter_list),
-        |(a, b)| FunctionCall(a, b))(s)
+    map(
+        pair(
+            alt((
+                map(built_in_function, BuiltInOrFunctionRef::BuiltIn),
+                map(function_ref, BuiltInOrFunctionRef::Ref),
+            )),
+            actual_parameter_list,
+        ),
+        |(a, b)| FunctionCall(a, b),
+    )(s)
 }
 // 220 function_decl = function_head algorithm_head stmt { stmt } END_FUNCTION ’;’ .
 #[derive(Debug)]
@@ -991,17 +1184,20 @@ pub struct FunctionDecl<'a> {
     pub stmts: Vec<Stmt<'a>>,
 }
 fn function_decl(s: &str) -> IResult<FunctionDecl> {
-    map(tuple((
-        function_head,
-        algorithm_head,
-        many1(stmt),
-        kw("end_function"),
-        char(';'),
-    )), |(a, b, c, _, _)| FunctionDecl {
-        function_head: a,
-        algorithm_head: b,
-        stmts: c,
-    })(s)
+    map(
+        tuple((
+            function_head,
+            algorithm_head,
+            many1(stmt),
+            kw("end_function"),
+            char(';'),
+        )),
+        |(a, b, c, _, _)| FunctionDecl {
+            function_head: a,
+            algorithm_head: b,
+            stmts: c,
+        },
+    )(s)
 }
 
 // 221 function_head = FUNCTION function_id [ ’(’ formal_parameter
@@ -1013,18 +1209,21 @@ pub struct FunctionHead<'a> {
     pub out: ParameterType<'a>,
 }
 fn function_head(s: &str) -> IResult<FunctionHead> {
-    map(tuple((
-        kw("function"),
-        function_id,
-        opt(parens(list1(';', formal_parameter))),
-        char(':'),
-        parameter_type,
-        char(';'),
-    )), |(_, i, a, _, p, _)| FunctionHead {
-        id: i,
-        params: a,
-        out: p,
-    })(s)
+    map(
+        tuple((
+            kw("function"),
+            function_id,
+            opt(parens(list1(';', formal_parameter))),
+            char(':'),
+            parameter_type,
+            char(';'),
+        )),
+        |(_, i, a, _, p, _)| FunctionHead {
+            id: i,
+            params: a,
+            out: p,
+        },
+    )(s)
 }
 
 // 222
@@ -1078,34 +1277,32 @@ pub struct GeneralArrayType<'a> {
     pub parameter_type: Box<ParameterType<'a>>,
 }
 fn general_array_type(s: &str) -> IResult<GeneralArrayType> {
-    map(tuple((
-        kw("array"),
-        bound_spec,
-        kw("of"),
-        opt(kw("optional")),
-        opt(kw("unique")),
-        parameter_type,
-    )),
-    |(_, b, _, opt, uniq, t)| GeneralArrayType {
-        bounds: b,
-        optional: opt.is_some(),
-        unique: uniq.is_some(),
-        parameter_type: Box::new(t),
-    })(s)
+    map(
+        tuple((
+            kw("array"),
+            bound_spec,
+            kw("of"),
+            opt(kw("optional")),
+            opt(kw("unique")),
+            parameter_type,
+        )),
+        |(_, b, _, opt, uniq, t)| GeneralArrayType {
+            bounds: b,
+            optional: opt.is_some(),
+            unique: uniq.is_some(),
+            parameter_type: Box::new(t),
+        },
+    )(s)
 }
 
 // 226 general_bag_type = BAG [ bound_spec ] OF parameter_type .
 #[derive(Debug)]
-pub struct GeneralBagType<'a>(pub Option<BoundSpec<'a>>,
-                              pub Box<ParameterType<'a>>);
+pub struct GeneralBagType<'a>(pub Option<BoundSpec<'a>>, pub Box<ParameterType<'a>>);
 fn general_bag_type(s: &str) -> IResult<GeneralBagType> {
-    map(tuple((
-            kw("bag"),
-            opt(bound_spec),
-            kw("of"),
-            parameter_type
-        )), |(_, b, _, t)| GeneralBagType(b, Box::new(t)))
-        (s)
+    map(
+        tuple((kw("bag"), opt(bound_spec), kw("of"), parameter_type)),
+        |(_, b, _, t)| GeneralBagType(b, Box::new(t)),
+    )(s)
 }
 
 // 227 general_list_type = LIST [ bound_spec ] OF [ UNIQUE ] parameter_type .
@@ -1116,18 +1313,20 @@ pub struct GeneralListType<'a> {
     pub parameter_type: Box<ParameterType<'a>>,
 }
 fn general_list_type(s: &str) -> IResult<GeneralListType> {
-    map(tuple((
-        kw("list"),
-        opt(bound_spec),
-        kw("of"),
-        opt(kw("unique")),
-        parameter_type,
-    )),
-    |(_, b, _, uniq, t)| GeneralListType {
-        bounds: b,
-        unique: uniq.is_some(),
-        parameter_type: Box::new(t),
-    })(s)
+    map(
+        tuple((
+            kw("list"),
+            opt(bound_spec),
+            kw("of"),
+            opt(kw("unique")),
+            parameter_type,
+        )),
+        |(_, b, _, uniq, t)| GeneralListType {
+            bounds: b,
+            unique: uniq.is_some(),
+            parameter_type: Box::new(t),
+        },
+    )(s)
 }
 
 // 228 general_ref = parameter_ref | variable_ref .
@@ -1148,34 +1347,33 @@ pub struct GeneralSetType<'a> {
     pub parameter_type: Box<ParameterType<'a>>,
 }
 fn general_set_type(s: &str) -> IResult<GeneralSetType> {
-    map(tuple((
-        kw("set"),
-        opt(bound_spec),
-        kw("of"),
-        parameter_type,
-    )),
-    |(_, b, _, t)| GeneralSetType {
-        bounds: b,
-        parameter_type: Box::new(t),
-    })(s)
+    map(
+        tuple((kw("set"), opt(bound_spec), kw("of"), parameter_type)),
+        |(_, b, _, t)| GeneralSetType {
+            bounds: b,
+            parameter_type: Box::new(t),
+        },
+    )(s)
 }
 
 // 230 generic_entity_type = GENERIC_ENTITY [ ’:’ type_label ] .
 #[derive(Debug)]
 pub struct GenericEntityType<'a>(Option<TypeLabel<'a>>);
 fn generic_entity_type(s: &str) -> IResult<GenericEntityType> {
-    map(preceded(kw("generic_entity"),
-                 opt(preceded(char(':'), type_label))),
-        GenericEntityType)(s)
+    map(
+        preceded(kw("generic_entity"), opt(preceded(char(':'), type_label))),
+        GenericEntityType,
+    )(s)
 }
 
 // 231 generic_type = GENERIC [ ’:’ type_label ] .
 #[derive(Debug)]
 pub struct GenericType<'a>(Option<TypeLabel<'a>>);
 fn generic_type(s: &str) -> IResult<GenericType> {
-    map(preceded(kw("generic"),
-                 opt(preceded(char(':'), type_label))),
-        GenericType)(s)
+    map(
+        preceded(kw("generic"), opt(preceded(char(':'), type_label))),
+        GenericType,
+    )(s)
 }
 
 // 232 group_qualifier = ’\’ entity_ref .
@@ -1190,15 +1388,18 @@ fn group_qualifier(s: &str) -> IResult<GroupQualifier> {
 #[derive(Debug)]
 pub struct IfStmt<'a>(LogicalExpression<'a>, Vec<Stmt<'a>>, Option<Vec<Stmt<'a>>>);
 fn if_stmt(s: &str) -> IResult<IfStmt> {
-    map(tuple((
-        kw("if"),
-        logical_expression,
-        kw("then"),
-        many1(stmt),
-        opt(preceded(kw("else"), many1(stmt))),
-        kw("end_if"),
-        char(';'),
-    )), |(_, cond, _, a, b, _, _)| IfStmt(cond, a, b))(s)
+    map(
+        tuple((
+            kw("if"),
+            logical_expression,
+            kw("then"),
+            many1(stmt),
+            opt(preceded(kw("else"), many1(stmt))),
+            kw("end_if"),
+            char(';'),
+        )),
+        |(_, cond, _, a, b, _, _)| IfStmt(cond, a, b),
+    )(s)
 }
 
 // 234
@@ -1213,19 +1414,22 @@ pub struct IncrementControl<'a> {
     pub increment: Option<Increment<'a>>,
 }
 fn increment_control(s: &str) -> IResult<IncrementControl> {
-    map(tuple((
-        variable_id,
-        tag(":="),
-        bound_1,
-        kw("to"),
-        bound_2,
-        opt(preceded(kw("by"), increment)),
-    )), |(v, _, b1, _, b2, i)| IncrementControl {
-        var: v,
-        bound1: b1,
-        bound2: b2,
-        increment: i,
-    })(s)
+    map(
+        tuple((
+            variable_id,
+            tag(":="),
+            bound_1,
+            kw("to"),
+            bound_2,
+            opt(preceded(kw("by"), increment)),
+        )),
+        |(v, _, b1, _, b2, i)| IncrementControl {
+            var: v,
+            bound1: b1,
+            bound2: b2,
+            increment: i,
+        },
+    )(s)
 }
 
 // 236
@@ -1256,10 +1460,7 @@ pub enum InstantiableType<'a> {
 }
 fn instantiable_type(s: &str) -> IResult<InstantiableType> {
     use InstantiableType::*;
-    alt((
-        map(concrete_types, Concrete),
-        map(entity_ref, EntityRef),
-    ))(s)
+    alt((map(concrete_types, Concrete), map(entity_ref, EntityRef)))(s)
 }
 
 // 241 integer_type = INTEGER .
@@ -1275,8 +1476,10 @@ pub enum InterfaceSpecification<'a> {
 }
 fn interface_specification(s: &str) -> IResult<InterfaceSpecification> {
     use InterfaceSpecification::*;
-    alt((map(reference_clause, ReferenceClause),
-         map(use_clause, UseClause)))(s)
+    alt((
+        map(reference_clause, ReferenceClause),
+        map(use_clause, UseClause),
+    ))(s)
 }
 
 // 243
@@ -1289,18 +1492,26 @@ pub struct Interval<'a> {
     pub high: IntervalHigh<'a>,
 }
 fn interval(s: &str) -> IResult<Interval> {
-    map(delimited(
-        char('{'),
-        tuple((
-            interval_low,
-            interval_op,
-            interval_item,
-            interval_op,
-            interval_high,
-        )),
-        char('}')),
-        |(low, op1, item, op2, high)| Interval { low, op1, item, op2, high })
-    (s)
+    map(
+        delimited(
+            char('{'),
+            tuple((
+                interval_low,
+                interval_op,
+                interval_item,
+                interval_op,
+                interval_high,
+            )),
+            char('}'),
+        ),
+        |(low, op1, item, op2, high)| Interval {
+            low,
+            op1,
+            item,
+            op2,
+            high,
+        },
+    )(s)
 }
 
 // 244
@@ -1314,7 +1525,10 @@ alias!(IntervalLow<'a>, SimpleExpression, interval_low);
 
 // 247
 #[derive(Debug)]
-pub enum IntervalOp { LessThan, LessThanOrEqual }
+pub enum IntervalOp {
+    LessThan,
+    LessThanOrEqual,
+}
 fn interval_op(s: &str) -> IResult<IntervalOp> {
     alt((
         // Sort by length to pick the best match
@@ -1326,7 +1540,10 @@ fn interval_op(s: &str) -> IResult<IntervalOp> {
 // 248 inverse_attr = attribute_decl ’:’ [ ( SET | BAG ) [ bound_spec ] OF ] entity_ref
 //                    FOR [ entity_ref ’.’ ] attribute_ref ’;’ .
 #[derive(Debug)]
-pub enum SetOrBag { Set, Bag }
+pub enum SetOrBag {
+    Set,
+    Bag,
+}
 #[derive(Debug)]
 pub struct InverseAttr<'a> {
     pub attribute_decl: AttributeDecl<'a>,
@@ -1336,27 +1553,35 @@ pub struct InverseAttr<'a> {
     pub attribute_ref: AttributeRef<'a>,
 }
 fn inverse_attr(s: &str) -> IResult<InverseAttr> {
-    map(tuple((
-        attribute_decl,
-        char(':'),
-        opt(map(tuple((
-            alt((map(kw("set"), |_| SetOrBag::Set),
-                 map(kw("bag"), |_| SetOrBag::Bag))),
-            opt(bound_spec),
-            kw("of"),
-        )), |(t, b, _)| (t, b))),
-        entity_ref,
-        kw("for"),
-        opt(terminated(entity_ref, char('.'))),
-        attribute_ref,
-        char(';'),
-    )), |(a, _, b, c, _, d, e, _)| InverseAttr {
-        attribute_decl: a,
-        bounds: b,
-        entity: c,
-        entity_for: d,
-        attribute_ref: e,
-    })(s)
+    map(
+        tuple((
+            attribute_decl,
+            char(':'),
+            opt(map(
+                tuple((
+                    alt((
+                        map(kw("set"), |_| SetOrBag::Set),
+                        map(kw("bag"), |_| SetOrBag::Bag),
+                    )),
+                    opt(bound_spec),
+                    kw("of"),
+                )),
+                |(t, b, _)| (t, b),
+            )),
+            entity_ref,
+            kw("for"),
+            opt(terminated(entity_ref, char('.'))),
+            attribute_ref,
+            char(';'),
+        )),
+        |(a, _, b, c, _, d, e, _)| InverseAttr {
+            attribute_decl: a,
+            bounds: b,
+            entity: c,
+            entity_for: d,
+            attribute_ref: e,
+        },
+    )(s)
 }
 
 // 249 inverse_clause = INVERSE inverse_attr { inverse_attr } .
@@ -1374,18 +1599,20 @@ pub struct ListType<'a> {
     pub instantiable_type: Box<InstantiableType<'a>>,
 }
 fn list_type(s: &str) -> IResult<ListType> {
-    map(tuple((
-        kw("list"),
-        opt(bound_spec),
-        kw("of"),
-        opt(kw("unique")),
-        instantiable_type,
-    )),
-    |(_, b, _, uniq, t)| ListType {
-        bounds: b,
-        unique: uniq.is_some(),
-        instantiable_type: Box::new(t),
-    })(s)
+    map(
+        tuple((
+            kw("list"),
+            opt(bound_spec),
+            kw("of"),
+            opt(kw("unique")),
+            instantiable_type,
+        )),
+        |(_, b, _, uniq, t)| ListType {
+            bounds: b,
+            unique: uniq.is_some(),
+            instantiable_type: Box::new(t),
+        },
+    )(s)
 }
 
 // 251
@@ -1402,19 +1629,22 @@ fn literal(s: &str) -> IResult<Literal> {
         map(binary_literal, Binary),
         map(string_literal, |s| String(s.0)),
         map(logical_literal, Logical),
-        map(real_literal, Real)
+        map(real_literal, Real),
     ))(s)
 }
 // 252 local_decl = LOCAL local_variable { local_variable } END_LOCAL ’;’
 #[derive(Debug)]
 pub struct LocalDecl<'a>(Vec<LocalVariable<'a>>);
 fn local_decl(s: &str) -> IResult<LocalDecl> {
-    map(tuple((
-        kw("local"),
-        many1(local_variable),
-        kw("end_local"),
-        char(';'),
-    )), |(_, vs, _, _)| LocalDecl(vs))(s)
+    map(
+        tuple((
+            kw("local"),
+            many1(local_variable),
+            kw("end_local"),
+            char(';'),
+        )),
+        |(_, vs, _, _)| LocalDecl(vs),
+    )(s)
 }
 // 253 local_variable = variable_id { ’,’ variable_id } ’:’ parameter_type
 //                      [ ’:=’ expression ] ’;’ .
@@ -1425,17 +1655,20 @@ pub struct LocalVariable<'a> {
     pub expression: Option<Expression<'a>>,
 }
 fn local_variable(s: &str) -> IResult<LocalVariable> {
-    map(tuple((
-        list1(',', variable_id),
-        char(':'),
-        parameter_type,
-        opt(preceded(tag(":="), expression)),
-        char(';'),
-    )), |(vars, _, pt, exp, _)| LocalVariable {
-        variable_id: vars,
-        parameter_type: pt,
-        expression: exp,
-    })(s)
+    map(
+        tuple((
+            list1(',', variable_id),
+            char(':'),
+            parameter_type,
+            opt(preceded(tag(":="), expression)),
+            char(';'),
+        )),
+        |(vars, _, pt, exp, _)| LocalVariable {
+            variable_id: vars,
+            parameter_type: pt,
+            expression: exp,
+        },
+    )(s)
 }
 
 // 254
@@ -1444,12 +1677,16 @@ alias!(LogicalExpression<'a>, Expression, logical_expression);
 // 255
 #[derive(Debug)]
 pub enum LogicalLiteral {
-    True, False, Unknown
+    True,
+    False,
+    Unknown,
 }
 fn logical_literal(s: &str) -> IResult<LogicalLiteral> {
-    alt((map(kw("false"),   |_| LogicalLiteral::False),
-         map(kw("true"),    |_| LogicalLiteral::True),
-         map(kw("unknown"), |_| LogicalLiteral::Unknown)))(s)
+    alt((
+        map(kw("false"), |_| LogicalLiteral::False),
+        map(kw("true"), |_| LogicalLiteral::True),
+        map(kw("unknown"), |_| LogicalLiteral::Unknown),
+    ))(s)
 }
 
 // 256 logical_type = LOGICAL .
@@ -1459,16 +1696,23 @@ fn logical_type(s: &str) -> IResult<()> {
 
 // 257
 #[derive(Debug)]
-pub enum MultiplicationLikeOp {Mul, Div, IntegerDiv, Mod, And, ComplexEntity }
+pub enum MultiplicationLikeOp {
+    Mul,
+    Div,
+    IntegerDiv,
+    Mod,
+    And,
+    ComplexEntity,
+}
 fn multiplication_like_op(s: &str) -> IResult<MultiplicationLikeOp> {
     use MultiplicationLikeOp::*;
     alt((
-        map(char('*'),  |_| Mul),
-        map(char('/'),  |_| Div),
+        map(char('*'), |_| Mul),
+        map(char('/'), |_| Div),
         map(kw("div"), |_| IntegerDiv),
         map(kw("mod"), |_| Mod),
         map(kw("and"), |_| And),
-        map(tag("||"),  |_| ComplexEntity),
+        map(tag("||"), |_| ComplexEntity),
     ))(s)
 }
 
@@ -1496,11 +1740,19 @@ pub struct NamedTypeOrRename<'a> {
     pub rename: Option<EntityOrTypeId<'a>>,
 }
 fn named_type_or_rename(s: &str) -> IResult<NamedTypeOrRename> {
-    map(pair(
-        named_types,
-        opt(preceded(kw("as"),
-            map(simple_id, EntityOrTypeId::_Ambiguous)))),
-        |(a, b)| NamedTypeOrRename { named_types: a, rename: b })(s)
+    map(
+        pair(
+            named_types,
+            opt(preceded(
+                kw("as"),
+                map(simple_id, EntityOrTypeId::_Ambiguous),
+            )),
+        ),
+        |(a, b)| NamedTypeOrRename {
+            named_types: a,
+            rename: b,
+        },
+    )(s)
 }
 
 // 260 null_stmt = ’;’ .
@@ -1520,10 +1772,10 @@ alias!(NumericExpression<'a>, SimpleExpression);
 #[derive(Debug)]
 pub struct OneOf<'a>(Vec<SupertypeExpression<'a>>);
 fn one_of(s: &str) -> IResult<OneOf> {
-    map(preceded(
-        kw("oneof"),
-        parens(list1(',', supertype_expression)),
-    ), OneOf)(s)
+    map(
+        preceded(kw("oneof"), parens(list1(',', supertype_expression))),
+        OneOf,
+    )(s)
 }
 
 // 264
@@ -1565,8 +1817,9 @@ fn primary(s: &str) -> IResult<Primary> {
     use Primary::*;
     alt((
         // Order so that the longest parser runs first
-        map(pair(qualifiable_factor, many0(qualifier)),
-            |(f, qs)| Qualifiable(f, qs)),
+        map(pair(qualifiable_factor, many0(qualifier)), |(f, qs)| {
+            Qualifiable(f, qs)
+        }),
         map(literal, Literal),
     ))(s)
 }
@@ -1584,28 +1837,32 @@ pub struct ProcedureCallStmt<'a> {
     pub params: Option<ActualParameterList<'a>>,
 }
 fn procedure_call_stmt(s: &str) -> IResult<ProcedureCallStmt> {
-    map(tuple((
-        alt((map(built_in_procedure, BuiltInOrProcedureRef::BuiltIn),
-             map(procedure_ref, BuiltInOrProcedureRef::ProcedureRef),
+    map(
+        tuple((
+            alt((
+                map(built_in_procedure, BuiltInOrProcedureRef::BuiltIn),
+                map(procedure_ref, BuiltInOrProcedureRef::ProcedureRef),
+            )),
+            opt(actual_parameter_list),
+            char(';'),
         )),
-        opt(actual_parameter_list),
-        char(';'),
-    )), |(a, b, _)| ProcedureCallStmt {
-        proc: a,
-        params: b,
-    })(s)
+        |(a, b, _)| ProcedureCallStmt { proc: a, params: b },
+    )(s)
 }
 // 271 procedure_decl = procedure_head algorithm_head { stmt } END_PROCEDURE ’;’ .
 #[derive(Debug)]
 pub struct ProcedureDecl<'a>(ProcedureHead<'a>, AlgorithmHead<'a>, Vec<Stmt<'a>>);
 fn procedure_decl(s: &str) -> IResult<ProcedureDecl> {
-    map(tuple((
-        procedure_head,
-        algorithm_head,
-        many0(stmt),
-        kw("end_procedure"),
-        char(';'),
-    )), |(p, a, s, _, _)| ProcedureDecl(p, a, s))(s)
+    map(
+        tuple((
+            procedure_head,
+            algorithm_head,
+            many0(stmt),
+            kw("end_procedure"),
+            char(';'),
+        )),
+        |(p, a, s, _, _)| ProcedureDecl(p, a, s),
+    )(s)
 }
 
 // 272 procedure_head = PROCEDURE procedure_id [ ’(’ [ VAR ] formal_parameter
@@ -1616,18 +1873,23 @@ pub struct ProcedureHead<'a> {
     pub args: Option<Vec<(bool, FormalParameter<'a>)>>,
 }
 fn procedure_head(s: &str) -> IResult<ProcedureHead> {
-    map(tuple((
-        kw("procedure"),
-        procedure_id,
-        opt(parens(list1(';',
-                map(tuple((opt(kw("var")), formal_parameter)),
-                    |(v, f)| (v.is_some(), f))),
+    map(
+        tuple((
+            kw("procedure"),
+            procedure_id,
+            opt(parens(list1(
+                ';',
+                map(tuple((opt(kw("var")), formal_parameter)), |(v, f)| {
+                    (v.is_some(), f)
+                }),
+            ))),
+            char(';'),
         )),
-        char(';'),
-    )), |(_, p, args, _)| ProcedureHead {
-        procedure_id: p,
-        args
-    })(s)
+        |(_, p, args, _)| ProcedureHead {
+            procedure_id: p,
+            args,
+        },
+    )(s)
 }
 
 // 273
@@ -1654,23 +1916,21 @@ fn qualifiable_factor(s: &str) -> IResult<QualifiableFactor> {
         // Try parsing the function call first.  One valid parse is just a
         // function_ref, so we convert that case to _Ambiguous, since it may
         // not actually be a function.
-        map(function_call, |b| if b.1.0.is_empty() {
-            match b.0 {
-                BuiltInOrFunctionRef::BuiltIn(_) =>
-                    QualifiableFactor::FunctionCall(b),
-                BuiltInOrFunctionRef::Ref(b) =>
-                    QualifiableFactor::_Ambiguous(b.0),
+        map(function_call, |b| {
+            if b.1.0.is_empty() {
+                match b.0 {
+                    BuiltInOrFunctionRef::BuiltIn(_) => QualifiableFactor::FunctionCall(b),
+                    BuiltInOrFunctionRef::Ref(b) => QualifiableFactor::_Ambiguous(b.0),
+                }
+            } else {
+                QualifiableFactor::FunctionCall(b)
             }
-        } else {
-            QualifiableFactor::FunctionCall(b)
         }),
         // Same thing for constant_factor, which could match a constant_ref
         // (which in fact matches every ref)
         map(constant_factor, |b| match b {
-            ConstantFactor::BuiltIn(_) =>
-                QualifiableFactor::ConstantFactor(b),
-            ConstantFactor::ConstantRef(b) =>
-                QualifiableFactor::_Ambiguous(b.0),
+            ConstantFactor::BuiltIn(_) => QualifiableFactor::ConstantFactor(b),
+            ConstantFactor::ConstantRef(b) => QualifiableFactor::_Ambiguous(b.0),
         }),
         map(simple_id, |b| QualifiableFactor::_Ambiguous(b.0)),
     ))(s)
@@ -1678,14 +1938,12 @@ fn qualifiable_factor(s: &str) -> IResult<QualifiableFactor> {
 
 // 275 qualified_attribute = SELF group_qualifier attribute_qualifier .
 #[derive(Debug)]
-pub struct QualifiedAttribute<'a>(pub GroupQualifier<'a>,
-                                  pub AttributeQualifier<'a>);
+pub struct QualifiedAttribute<'a>(pub GroupQualifier<'a>, pub AttributeQualifier<'a>);
 fn qualified_attribute(s: &str) -> IResult<QualifiedAttribute> {
-    map(tuple((
-        kw("self"),
-        group_qualifier,
-        attribute_qualifier,
-    )), |(_, a, b)| QualifiedAttribute(a, b))(s)
+    map(
+        tuple((kw("self"), group_qualifier, attribute_qualifier)),
+        |(_, a, b)| QualifiedAttribute(a, b),
+    )(s)
 }
 
 // 276
@@ -1713,39 +1971,43 @@ pub struct QueryExpression<'a> {
     pub logical_expression: LogicalExpression<'a>,
 }
 fn query_expression(s: &str) -> IResult<QueryExpression> {
-    map(tuple((
-        kw("query"),
-        char('('),
-        variable_id,
-        tag("<*"),
-        aggregate_source,
-        char('|'),
-        logical_expression,
-        char(')'),
-    )), |(_, _, var, _, aggregate, _, log, _)| QueryExpression {
-        var,
-        aggregate,
-        logical_expression: log,
-    })(s)
+    map(
+        tuple((
+            kw("query"),
+            char('('),
+            variable_id,
+            tag("<*"),
+            aggregate_source,
+            char('|'),
+            logical_expression,
+            char(')'),
+        )),
+        |(_, _, var, _, aggregate, _, log, _)| QueryExpression {
+            var,
+            aggregate,
+            logical_expression: log,
+        },
+    )(s)
 }
 
 // 278 real_type = REAL [ ’(’ precision_spec ’)’ ] .
 #[derive(Debug)]
 pub struct RealType<'a>(Option<PrecisionSpec<'a>>);
 fn real_type(s: &str) -> IResult<RealType> {
-    map(preceded(kw("real"),
-                 opt(parens(precision_spec))),
-        RealType)(s)
+    map(preceded(kw("real"), opt(parens(precision_spec))), RealType)(s)
 }
 
 // 279 redeclared_attribute = qualified_attribute [ RENAMED attribute_id ] .
 #[derive(Debug)]
-pub struct RedeclaredAttribute<'a>(pub QualifiedAttribute<'a>,
-                                   pub Option<AttributeId<'a>>);
+pub struct RedeclaredAttribute<'a>(pub QualifiedAttribute<'a>, pub Option<AttributeId<'a>>);
 fn redeclared_attribute(s: &str) -> IResult<RedeclaredAttribute> {
-    map(pair(qualified_attribute,
-             opt(preceded(kw("renamed"), attribute_id))),
-        |(a, b)| RedeclaredAttribute(a, b))(s)
+    map(
+        pair(
+            qualified_attribute,
+            opt(preceded(kw("renamed"), attribute_id)),
+        ),
+        |(a, b)| RedeclaredAttribute(a, b),
+    )(s)
 }
 
 // 280 referenced_attribute = attribute_ref | qualified_attribute .
@@ -1756,10 +2018,7 @@ pub enum ReferencedAttribute<'a> {
 }
 fn referenced_attribute(s: &str) -> IResult<ReferencedAttribute> {
     use ReferencedAttribute::*;
-    alt((
-        map(attribute_ref, Ref),
-        map(qualified_attribute, Qualified),
-    ))(s)
+    alt((map(attribute_ref, Ref), map(qualified_attribute, Qualified)))(s)
 }
 
 // 281 reference_clause = REFERENCE FROM schema_ref [ ’(’ resource_or_rename
@@ -1770,46 +2029,62 @@ pub struct ReferenceClause<'a> {
     pub resource_or_rename: Option<Vec<ResourceOrRename<'a>>>,
 }
 fn reference_clause(s: &str) -> IResult<ReferenceClause> {
-    map(tuple((
-        kw("reference"),
-        kw("front"),
-        schema_ref,
-        opt(parens(list1(',', resource_or_rename))),
-        char(';'),
-    )), |(_, _, s, r, _)| ReferenceClause {
-        schema_ref: s,
-        resource_or_rename: r,
-    })(s)
+    map(
+        tuple((
+            kw("reference"),
+            kw("front"),
+            schema_ref,
+            opt(parens(list1(',', resource_or_rename))),
+            char(';'),
+        )),
+        |(_, _, s, r, _)| ReferenceClause {
+            schema_ref: s,
+            resource_or_rename: r,
+        },
+    )(s)
 }
 
 // 282
 #[derive(Debug)]
-pub enum RelOp { LessThan, GreaterThan, LessThanOrEqual, GreaterThanOrEqual,
-             NotEqual, Equal, InstanceEqual, InstanceNotEqual }
+pub enum RelOp {
+    LessThan,
+    GreaterThan,
+    LessThanOrEqual,
+    GreaterThanOrEqual,
+    NotEqual,
+    Equal,
+    InstanceEqual,
+    InstanceNotEqual,
+}
 fn rel_op(s: &str) -> IResult<RelOp> {
     use RelOp::*;
     alt((
         // Sorted by length to avoid prefix issues
         map(tag(":<>:"), |_| InstanceEqual),
-        map(tag(":=:"),  |_| InstanceNotEqual),
-        map(tag("<="),   |_| LessThanOrEqual),
-        map(tag(">="),   |_| GreaterThanOrEqual),
-        map(tag("<>"),   |_| NotEqual),
-        map(char('<'),   |_| LessThan),
-        map(char('>'),   |_| GreaterThan),
-        map(char('='),   |_| Equal),
+        map(tag(":=:"), |_| InstanceNotEqual),
+        map(tag("<="), |_| LessThanOrEqual),
+        map(tag(">="), |_| GreaterThanOrEqual),
+        map(tag("<>"), |_| NotEqual),
+        map(char('<'), |_| LessThan),
+        map(char('>'), |_| GreaterThan),
+        map(char('='), |_| Equal),
     ))(s)
 }
 
 // 283
 #[derive(Debug)]
-pub enum RelOpExtended { RelOp(RelOp), In, Like }
+pub enum RelOpExtended {
+    RelOp(RelOp),
+    In,
+    Like,
+}
 fn rel_op_extended(s: &str) -> IResult<RelOpExtended> {
     use RelOpExtended::*;
     alt((
-        map(kw("in"),   |_| In),
+        map(kw("in"), |_| In),
         map(kw("like"), |_| Like),
-        map(rel_op, RelOp)))(s)
+        map(rel_op, RelOp),
+    ))(s)
 }
 
 // 284
@@ -1831,27 +2106,34 @@ fn rename_id(s: &str) -> IResult<RenameId> {
 pub struct RepeatControl<'a>(
     Option<IncrementControl<'a>>,
     Option<WhileControl<'a>>,
-    Option<UntilControl<'a>>);
+    Option<UntilControl<'a>>,
+);
 fn repeat_control(s: &str) -> IResult<RepeatControl> {
-    map(tuple((
-        opt(increment_control),
-        opt(while_control),
-        opt(until_control),
-    )), |(a, b, c)| RepeatControl(a, b, c))(s)
+    map(
+        tuple((
+            opt(increment_control),
+            opt(while_control),
+            opt(until_control),
+        )),
+        |(a, b, c)| RepeatControl(a, b, c),
+    )(s)
 }
 
 // 286 repeat_stmt = REPEAT repeat_control ’;’ stmt { stmt } END_REPEAT ’;’ .
 #[derive(Debug)]
 pub struct RepeatStmt<'a>(RepeatControl<'a>, Vec<Stmt<'a>>);
 fn repeat_stmt(s: &str) -> IResult<RepeatStmt> {
-    map(tuple((
-        kw("repeat"),
-        repeat_control,
-        char(';'),
-        many1(stmt),
-        kw("end_repeat"),
-        char(';'),
-    )), |(_, r, _, s, _, _)| RepeatStmt(r, s))(s)
+    map(
+        tuple((
+            kw("repeat"),
+            repeat_control,
+            char(';'),
+            many1(stmt),
+            kw("end_repeat"),
+            char(';'),
+        )),
+        |(_, r, _, s, _, _)| RepeatStmt(r, s),
+    )(s)
 }
 
 // 287
@@ -1861,8 +2143,10 @@ alias!(Repetition<'a>, NumericExpression, repetition);
 #[derive(Debug)]
 pub struct ResourceOrRename<'a>(ResourceRef<'a>, Option<RenameId<'a>>);
 fn resource_or_rename(s: &str) -> IResult<ResourceOrRename> {
-    map(pair(resource_ref, opt(preceded(kw("as"), rename_id))),
-        |(a, b)| ResourceOrRename(a, b))(s)
+    map(
+        pair(resource_ref, opt(preceded(kw("as"), rename_id))),
+        |(a, b)| ResourceOrRename(a, b),
+    )(s)
 }
 
 // 289
@@ -1883,11 +2167,11 @@ fn resource_ref(s: &str) -> IResult<ResourceRef> {
 // 290 return_stmt = RETURN [ ’(’ expression ’)’ ] ’;’ .
 #[derive(Debug)]
 pub struct ReturnStmt<'a>(Option<Expression<'a>>);
-fn return_stmt(s:  &str) -> IResult<ReturnStmt> {
-    map(delimited(
-        kw("return"),
-        opt(parens(expression)),
-        char(';')), ReturnStmt)(s)
+fn return_stmt(s: &str) -> IResult<ReturnStmt> {
+    map(
+        delimited(kw("return"), opt(parens(expression)), char(';')),
+        ReturnStmt,
+    )(s)
 }
 
 // 291 rule_decl = rule_head algorithm_head { stmt } where_clause END_RULE ’;’ .
@@ -1899,19 +2183,22 @@ pub struct RuleDecl<'a> {
     pub where_clause: WhereClause<'a>,
 }
 fn rule_decl(s: &str) -> IResult<RuleDecl> {
-    map(tuple((
-        rule_head,
-        algorithm_head,
-        many0(stmt),
-        where_clause,
-        kw("end_rule"),
-        char(';'),
-    )), |(r, a, s, w, _, _)| RuleDecl {
-        rule_head: r,
-        algorithm_head: a,
-        stmt: s,
-        where_clause: w,
-    })(s)
+    map(
+        tuple((
+            rule_head,
+            algorithm_head,
+            many0(stmt),
+            where_clause,
+            kw("end_rule"),
+            char(';'),
+        )),
+        |(r, a, s, w, _, _)| RuleDecl {
+            rule_head: r,
+            algorithm_head: a,
+            stmt: s,
+            where_clause: w,
+        },
+    )(s)
 }
 
 // 292 rule_head = RULE rule_id FOR ’(’ entity_ref { ’,’ entity_ref } ’)’ ’;’ .
@@ -1921,16 +2208,19 @@ pub struct RuleHead<'a> {
     pub entities: Vec<EntityRef<'a>>,
 }
 fn rule_head(s: &str) -> IResult<RuleHead> {
-    map(tuple((
-        kw("rule"),
-        rule_id,
-        kw("for"),
-        parens(list1(',', entity_ref)),
-        char(';'),
-    )), |(_, id, _, es, _)| RuleHead {
-        rule_id: id,
-        entities: es,
-    })(s)
+    map(
+        tuple((
+            kw("rule"),
+            rule_id,
+            kw("for"),
+            parens(list1(',', entity_ref)),
+            char(';'),
+        )),
+        |(_, id, _, es, _)| RuleHead {
+            rule_id: id,
+            entities: es,
+        },
+    )(s)
 }
 
 // 293
@@ -1953,17 +2243,21 @@ pub struct SchemaBody<'a> {
     pub declarations: Vec<DeclarationOrRuleDecl<'a>>,
 }
 fn schema_body(s: &str) -> IResult<SchemaBody> {
-    map(tuple((
-        many0(interface_specification),
-        opt(constant_decl),
-        many0(alt((
-            map(declaration, DeclarationOrRuleDecl::Declaration),
-            map(rule_decl, DeclarationOrRuleDecl::RuleDecl),
-        ))),
-    )), |(a, b, c)| SchemaBody {
-        interfaces: a,
-        constants: b,
-        declarations: c})(s)
+    map(
+        tuple((
+            many0(interface_specification),
+            opt(constant_decl),
+            many0(alt((
+                map(declaration, DeclarationOrRuleDecl::Declaration),
+                map(rule_decl, DeclarationOrRuleDecl::RuleDecl),
+            ))),
+        )),
+        |(a, b, c)| SchemaBody {
+            interfaces: a,
+            constants: b,
+            declarations: c,
+        },
+    )(s)
 }
 
 // 296
@@ -1974,17 +2268,18 @@ pub struct SchemaDecl<'a> {
     pub body: SchemaBody<'a>,
 }
 fn schema_decl(s: &str) -> IResult<SchemaDecl> {
-    map(tuple((
-        kw("schema"),
-        schema_id,
-        opt(schema_version_id),
-        char(';'),
-        schema_body,
-        kw("end_schema"),
-        char(';')
-    )), |(_, id, version, _, body, _, _)| SchemaDecl {
-        id, version, body
-    })(s)
+    map(
+        tuple((
+            kw("schema"),
+            schema_id,
+            opt(schema_version_id),
+            char(';'),
+            schema_body,
+            kw("end_schema"),
+            char(';'),
+        )),
+        |(_, id, version, _, body, _, _)| SchemaDecl { id, version, body },
+    )(s)
 }
 
 // 297
@@ -2003,12 +2298,17 @@ pub struct SelectExtension<'a> {
     pub select_list: Option<SelectList<'a>>,
 }
 fn select_extension(s: &str) -> IResult<SelectExtension> {
-    map(tuple((
-        kw("based_on"), type_ref,
-        opt(preceded(kw("with"), select_list))
-    )), |(_, a, b)| SelectExtension {
-        type_ref: a, select_list: b
-    })(s)
+    map(
+        tuple((
+            kw("based_on"),
+            type_ref,
+            opt(preceded(kw("with"), select_list)),
+        )),
+        |(_, a, b)| SelectExtension {
+            type_ref: a,
+            select_list: b,
+        },
+    )(s)
 }
 
 // 301
@@ -2032,18 +2332,21 @@ pub struct SelectType<'a> {
     pub list_or_extension: SelectListOrExtension<'a>,
 }
 fn select_type(s: &str) -> IResult<SelectType> {
-    map(tuple((
-        opt(pair(kw("extensible"), opt(kw("generic_entity")))),
-        kw("select"),
-        alt((
-            map(select_list, SelectListOrExtension::List),
-            map(select_extension, SelectListOrExtension::Extension),
-        ))
-    )), |(a, _, c)| SelectType{
-        extensible: a.is_some(),
-        generic_entity: a.is_some() && a.unwrap().1.is_some(),
-        list_or_extension: c
-    })(s)
+    map(
+        tuple((
+            opt(pair(kw("extensible"), opt(kw("generic_entity")))),
+            kw("select"),
+            alt((
+                map(select_list, SelectListOrExtension::List),
+                map(select_extension, SelectListOrExtension::Extension),
+            )),
+        )),
+        |(a, _, c)| SelectType {
+            extensible: a.is_some(),
+            generic_entity: a.is_some() && a.unwrap().1.is_some(),
+            list_or_extension: c,
+        },
+    )(s)
 }
 
 // 303
@@ -2053,16 +2356,13 @@ pub struct SetType<'a> {
     pub instantiable_type: Box<InstantiableType<'a>>,
 }
 fn set_type(s: &str) -> IResult<SetType> {
-    map(tuple((
-        kw("set"),
-        opt(bound_spec),
-        kw("of"),
-        instantiable_type,
-    )),
-    |(_, b, _, t)| SetType {
-        bounds: b,
-        instantiable_type: Box::new(t),
-    })(s)
+    map(
+        tuple((kw("set"), opt(bound_spec), kw("of"), instantiable_type)),
+        |(_, b, _, t)| SetType {
+            bounds: b,
+            instantiable_type: Box::new(t),
+        },
+    )(s)
 }
 
 // 304 sign = ’+’ | ’-’ .
@@ -2095,47 +2395,50 @@ pub enum SimpleFactor<'a> {
     // Both EntityConstructor and primary -> qualifiable_factor -> function_call
     // can match things of the form function_ref(expression, expression, ...),
     // so we match them with an "ambiguous" branch here
-
     _AmbiguousFunctionCall(SimpleId<'a>, Vec<Expression<'a>>),
     AggregateInitializer(AggregateInitializer<'a>),
     EntityConstructor(EntityConstructor<'a>),
     EnumerationReference(EnumerationReference<'a>),
     Interval(Interval<'a>),
     QueryExpression(QueryExpression<'a>),
-    Unary(Option<UnaryOp>, ExpressionOrPrimary<'a>)
+    Unary(Option<UnaryOp>, ExpressionOrPrimary<'a>),
 }
 
 fn ambiguous_function_call(s: &str) -> IResult<SimpleFactor> {
-    map(terminated(
-        // simple_id already refuses to eat built-in functions
-        pair(simple_id, parens(list0(',', expression))),
-        // ambiguous_function_call has a special-case to avoid eating a primary
-        // function call, e.g. "cross_product(axis, ref_direction).magnitude"
-        not(peek(alt((char('.'), char('\\')))))),
-        |(a, b)| SimpleFactor::_AmbiguousFunctionCall(a, b))(s)
+    map(
+        terminated(
+            // simple_id already refuses to eat built-in functions
+            pair(simple_id, parens(list0(',', expression))),
+            // ambiguous_function_call has a special-case to avoid eating a primary
+            // function call, e.g. "cross_product(axis, ref_direction).magnitude"
+            not(peek(alt((char('.'), char('\\'))))),
+        ),
+        |(a, b)| SimpleFactor::_AmbiguousFunctionCall(a, b),
+    )(s)
 }
 
 fn simple_factor(s: &str) -> IResult<SimpleFactor> {
     use SimpleFactor::*;
     alt((
         map(aggregate_initializer, AggregateInitializer),
-
         // This produces _AmbiguousFunctionCall objects which can represent
         // either an `EntityConstructor` or a `FunctionCall` without a trailing
         // qualifier.
         ambiguous_function_call,
-
         map(interval, Interval),
         map(query_expression, QueryExpression),
-
-        map(pair(
-            opt(unary_op),
-            alt((
-                map(parens(expression),
-                    |e| ExpressionOrPrimary::Expression(Box::new(e))),
-                map(primary, ExpressionOrPrimary::Primary)
-            ))), |(op, p)| Unary(op, p)),
-
+        map(
+            pair(
+                opt(unary_op),
+                alt((
+                    map(parens(expression), |e| {
+                        ExpressionOrPrimary::Expression(Box::new(e))
+                    }),
+                    map(primary, ExpressionOrPrimary::Primary),
+                )),
+            ),
+            |(op, p)| Unary(op, p),
+        ),
         // At the bottom, because this will consume a single ref
         map(enumeration_reference, EnumerationReference),
     ))(s)
@@ -2145,17 +2448,22 @@ fn simple_factor(s: &str) -> IResult<SimpleFactor> {
 //                    number_type | real_type | string_type .
 #[derive(Debug)]
 pub enum SimpleTypes<'a> {
-    Binary(BinaryType<'a>), Boolean, Integer, Logical, Number,
-    Real(RealType<'a>), String(StringType<'a>),
+    Binary(BinaryType<'a>),
+    Boolean,
+    Integer,
+    Logical,
+    Number,
+    Real(RealType<'a>),
+    String(StringType<'a>),
 }
 fn simple_types(s: &str) -> IResult<SimpleTypes> {
     use SimpleTypes::*;
     alt((
-        map(binary_type,  Binary),
+        map(binary_type, Binary),
         map(boolean_type, |_| Boolean),
         map(integer_type, |_| Integer),
         map(logical_type, |_| Logical),
-        map(number_type,  |_| Number),
+        map(number_type, |_| Number),
         map(real_type, Real),
         map(string_type, String),
     ))(s)
@@ -2208,7 +2516,9 @@ impl StringLiteral {
         map(alt((simple_string_literal, encoded_string_literal)), Self)(s)
     }
 }
-fn string_literal(s: &str) -> IResult<StringLiteral> { StringLiteral::parse(s) }
+fn string_literal(s: &str) -> IResult<StringLiteral> {
+    StringLiteral::parse(s)
+}
 
 // 311 string_type = STRING [ width_spec ] .
 #[derive(Debug)]
@@ -2219,19 +2529,25 @@ fn string_type(s: &str) -> IResult<StringType> {
 
 // 312 subsuper = [ supertype_constraint ] [ subtype_declaration ] .
 #[derive(Debug)]
-pub struct Subsuper<'a>(pub Option<SupertypeConstraint<'a>>,
-                        pub Option<SubtypeDeclaration<'a>>);
+pub struct Subsuper<'a>(
+    pub Option<SupertypeConstraint<'a>>,
+    pub Option<SubtypeDeclaration<'a>>,
+);
 fn subsuper(s: &str) -> IResult<Subsuper> {
-    map(pair(opt(supertype_constraint), opt(subtype_declaration)),
-        |(a, b)| Subsuper(a, b))(s)
+    map(
+        pair(opt(supertype_constraint), opt(subtype_declaration)),
+        |(a, b)| Subsuper(a, b),
+    )(s)
 }
 
 // 313 subtype_constraint = OF ’(’ supertype_expression ’)’ .
 #[derive(Debug)]
 pub struct SubtypeConstraint<'a>(SupertypeExpression<'a>);
 fn subtype_constraint(s: &str) -> IResult<SubtypeConstraint> {
-    map(preceded(kw("of"), parens(supertype_expression)),
-        SubtypeConstraint)(s)
+    map(
+        preceded(kw("of"), parens(supertype_expression)),
+        SubtypeConstraint,
+    )(s)
 }
 
 // 314 subtype_constraint_body = [ abstract_supertype ] [ total_over ]
@@ -2243,29 +2559,34 @@ pub struct SubtypeConstraintBody<'a> {
     pub supertype: Option<SupertypeExpression<'a>>,
 }
 fn subtype_constraint_body(s: &str) -> IResult<SubtypeConstraintBody> {
-    map(tuple((
-        opt(abstract_supertype),
-        opt(total_over),
-        opt(terminated(supertype_expression, char(';'))),
-    )), |(a, b, c)| SubtypeConstraintBody {
-        abstract_super: a.is_some(),
-        total_over: b,
-        supertype: c
-    })(s)
+    map(
+        tuple((
+            opt(abstract_supertype),
+            opt(total_over),
+            opt(terminated(supertype_expression, char(';'))),
+        )),
+        |(a, b, c)| SubtypeConstraintBody {
+            abstract_super: a.is_some(),
+            total_over: b,
+            supertype: c,
+        },
+    )(s)
 }
 
 // 315 subtype_constraint_decl = subtype_constraint_head subtype_constraint_body
 //                               END_SUBTYPE_CONSTRAINT ’;’ .
 #[derive(Debug)]
-pub struct SubtypeConstraintDecl<'a>(SubtypeConstraintHead<'a>,
-                                     SubtypeConstraintBody<'a>);
+pub struct SubtypeConstraintDecl<'a>(SubtypeConstraintHead<'a>, SubtypeConstraintBody<'a>);
 fn subtype_constraint_decl(s: &str) -> IResult<SubtypeConstraintDecl> {
-    map(tuple((
-        subtype_constraint_head,
-        subtype_constraint_body,
-        kw("end_subtype_constraint"),
-        char(';')
-    )), |(a, b, _, _)| SubtypeConstraintDecl(a, b))(s)
+    map(
+        tuple((
+            subtype_constraint_head,
+            subtype_constraint_body,
+            kw("end_subtype_constraint"),
+            char(';'),
+        )),
+        |(a, b, _, _)| SubtypeConstraintDecl(a, b),
+    )(s)
 }
 
 // 316 subtype_constraint_head = SUBTYPE_CONSTRAINT subtype_constraint_id FOR
@@ -2273,13 +2594,16 @@ fn subtype_constraint_decl(s: &str) -> IResult<SubtypeConstraintDecl> {
 #[derive(Debug)]
 pub struct SubtypeConstraintHead<'a>(SubtypeConstraintId<'a>, EntityRef<'a>);
 fn subtype_constraint_head(s: &str) -> IResult<SubtypeConstraintHead> {
-    map(tuple((
-        kw("subtype_constraint"),
-        subtype_constraint_id,
-        kw("for"),
-        entity_ref,
-        char(';')
-    )), |(_, a, _, b, _)| SubtypeConstraintHead(a, b))(s)
+    map(
+        tuple((
+            kw("subtype_constraint"),
+            subtype_constraint_id,
+            kw("for"),
+            entity_ref,
+            char(';'),
+        )),
+        |(_, a, _, b, _)| SubtypeConstraintHead(a, b),
+    )(s)
 }
 
 // 317
@@ -2289,9 +2613,13 @@ id_type!(SubtypeConstraintId, subtype_constraint_id);
 #[derive(Debug)]
 pub struct SubtypeDeclaration<'a>(pub Vec<EntityRef<'a>>);
 fn subtype_declaration(s: &str) -> IResult<SubtypeDeclaration> {
-    map(preceded(tuple((kw("subtype"), kw("of"))),
-                 parens(list1(',', entity_ref))),
-        SubtypeDeclaration)(s)
+    map(
+        preceded(
+            tuple((kw("subtype"), kw("of"))),
+            parens(list1(',', entity_ref)),
+        ),
+        SubtypeDeclaration,
+    )(s)
 }
 
 // 319 supertype_constraint = abstract_entity_declaration |
@@ -2300,7 +2628,7 @@ fn subtype_declaration(s: &str) -> IResult<SubtypeDeclaration> {
 pub enum SupertypeConstraint<'a> {
     AbstractEntity,
     AbstractSupertype(AbstractSupertypeDeclaration<'a>),
-    SupertypeRule(SupertypeRule<'a>)
+    SupertypeRule(SupertypeRule<'a>),
 }
 fn supertype_constraint(s: &str) -> IResult<SupertypeConstraint> {
     use SupertypeConstraint::*;
@@ -2314,8 +2642,7 @@ fn supertype_constraint(s: &str) -> IResult<SupertypeConstraint> {
 
 // 320 supertype_expression = supertype_factor { ANDOR supertype_factor } .
 #[derive(Debug)]
-pub struct SupertypeExpression<'a>(SupertypeFactor<'a>,
-                               Vec<SupertypeFactor<'a>>);
+pub struct SupertypeExpression<'a>(SupertypeFactor<'a>, Vec<SupertypeFactor<'a>>);
 fn supertype_expression(s: &str) -> IResult<SupertypeExpression> {
     let (s, a) = supertype_factor(s)?;
     let (s, b) = many0(preceded(kw("andor"), supertype_factor))(s)?;
@@ -2326,8 +2653,7 @@ fn supertype_expression(s: &str) -> IResult<SupertypeExpression> {
 #[derive(Debug)]
 pub struct SupertypeFactor<'a>(Vec<SupertypeTerm<'a>>);
 fn supertype_factor(s: &str) -> IResult<SupertypeFactor> {
-    map(separated_list1(kw("and"), supertype_term),
-        SupertypeFactor)(s)
+    map(separated_list1(kw("and"), supertype_term), SupertypeFactor)(s)
 }
 
 // 322 supertype_rule = SUPERTYPE subtype_constraint .
@@ -2364,19 +2690,20 @@ fn syntax(s: &str) -> IResult<Syntax> {
 #[derive(Debug)]
 pub struct Term<'a>(pub Factor<'a>, pub Vec<(MultiplicationLikeOp, Factor<'a>)>);
 fn term(s: &str) -> IResult<Term> {
-    map(pair(factor, many0(pair(multiplication_like_op, factor))),
-        |(a, b)| Term(a, b))(s)
+    map(
+        pair(factor, many0(pair(multiplication_like_op, factor))),
+        |(a, b)| Term(a, b),
+    )(s)
 }
 
 // 326 total_over = TOTAL_OVER ’(’ entity_ref { ’,’ entity_ref } ’)’ ’;’ .
 #[derive(Debug)]
 pub struct TotalOver<'a>(Vec<EntityRef<'a>>);
 fn total_over(s: &str) -> IResult<TotalOver> {
-    map(delimited(
-            kw("total_over"),
-            parens(list1(',', entity_ref)),
-            char(';')),
-        TotalOver)(s)
+    map(
+        delimited(kw("total_over"), parens(list1(',', entity_ref)), char(';')),
+        TotalOver,
+    )(s)
 }
 
 // 327 type_decl = TYPE type_id ’=’ underlying_type ’;’ [ where_clause ] END_TYPE ’;’ .
@@ -2387,20 +2714,23 @@ pub struct TypeDecl<'a> {
     pub where_clause: Option<WhereClause<'a>>,
 }
 fn type_decl(s: &str) -> IResult<TypeDecl> {
-    map(tuple((
-        kw("type"),
-        type_id,
-        char('='),
-        underlying_type,
-        char(';'),
-        opt(where_clause),
-        kw("end_type"),
-        char(';'),
-    )), |(_, t, _, u, _, w, _, _)| TypeDecl {
-        type_id: t,
-        underlying_type: u,
-        where_clause: w,
-    })(s)
+    map(
+        tuple((
+            kw("type"),
+            type_id,
+            char('='),
+            underlying_type,
+            char(';'),
+            opt(where_clause),
+            kw("end_type"),
+            char(';'),
+        )),
+        |(_, t, _, u, _, w, _, _)| TypeDecl {
+            type_id: t,
+            underlying_type: u,
+            where_clause: w,
+        },
+    )(s)
 }
 
 // 328
@@ -2423,12 +2753,16 @@ pub struct TypeLabelId<'a>(SimpleId<'a>);
 
 // 331
 #[derive(Debug, Eq, PartialEq)]
-pub enum UnaryOp { Add, Sub, Not }
+pub enum UnaryOp {
+    Add,
+    Sub,
+    Not,
+}
 fn unary_op(s: &str) -> IResult<UnaryOp> {
     use UnaryOp::*;
     alt((
-        map(char('+'),  |_| Add),
-        map(char('-'),  |_| Sub),
+        map(char('+'), |_| Add),
+        map(char('-'), |_| Sub),
         map(kw("not"), |_| Not),
     ))(s)
 }
@@ -2453,7 +2787,10 @@ fn underlying_type(s: &str) -> IResult<UnderlyingType> {
 #[derive(Debug)]
 pub struct UniqueClause<'a>(Vec<UniqueRule<'a>>);
 fn unique_clause(s: &str) -> IResult<UniqueClause> {
-    map(preceded(kw("unique"), many1(terminated(unique_rule, char(';')))), UniqueClause)(s)
+    map(
+        preceded(kw("unique"), many1(terminated(unique_rule, char(';')))),
+        UniqueClause,
+    )(s)
 }
 
 // 334 unique_rule = [ rule_label_id ’:’ ] referenced_attribute { ’,’
@@ -2464,9 +2801,13 @@ pub struct UniqueRule<'a> {
     pub attrs: Vec<ReferencedAttribute<'a>>,
 }
 fn unique_rule(s: &str) -> IResult<UniqueRule> {
-    map(pair(opt(terminated(rule_label_id, char(':'))),
-             list1(',', referenced_attribute)),
-        |(a, b)| UniqueRule { label: a, attrs: b })(s)
+    map(
+        pair(
+            opt(terminated(rule_label_id, char(':'))),
+            list1(',', referenced_attribute),
+        ),
+        |(a, b)| UniqueRule { label: a, attrs: b },
+    )(s)
 }
 
 // 335 until_control = UNTIL logical_expression .
@@ -2484,16 +2825,19 @@ pub struct UseClause<'a> {
     pub named_type_or_rename: Option<Vec<NamedTypeOrRename<'a>>>,
 }
 fn use_clause(s: &str) -> IResult<UseClause> {
-    map(tuple((
-        kw("use"),
-        kw("from"),
-        schema_ref,
-        opt(parens(list1(',', named_type_or_rename))),
-        char(';'),
-    )), |(_, _, s, r, _)| UseClause {
-        schema_ref: s,
-        named_type_or_rename: r,
-    })(s)
+    map(
+        tuple((
+            kw("use"),
+            kw("from"),
+            schema_ref,
+            opt(parens(list1(',', named_type_or_rename))),
+            char(';'),
+        )),
+        |(_, _, s, r, _)| UseClause {
+            schema_ref: s,
+            named_type_or_rename: r,
+        },
+    )(s)
 }
 
 // 337 variable_id = simple_id .
@@ -2520,10 +2864,15 @@ alias!(Width<'a>, NumericExpression, width);
 
 // 341 width_spec = ’(’ width ’)’ [ FIXED ] .
 #[derive(Debug)]
-pub struct WidthSpec<'a> { pub expression: Width<'a>, pub fixed: bool }
+pub struct WidthSpec<'a> {
+    pub expression: Width<'a>,
+    pub fixed: bool,
+}
 fn width_spec(s: &str) -> IResult<WidthSpec> {
-    map(pair(parens(width), opt(kw("fixed"))),
-        |(w, f)| WidthSpec { expression: w, fixed: f.is_some() })(s)
+    map(pair(parens(width), opt(kw("fixed"))), |(w, f)| WidthSpec {
+        expression: w,
+        fixed: f.is_some(),
+    })(s)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2541,7 +2890,8 @@ mod tests {
 
     #[test]
     fn test_derived_attr() {
-        let e = derived_attr(r#"users : set of founded_item_select := using_items(self, []);"#).unwrap();
+        let e = derived_attr(r#"users : set of founded_item_select := using_items(self, []);"#)
+            .unwrap();
         assert_eq!(e.0, "");
     }
 
@@ -2553,27 +2903,34 @@ mod tests {
 
     #[test]
     fn test_entity_decl() {
-        let e = entity_decl(r#"entity action_assignment abstract supertype;
+        let e = entity_decl(
+            r#"entity action_assignment abstract supertype;
   assigned_action : action;
 derive
   role : object_role := get_role(self);
 where
   wr1 : sizeof(usedin(self, 
     'automotive_design.role_association.item_with_role')) <= 1;
-end_entity;  "#).unwrap();
+end_entity;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity advanced_brep_shape_representation
+        let e = entity_decl(
+            r#"entity advanced_brep_shape_representation
 subtype of (shape_representation);
 where
   wr1 : sizeof(query(it <* self.items | not (sizeof([
     'automotive_design.manifold_solid_brep', 
     'automotive_design.faceted_brep', 'automotive_design.mapped_item', 
     'automotive_design.axis2_placement_3d'] * typeof(it)) = 1))) = 0;
-end_entity; "#).unwrap();
+end_entity; "#,
+        )
+        .unwrap();
         assert!(e.0 == "");
 
-        let e = entity_decl(r#"entity advanced_face
+        let e = entity_decl(
+            r#"entity advanced_face
 subtype of (face_surface);
 where
   wr1 : sizeof(['automotive_design.elementary_surface', 
@@ -2631,10 +2988,13 @@ where
     'automotive_design.polyline' in typeof(oe\oriented_edge.edge_element\
     edge_curve.edge_geometry)) and not (sizeof(oe\oriented_edge.edge_element\
     edge_curve.edge_geometry\polyline.points) >= 3))) = 0))) = 0);
-end_entity; "#).unwrap();
+end_entity; "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity alternate_product_relationship;
+        let e = entity_decl(
+            r#"entity alternate_product_relationship;
   name : label;
   definition :  optional text;
   alternate : product;
@@ -2644,10 +3004,13 @@ unique
   ur1 : alternate, base;
 where
   wr1 : alternate :<>: base;
-end_entity;  "#).unwrap();
+end_entity;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity annotation_fill_area
+        let e = entity_decl(
+            r#"entity annotation_fill_area
 subtype of (geometric_representation_item);
   boundaries : set [1:?] of curve;
 where
@@ -2660,10 +3023,13 @@ where
     composite_curve.closed_curve = true) or ('automotive_design.polyline' in
      typeof(curve)) and (curve\polyline.points[loindex(curve\polyline.points)]
      = curve\polyline.points[hiindex(curve\polyline.points)])))) = 0);
-end_entity;  "#).unwrap();
+end_entity;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity axis2_placement_3d
+        let e = entity_decl(
+            r#"entity axis2_placement_3d
 subtype of (placement);
   axis :  optional direction;
   ref_direction :  optional direction;
@@ -2675,10 +3041,13 @@ where
   wr3 : not exists(ref_direction) or (ref_direction.dim = 3);
   wr4 : not exists(axis) or not exists(ref_direction) or (cross_product(axis, 
     ref_direction).magnitude > 0.0);
-end_entity;  "#).unwrap();
+end_entity;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity b_spline_curve
+        let e = entity_decl(
+            r#"entity b_spline_curve
 supertype of (oneof (uniform_curve, b_spline_curve_with_knots, 
 quasi_uniform_curve, bezier_curve) andor rational_b_spline_curve)
 subtype of (bounded_curve);
@@ -2697,16 +3066,22 @@ where
     'automotive_design.quasi_uniform_curve' in typeof(self)) or (
     'automotive_design.bezier_curve' in typeof(self)) or (
     'automotive_design.b_spline_curve_with_knots' in typeof(self));
-end_entity;  "#).unwrap();
+end_entity;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity binary_generic_expression abstract supertype
+        let e = entity_decl(
+            r#"entity binary_generic_expression abstract supertype
 subtype of (generic_expression);
   operands :  list [2:2] of generic_expression;
-end_entity; "#).unwrap();
+end_entity; "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity composite_hole
+        let e = entity_decl(
+            r#"entity composite_hole
 subtype of (compound_feature);
 where
   wr1 : self\characterized_object.description in ['counterbore', 'countersunk']
@@ -2745,16 +3120,21 @@ where
     'automotive_design.shape_aspect_relationship.related_shape_aspect') | (
     sar.description = 'taper usage') and ('automotive_design.' + 'taper' in 
     typeof(sar.relating_shape_aspect)))) = 1))) = 1)) = 1))) = 1);
-end_entity;  "#).unwrap();
+end_entity;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = entity_decl(r#"entity founded_item;
+        let e = entity_decl(
+            r#"entity founded_item;
 derive
   users : set of founded_item_select := using_items(self, []);
 where
   wr1 : sizeof(users) > 0;
   wr2 : not (self in users);
-end_entity;  "#).unwrap();
+end_entity;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
@@ -2784,7 +3164,10 @@ end_entity;  "#).unwrap();
     fn test_encoded_string_literal() {
         assert_eq!(&encoded_string_literal("\"\"").unwrap().1, "");
         assert_eq!(&encoded_string_literal("\"00000041\"").unwrap().1, "A");
-        assert_eq!(&encoded_string_literal("\"0000795e00006238\"").unwrap().1, "神戸");
+        assert_eq!(
+            &encoded_string_literal("\"0000795e00006238\"").unwrap().1,
+            "神戸"
+        );
     }
 
     #[test]
@@ -2795,52 +3178,74 @@ end_entity;  "#).unwrap();
 
     #[test]
     fn test_type_decl() {
-        type_decl(r#"type action_item = select
+        type_decl(
+            r#"type action_item = select
   (action, action_directive, action_method, action_property,
   shape_representation, versioned_action_request);
-end_type;  "#).unwrap();
+end_type;  "#,
+        )
+        .unwrap();
 
-        let e = type_decl(r#"type day_in_month_number = integer;
+        let e = type_decl(
+            r#"type day_in_month_number = integer;
 where
   wr1 : {1 <= self <= 31};
-  end_type;  "#).unwrap();
+  end_type;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = type_decl(r#"type non_negative_length_measure = length_measure;
+        let e = type_decl(
+            r#"type non_negative_length_measure = length_measure;
 where
   wr1 : self >= 0.0;
-end_type;  "#).unwrap();
+end_type;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_where_clause() {
-        let e = where_clause(r#"where
-          wr1 : {1 <= self <= 31};"#).unwrap();
+        let e = where_clause(
+            r#"where
+          wr1 : {1 <= self <= 31};"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = where_clause(r#"where
-wr1 : self >= 0.0; "#).unwrap();
+        let e = where_clause(
+            r#"where
+wr1 : self >= 0.0; "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = where_clause(r#"where
+        let e = where_clause(
+            r#"where
   wr1 : sizeof(query(it <* self.items | not (sizeof([
     'automotive_design.manifold_solid_brep', 
     'automotive_design.faceted_brep', 'automotive_design.mapped_item', 
-    'automotive_design.axis2_placement_3d'] * typeof(it)) = 1))) = 0;"#).unwrap();
+    'automotive_design.axis2_placement_3d'] * typeof(it)) = 1))) = 0;"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_domain_rule() {
-        let e = domain_rule(r#"wr3 : sizeof(query(msb <* query(it <* self.items | 
+        let e = domain_rule(
+            r#"wr3 : sizeof(query(msb <* query(it <* self.items | 
     'automotive_design.manifold_solid_brep' in typeof(it)) | not (sizeof(
     query(csh <* msb_shells(msb) | not (sizeof(query(fcs <* csh\
     connected_face_set.cfs_faces | not ('automotive_design.advanced_face' in
-     typeof(fcs)))) = 0))) = 0))) = 0;"#).unwrap();
+     typeof(fcs)))) = 0))) = 0))) = 0;"#,
+        )
+        .unwrap();
         assert_eq!(e.0, ";");
 
-        let e = domain_rule(r#"wr10 : (not ('automotive_design.swept_surface' in typeof(face_geometry)) 
+        let e = domain_rule(
+            r#"wr10 : (not ('automotive_design.swept_surface' in typeof(face_geometry)) 
     or not ('automotive_design.polyline' in typeof(face_geometry\
     swept_surface.swept_curve)) or (sizeof(face_geometry\swept_surface.
     swept_curve\polyline.points) >= 3)) and (sizeof(query(elp_fbnds <* query(
@@ -2848,20 +3253,26 @@ wr1 : self >= 0.0; "#).unwrap();
     not (sizeof(query(oe <* elp_fbnds.bound\path.edge_list | (
     'automotive_design.polyline' in typeof(oe\oriented_edge.edge_element\
     edge_curve.edge_geometry)) and not (sizeof(oe\oriented_edge.edge_element\
-    edge_curve.edge_geometry\polyline.points) >= 3))) = 0))) = 0);"#).unwrap();
+    edge_curve.edge_geometry\polyline.points) >= 3))) = 0))) = 0);"#,
+        )
+        .unwrap();
         assert_eq!(e.0, ";");
 
-        let e = domain_rule(r#"wr4 : sizeof(query(elp_fbnds <* query(bnds <* bounds | 
+        let e = domain_rule(
+            r#"wr4 : sizeof(query(elp_fbnds <* query(bnds <* bounds | 
     'automotive_design.edge_loop' in typeof(bnds.bound)) | not (sizeof(
     query(oe <* elp_fbnds.bound\path.edge_list | not ((
     'automotive_design.vertex_point' in typeof(oe\edge.edge_start)) and (
     'automotive_design.cartesian_point' in typeof(oe\edge.edge_start\
     vertex_point.vertex_geometry)) and ('automotive_design.vertex_point' in 
     typeof(oe\edge.edge_end)) and ('automotive_design.cartesian_point' in 
-    typeof(oe\edge.edge_end\vertex_point.vertex_geometry))))) = 0))) = 0;"#).unwrap();
+    typeof(oe\edge.edge_end\vertex_point.vertex_geometry))))) = 0))) = 0;"#,
+        )
+        .unwrap();
         assert_eq!(e.0, ";");
 
-        let e = domain_rule(r#"wr1 : (self\geometric_representation_item.dim = 3) or (sizeof(query(curve <* 
+        let e = domain_rule(
+            r#"wr1 : (self\geometric_representation_item.dim = 3) or (sizeof(query(curve <* 
     self.boundaries | not (('automotive_design.circle' in typeof(curve)) or 
     ('automotive_design.ellipse' in typeof(curve)) or (
     'automotive_design.b_spline_curve' in typeof(curve)) and (curve\
@@ -2869,10 +3280,13 @@ wr1 : self >= 0.0; "#).unwrap();
     'automotive_design.composite_curve' in typeof(curve)) and (curve\
     composite_curve.closed_curve = true) or ('automotive_design.polyline' in
      typeof(curve)) and (curve\polyline.points[loindex(curve\polyline.points)]
-     = curve\polyline.points[hiindex(curve\polyline.points)])))) = 0);"#).unwrap();
+     = curve\polyline.points[hiindex(curve\polyline.points)])))) = 0);"#,
+        )
+        .unwrap();
         assert_eq!(e.0, ";");
 
-        let e = domain_rule(r#"wr4 : sizeof(query(sa <* get_shape_aspects(self) | ('automotive_design.'
+        let e = domain_rule(
+            r#"wr4 : sizeof(query(sa <* get_shape_aspects(self) | ('automotive_design.'
      + 'composite_shape_aspect' in typeof(sa)) and (sa.name = 
     'compound feature in solid') and (sizeof(query(rh1 <* 
     get_round_holes_for_composite_hole(bag_to_set(usedin(sa, 
@@ -2880,7 +3294,9 @@ wr1 : self >= 0.0; "#).unwrap();
      | sizeof(query(rh2 <* get_round_holes_for_composite_hole(bag_to_set(usedin
     (sa, 'automotive_design.shape_aspect_relationship.relating_shape_aspect'
     ))) | (rh1 :<>: rh2) and (get_diameter_for_round_hole(rh1) = 
-    get_diameter_for_round_hole(rh2)))) = 0)) = 0))) = 1;"#).unwrap();
+    get_diameter_for_round_hole(rh2)))) = 0)) = 0))) = 1;"#,
+        )
+        .unwrap();
         assert_eq!(e.0, ";");
     }
 
@@ -2892,38 +3308,53 @@ wr1 : self >= 0.0; "#).unwrap();
 
     #[test]
     fn test_aggregate_initializer() {
-        let e = aggregate_initializer(r#"[d2, normalise(cross_product(d1, d2))\vector.orientation, d1]"#).unwrap();
+        let e = aggregate_initializer(
+            r#"[d2, normalise(cross_product(d1, d2))\vector.orientation, d1]"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_query_expression() {
-        let e = query_expression(r#"query(fcs <* csh\
+        let e = query_expression(
+            r#"query(fcs <* csh\
     connected_face_set.cfs_faces | not ('automotive_design.advanced_face' in
-     typeof(fcs)))"#).unwrap();
+     typeof(fcs)))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = query_expression(r#"query(it <* self.items | not (sizeof([
+        let e = query_expression(
+            r#"query(it <* self.items | not (sizeof([
     'automotive_design.manifold_solid_brep', 
     'automotive_design.faceted_brep', 'automotive_design.mapped_item', 
-    'automotive_design.axis2_placement_3d'] * typeof(it)) = 1))"#).unwrap();
+    'automotive_design.axis2_placement_3d'] * typeof(it)) = 1))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = query_expression(r#"query(msb <* query(it <* self.items | 
+        let e = query_expression(
+            r#"query(msb <* query(it <* self.items | 
     'automotive_design.manifold_solid_brep' in typeof(it)) | not (sizeof(
     query(csh <* msb_shells(msb) | not (sizeof(query(fcs <* csh\
     connected_face_set.cfs_faces | not ('automotive_design.advanced_face' in
-     typeof(fcs)))) = 0))) = 0))"#).unwrap();
+     typeof(fcs)))) = 0))) = 0))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = query_expression(r#"query(elp_fbnds <* query(bnds <* bounds | 
+        let e = query_expression(
+            r#"query(elp_fbnds <* query(bnds <* bounds | 
     'automotive_design.edge_loop' in typeof(bnds.bound)) | not (sizeof(
     query(oe <* elp_fbnds.bound\path.edge_list | not ((
     'automotive_design.vertex_point' in typeof(oe\edge.edge_start)) and (
     'automotive_design.cartesian_point' in typeof(oe\edge.edge_start\
     vertex_point.vertex_geometry)) and ('automotive_design.vertex_point' in 
     typeof(oe\edge.edge_end)) and ('automotive_design.cartesian_point' in 
-    typeof(oe\edge.edge_end\vertex_point.vertex_geometry))))) = 0))"#).unwrap();
+    typeof(oe\edge.edge_end\vertex_point.vertex_geometry))))) = 0))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
@@ -2932,18 +3363,25 @@ wr1 : self >= 0.0; "#).unwrap();
         let e = expression(r#"{1 <= self <= 31}"#).unwrap();
         assert_eq!(e.0, "");
 
-        let e = expression(r#"sizeof(query(msb <* query(it <* self.items | 
+        let e = expression(
+            r#"sizeof(query(msb <* query(it <* self.items | 
     'automotive_design.manifold_solid_brep' in typeof(it)) | not (sizeof(
     query(csh <* msb_shells(msb) | not (sizeof(query(fcs <* csh\
     connected_face_set.cfs_faces | not ('automotive_design.advanced_face' in
-     typeof(fcs)))) = 0))) = 0)))"#).unwrap();
+     typeof(fcs)))) = 0))) = 0)))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = expression(r#"cross_product(axis, 
-    ref_direction).magnitude"#).unwrap();
+        let e = expression(
+            r#"cross_product(axis, 
+    ref_direction).magnitude"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = expression(r#"sizeof(query(sa <* get_shape_aspects(self) | ('automotive_design.'
+        let e = expression(
+            r#"sizeof(query(sa <* get_shape_aspects(self) | ('automotive_design.'
      + 'composite_shape_aspect' in typeof(sa)) and (sa.name = 
     'compound feature in solid') and (sizeof(query(rh1 <* 
     get_round_holes_for_composite_hole(bag_to_set(usedin(sa, 
@@ -2951,19 +3389,23 @@ wr1 : self >= 0.0; "#).unwrap();
      | sizeof(query(rh2 <* get_round_holes_for_composite_hole(bag_to_set(usedin
     (sa, 'automotive_design.shape_aspect_relationship.relating_shape_aspect'
     ))) | (rh1 :<>: rh2) and (get_diameter_for_round_hole(rh1) = 
-    get_diameter_for_round_hole(rh2)))) = 0)) = 0))) = 1"#).unwrap();
+    get_diameter_for_round_hole(rh2)))) = 0)) = 0))) = 1"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
         let e = expression(r#"normalise(cross_product(d1, d2))\vector.orientation"#).unwrap();
         assert_eq!(e.0, "");
 
-        let e = expression(r#"[d2, normalise(cross_product(d1, d2))\vector.orientation, d1]"#).unwrap();
+        let e =
+            expression(r#"[d2, normalise(cross_product(d1, d2))\vector.orientation, d1]"#).unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_function_decl() {
-        let e = function_decl(r#"function acyclic(arg1 : generic_expression; arg2 : set of generic_expression)
+        let e = function_decl(
+            r#"function acyclic(arg1 : generic_expression; arg2 : set of generic_expression)
    : boolean;
 local
   result : boolean;
@@ -2990,10 +3432,13 @@ end_local;
     end_repeat;
     return (result);
   end_if;
-end_function; "#).unwrap();
+end_function; "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = function_decl(r#"function build_axes(axis : direction; ref_direction : direction) :  list [3:3]
+        let e = function_decl(
+            r#"function build_axes(axis : direction; ref_direction : direction) :  list [3:3]
    of direction;
 local
   d1 : direction;
@@ -3002,19 +3447,25 @@ end_local;
   d1 := nvl(normalise(axis), dummy_gri||direction([0.0, 0.0, 1.0]));
   d2 := first_proj_axis(d1, ref_direction);
   return ([d2, normalise(cross_product(d1, d2))\vector.orientation, d1]);
-end_function;  "#).unwrap();
+end_function;  "#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_return_stmt() {
-        let e = return_stmt(r#"return ([d2, normalise(cross_product(d1, d2))\vector.orientation, d1]);"#).unwrap();
+        let e = return_stmt(
+            r#"return ([d2, normalise(cross_product(d1, d2))\vector.orientation, d1]);"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_if_stmt() {
-        let e = if_stmt(r#"if 'automotive_design.multiple_arity_generic_expression' in typeof(arg1)
+        let e = if_stmt(
+            r#"if 'automotive_design.multiple_arity_generic_expression' in typeof(arg1)
    then
     result := true;
     repeat i := 1 to sizeof(arg1\multiple_arity_generic_expression.operands);
@@ -3022,52 +3473,72 @@ end_function;  "#).unwrap();
       operands[i], arg2 + [arg1]);
     end_repeat;
     return (result);
-  end_if;"#).unwrap();
+  end_if;"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_repeat_stmt() {
-        let e = repeat_stmt(r#"repeat i := 1 to sizeof(arg1\multiple_arity_generic_expression.operands);
+        let e = repeat_stmt(
+            r#"repeat i := 1 to sizeof(arg1\multiple_arity_generic_expression.operands);
       result := result and acyclic(arg1\multiple_arity_generic_expression.
       operands[i], arg2 + [arg1]);
-    end_repeat;"#).unwrap();
+    end_repeat;"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
     #[test]
     fn test_function_call() {
-        let e = function_call(r#"usedin
+        let e = function_call(
+            r#"usedin
     (sa, 'automotive_design.shape_aspect_relationship.relating_shape_aspect'
-    )"#).unwrap();
+    )"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = function_call(r#"sizeof(query(fcs <* csh\
+        let e = function_call(
+            r#"sizeof(query(fcs <* csh\
     connected_face_set.cfs_faces | not ('automotive_design.advanced_face' in
-     typeof(fcs))))"#).unwrap();
+     typeof(fcs))))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = function_call(r#"sizeof(
+        let e = function_call(
+            r#"sizeof(
     query(csh <* msb_shells(msb) | not (sizeof(query(fcs <* csh\
     connected_face_set.cfs_faces | not ('automotive_design.advanced_face' in
-     typeof(fcs)))) = 0)))"#).unwrap();
+     typeof(fcs)))) = 0)))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = function_call(r#"sizeof(query(msb <* query(it <* self.items | 
+        let e = function_call(
+            r#"sizeof(query(msb <* query(it <* self.items | 
     'automotive_design.manifold_solid_brep' in typeof(it)) | not (sizeof(
     query(csh <* msb_shells(msb) | not (sizeof(query(fcs <* csh\
     connected_face_set.cfs_faces | not ('automotive_design.advanced_face' in
-     typeof(fcs)))) = 0))) = 0)))"#).unwrap();
+     typeof(fcs)))) = 0))) = 0)))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = function_call(r#"sizeof(query(elp_fbnds <* query(bnds <* bounds | 
+        let e = function_call(
+            r#"sizeof(query(elp_fbnds <* query(bnds <* bounds | 
     'automotive_design.edge_loop' in typeof(bnds.bound)) | not (sizeof(
     query(oe <* elp_fbnds.bound\path.edge_list | not ((
     'automotive_design.vertex_point' in typeof(oe\edge.edge_start)) and (
     'automotive_design.cartesian_point' in typeof(oe\edge.edge_start\
     vertex_point.vertex_geometry)) and ('automotive_design.vertex_point' in 
     typeof(oe\edge.edge_end)) and ('automotive_design.cartesian_point' in 
-    typeof(oe\edge.edge_end\vertex_point.vertex_geometry))))) = 0)))"#).unwrap();
+    typeof(oe\edge.edge_end\vertex_point.vertex_geometry))))) = 0)))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
         let e = function_call(r#"using_items(self, [])"#).unwrap();
@@ -3128,19 +3599,25 @@ end_function;  "#).unwrap();
         let e = simple_factor("csh\\connected_face_set.cfs_faces").unwrap();
         assert_eq!(e.0, "");
 
-        let e = simple_factor(r#"((
+        let e = simple_factor(
+            r#"((
     'automotive_design.vertex_point' in typeof(oe\edge.edge_start)) and (
     'automotive_design.cartesian_point' in typeof(oe\edge.edge_start\
     vertex_point.vertex_geometry)) and ('automotive_design.vertex_point' in 
-    typeof(oe\edge.edge_end)))"#).unwrap();
+    typeof(oe\edge.edge_end)))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
 
-        let e = simple_factor(r#"not ((
+        let e = simple_factor(
+            r#"not ((
     'automotive_design.vertex_point' in typeof(oe\edge.edge_start)) and (
     'automotive_design.cartesian_point' in typeof(oe\edge.edge_start\
     vertex_point.vertex_geometry)) and ('automotive_design.vertex_point' in 
     typeof(oe\edge.edge_end)) and ('automotive_design.cartesian_point' in 
-    typeof(oe\edge.edge_end\vertex_point.vertex_geometry)))"#).unwrap();
+    typeof(oe\edge.edge_end\vertex_point.vertex_geometry)))"#,
+        )
+        .unwrap();
         assert_eq!(e.0, "");
     }
 
@@ -3167,29 +3644,39 @@ end_function;  "#).unwrap();
 
     #[test]
     fn test_select_type() {
-        let e = select_type(r#"select 
+        let e = select_type(
+            r#"select 
   (action, action_directive, action_method, action_property,
-  shape_representation, versioned_action_request);"#).unwrap();
+  shape_representation, versioned_action_request);"#,
+        )
+        .unwrap();
         assert_eq!(e.0, ";");
     }
 
     #[test]
     fn test_underlying_type() {
-        let e = underlying_type(r#"select 
+        let e = underlying_type(
+            r#"select 
   (action, action_directive, action_method, action_property,
-  shape_representation, versioned_action_request);"#).unwrap();
+  shape_representation, versioned_action_request);"#,
+        )
+        .unwrap();
         assert_eq!(e.0, ";");
     }
     #[test]
     fn test_simple_id() {
-        assert_eq!(simple_id("action").unwrap().1,
-                   SimpleId("action"));
-        assert_eq!(simple_id("action_directive").unwrap().1,
-                   SimpleId("action_directive"));
-        assert_eq!(simple_id("action_method").unwrap().1,
-                   SimpleId("action_method"));
-        assert_eq!(simple_id("action_property").unwrap().1,
-                   SimpleId("action_property"));
+        assert_eq!(simple_id("action").unwrap().1, SimpleId("action"));
+        assert_eq!(
+            simple_id("action_directive").unwrap().1,
+            SimpleId("action_directive")
+        );
+        assert_eq!(
+            simple_id("action_method").unwrap().1,
+            SimpleId("action_method")
+        );
+        assert_eq!(
+            simple_id("action_property").unwrap().1,
+            SimpleId("action_property")
+        );
     }
-
 }

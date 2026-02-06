@@ -1,4 +1,4 @@
-use super::indexes::{PointVec, PointIndex, HullVec, HullIndex, EdgeIndex, EMPTY_HULL};
+use super::indexes::{EMPTY_HULL, EdgeIndex, HullIndex, HullVec, PointIndex, PointVec};
 
 const N: usize = 1 << 10;
 
@@ -123,7 +123,8 @@ impl Hull {
     }
 
     pub fn start(&self) -> HullIndex {
-        self.buckets.iter()
+        self.buckets
+            .iter()
             .filter(|b| **b != EMPTY_HULL)
             .copied()
             .next()
@@ -139,7 +140,9 @@ impl Hull {
     pub fn check(&self) {
         // Find the first non-empty bucket to use as our starting point for
         // walking around the hull's linked list.
-        let point = self.buckets.iter()
+        let point = self
+            .buckets
+            .iter()
             .filter(|b| **b != EMPTY_HULL)
             .copied()
             .next();
@@ -193,8 +196,7 @@ impl Hull {
         assert!(!self.points.is_empty());
         let h = self.points[p];
         assert!(h != EMPTY_HULL);
-        assert!(self.data[h].left != EMPTY_HULL ||
-                self.data[h].right != EMPTY_HULL);
+        assert!(self.data[h].left != EMPTY_HULL || self.data[h].right != EMPTY_HULL);
         h
     }
 
@@ -221,34 +223,43 @@ impl Hull {
     }
 
     /// Inserts a point without a hint
-    pub fn insert_bare(&mut self, angle: f64, point: PointIndex, e: EdgeIndex)
-        -> HullIndex
-    {
+    pub fn insert_bare(&mut self, angle: f64, point: PointIndex, e: EdgeIndex) -> HullIndex {
         self.insert(self.get(angle), angle, point, e)
     }
 
     /// Insert a new Point-Edge pair into the hull, using a hint to save time
     /// searching for the new point's position.
-    pub fn insert(&mut self, left: HullIndex, angle: f64,
-                  point: PointIndex, edge: EdgeIndex) -> HullIndex {
+    pub fn insert(
+        &mut self,
+        left: HullIndex,
+        angle: f64,
+        point: PointIndex,
+        edge: EdgeIndex,
+    ) -> HullIndex {
         let right = self.right_hull(left);
 
         let h = if let Some(h) = self.empty.pop() {
             self.data[h] = Node {
-                angle, edge, left, right
+                angle,
+                edge,
+                left,
+                right,
             };
             h
         } else {
-            self.data.push(Node{
-                angle, edge, left, right
+            self.data.push(Node {
+                angle,
+                edge,
+                left,
+                right,
             })
         };
 
         // If the target bucket is empty, or the given point is below the first
         // item in the target bucket, then it becomes the bucket's head
         let b = self.bucket(angle);
-        if self.buckets[b] == EMPTY_HULL || (self.buckets[b] == right &&
-                                             angle < self.data[right].angle)
+        if self.buckets[b] == EMPTY_HULL
+            || (self.buckets[b] == right && angle < self.data[right].angle)
         {
             self.buckets[b] = h;
         }
@@ -292,10 +303,12 @@ impl Hull {
     }
 
     /// Iterates over all edges stored in the Hull, in order
-    pub fn values(&self) -> impl Iterator<Item=EdgeIndex> + '_ {
+    pub fn values(&self) -> impl Iterator<Item = EdgeIndex> + '_ {
         // Find the first non-empty bucket to use as our starting point for
         // walking around the hull's linked list.
-        let mut point: HullIndex = self.buckets.iter()
+        let mut point: HullIndex = self
+            .buckets
+            .iter()
             .filter(|b| **b != EMPTY_HULL)
             .copied()
             .next()

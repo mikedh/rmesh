@@ -39,11 +39,7 @@ pub fn acute(a: Point, b: Point, c: Point) -> f64 {
 /// ```
 pub fn pseudo_angle(a: Point) -> f64 {
     let p = a.0 / (a.0.abs() + a.1.abs());
-    1.0 - (if a.1 > 0.0 {
-        3.0 - p
-    }  else {
-        1.0 + p
-    }) / 4.0
+    1.0 - (if a.1 > 0.0 { 3.0 - p } else { 1.0 + p }) / 4.0
 }
 
 pub fn centroid(a: Point, b: Point, c: Point) -> Point {
@@ -53,5 +49,5 @@ pub fn centroid(a: Point, b: Point, c: Point) -> Point {
 pub fn distance2(a: Point, b: Point) -> f64 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
-    dx*dx + dy*dy
+    dx * dx + dy * dy
 }

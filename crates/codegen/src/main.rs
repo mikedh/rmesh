@@ -32,11 +32,14 @@ fn main() -> Result<()> {
     let processed = strip_comments_and_lower(&content);
 
     // Parse the schema
-    let (remaining, mut syntax) = parse_express(&processed)
-        .map_err(|e| anyhow::anyhow!("Parse error: {e:?}"))?;
+    let (remaining, mut syntax) =
+        parse_express(&processed).map_err(|e| anyhow::anyhow!("Parse error: {e:?}"))?;
 
     if !remaining.trim().is_empty() {
-        eprintln!("Warning: unparsed content remaining: {}...", &remaining[..remaining.len().min(100)]);
+        eprintln!(
+            "Warning: unparsed content remaining: {}...",
+            &remaining[..remaining.len().min(100)]
+        );
     }
 
     // Generate Rust code

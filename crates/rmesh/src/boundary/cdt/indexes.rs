@@ -63,7 +63,7 @@ impl<T, P> std::ops::IndexMut<TypedIndex<P>> for TypedVec<T, P> {
 }
 
 impl<T, P> std::ops::Deref for TypedVec<T, P> {
-    type Target = Vec<T> ;
+    type Target = Vec<T>;
     fn deref(&self) -> &Vec<T> {
         &self.0
     }

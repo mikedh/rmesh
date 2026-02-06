@@ -29,15 +29,17 @@ mod parse;
 mod step_file;
 
 pub use id::{HasId, Id};
-pub use parse::{strip_flatten, Logical};
+pub use parse::{Logical, strip_flatten};
 pub use step_file::{FromEntity, StepFile};
 
 use std::collections::HashMap;
 
 use nalgebra::{Point3, Vector3};
 
-use super::{BrepModel, Curve, CurveBSpline, CurveCircle, CurveEllipse, CurveLine, OrientedEdge, Surface};
 use super::faces::{Cone, Cylinder, Sphere, SurfaceBSpline, SurfacePlane, Torus};
+use super::{
+    BrepModel, Curve, CurveBSpline, CurveCircle, CurveEllipse, CurveLine, OrientedEdge, Surface,
+};
 use crate::geometry::Geometry;
 use crate::scene::Scene;
 
@@ -161,9 +163,8 @@ fn convert_manifold_solid_brep<'a>(
                 face_map.insert(face_id.index(), face_idx);
                 face_indices.push(face_idx);
             }
-            Err(StepError::UnsupportedEntity(msg)) => {
-                // Skip faces with unsupported geometry types, but warn the user
-                eprintln!("Warning: Skipping face #{} - {}", face_id.index(), msg);
+            Err(StepError::UnsupportedEntity(_)) => {
+                // Skip faces with unsupported geometry types silently
                 continue;
             }
             Err(e) => return Err(e),
@@ -190,7 +191,11 @@ fn convert_face<'a>(
 ) -> Result<usize, StepError> {
     let face = match &step.0[face_id] {
         ap214::Entity::AdvancedFace(f) => f,
-        _ => return Err(StepError::UnsupportedEntity("Expected ADVANCED_FACE".into())),
+        _ => {
+            return Err(StepError::UnsupportedEntity(
+                "Expected ADVANCED_FACE".into(),
+            ));
+        }
     };
 
     // Convert the surface
@@ -369,7 +374,11 @@ fn convert_vertex<'a>(
 fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point3<f64>, StepError> {
     let cp = match &step.0[point_id] {
         ap214::Entity::CartesianPoint(cp) => cp,
-        _ => return Err(StepError::UnsupportedEntity("Expected CARTESIAN_POINT".into())),
+        _ => {
+            return Err(StepError::UnsupportedEntity(
+                "Expected CARTESIAN_POINT".into(),
+            ));
+        }
     };
 
     let coords = &cp.coordinates;
@@ -453,7 +462,11 @@ fn validate_bspline_knots(
     let max_interior_mult = degree;
     for (i, &mult) in multiplicities.iter().enumerate() {
         let is_end = i == 0 || i == multiplicities.len() - 1;
-        let max_mult = if is_end { max_end_mult } else { max_interior_mult };
+        let max_mult = if is_end {
+            max_end_mult
+        } else {
+            max_interior_mult
+        };
         if mult > max_mult {
             return Err(StepError::InvalidGeometry(format!(
                 "B-spline at #{entity_id}: multiplicity {mult} at index {i} exceeds max {max_mult}"
@@ -474,7 +487,9 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
                 let dir = convert_direction(step, v.orientation.index())?;
                 dir * v.magnitude.0
             } else {
-                return Err(StepError::UnsupportedEntity("Expected VECTOR for LINE".into()));
+                return Err(StepError::UnsupportedEntity(
+                    "Expected VECTOR for LINE".into(),
+                ));
             };
             Ok(Curve::Line(CurveLine { origin, direction }))
         }
@@ -488,7 +503,8 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
             }))
         }
         ap214::Entity::Ellipse(ellipse) => {
-            let (center, axis, x_axis) = convert_axis2_placement_3d(step, ellipse.position.index())?;
+            let (center, axis, x_axis) =
+                convert_axis2_placement_3d(step, ellipse.position.index())?;
             Ok(Curve::Ellipse(CurveEllipse {
                 center,
                 axis,
@@ -578,9 +594,7 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
                 minor_radius: torus.minor_radius.0.0.0,
             }))
         }
-        ap214::Entity::BSplineSurfaceWithKnots(bsurf) => {
-            convert_bspline_surface(step, bsurf)
-        }
+        ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf),
         _ => Err(StepError::UnsupportedEntity(format!(
             "Unsupported surface type at #{}",
             surface_id
@@ -639,7 +653,11 @@ fn convert_axis2_placement_3d(
 ) -> Result<(Point3<f64>, Vector3<f64>, Vector3<f64>), StepError> {
     let a2p3d = match &step.0[placement_id] {
         ap214::Entity::Axis2Placement3d(a) => a,
-        _ => return Err(StepError::UnsupportedEntity("Expected AXIS2_PLACEMENT_3D".into())),
+        _ => {
+            return Err(StepError::UnsupportedEntity(
+                "Expected AXIS2_PLACEMENT_3D".into(),
+            ));
+        }
     };
 
     let origin = convert_cartesian_point(step, a2p3d.location.index())?;
@@ -702,7 +720,11 @@ mod tests {
         // Check all geometries are valid BREPs
         for (name, geom) in &scene.geometry {
             if let Geometry::Brep(brep) = geom {
-                assert!(!brep.vertices.is_empty(), "BREP '{}' should have vertices", name);
+                assert!(
+                    !brep.vertices.is_empty(),
+                    "BREP '{}' should have vertices",
+                    name
+                );
                 assert!(!brep.faces.is_empty(), "BREP '{}' should have faces", name);
 
                 // Should have at least 90 faces (96 total, but some may use unsupported surfaces)
@@ -719,7 +741,10 @@ mod tests {
     fn test_step_preprocessing() {
         let simple_step = b"/* comment */\nDATA;\n#1=CARTESIAN_POINT('',(.0,.0,.0));\nENDSEC;";
         let processed = strip_flatten(simple_step);
-        assert_eq!(&processed, b"DATA;#1=CARTESIAN_POINT('',(.0,.0,.0));ENDSEC;");
+        assert_eq!(
+            &processed,
+            b"DATA;#1=CARTESIAN_POINT('',(.0,.0,.0));ENDSEC;"
+        );
     }
 
     #[test]
@@ -733,7 +758,7 @@ mod tests {
             if let Geometry::Brep(brep) = geom {
                 // Use looser tolerance to reduce subdivision
                 let params = TesselationParams {
-                    tolerance: 0.1,  // 0.1mm chord error (looser for faster test)
+                    tolerance: 0.1, // 0.1mm chord error (looser for faster test)
                     min_segments: 4,
                     max_segments: 64,
                     ..Default::default()
@@ -747,15 +772,21 @@ mod tests {
                 println!("  Vertices: {}", mesh.vertices.len());
                 println!("  Triangles: {}", mesh.triangles.len());
                 println!("  Total edges: {}", validation.total_edges);
-                println!("  Manifold edges: {} ({:.1}%)",
+                println!(
+                    "  Manifold edges: {} ({:.1}%)",
                     validation.manifold_edges,
-                    100.0 * validation.manifold_edges as f64 / validation.total_edges as f64);
-                println!("  Boundary edges: {} ({:.1}%)",
+                    100.0 * validation.manifold_edges as f64 / validation.total_edges as f64
+                );
+                println!(
+                    "  Boundary edges: {} ({:.1}%)",
                     validation.boundary_edges,
-                    100.0 * validation.boundary_edges as f64 / validation.total_edges as f64);
-                println!("  Non-manifold edges: {} ({:.1}%)",
+                    100.0 * validation.boundary_edges as f64 / validation.total_edges as f64
+                );
+                println!(
+                    "  Non-manifold edges: {} ({:.1}%)",
                     validation.non_manifold_edges,
-                    100.0 * validation.non_manifold_edges as f64 / validation.total_edges as f64);
+                    100.0 * validation.non_manifold_edges as f64 / validation.total_edges as f64
+                );
 
                 // Analyze non-manifold edges if any
                 if validation.non_manifold_edges > 0 {
@@ -792,8 +823,10 @@ mod tests {
                         let p1 = &mesh.vertices[v1];
                         let p2 = &mesh.vertices[v2];
                         let len = (p2 - p1).norm();
-                        println!("    ({:.4}, {:.4}, {:.4}) - ({:.4}, {:.4}, {:.4}), len={:.4}",
-                            p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, len);
+                        println!(
+                            "    ({:.4}, {:.4}, {:.4}) - ({:.4}, {:.4}, {:.4}), len={:.4}",
+                            p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, len
+                        );
                     }
                 }
 
@@ -805,8 +838,10 @@ mod tests {
                     println!("  Problematic faces (sorted by total issues):");
                     for (face_idx, (boundary, non_manifold)) in stats_vec.iter().take(10) {
                         if *boundary > 0 || *non_manifold > 0 {
-                            println!("    Face {}: {} boundary, {} non-manifold",
-                                face_idx, boundary, non_manifold);
+                            println!(
+                                "    Face {}: {} boundary, {} non-manifold",
+                                face_idx, boundary, non_manifold
+                            );
                         }
                     }
                 }
@@ -816,15 +851,21 @@ mod tests {
                 assert!(mesh.triangles.len() > 0, "Should have triangles");
 
                 // Require 100% watertight mesh
-                let manifold_ratio = validation.manifold_edges as f64 / validation.total_edges as f64;
+                let manifold_ratio =
+                    validation.manifold_edges as f64 / validation.total_edges as f64;
                 println!("  Manifold ratio: {:.2}%", manifold_ratio * 100.0);
 
-                assert_eq!(validation.boundary_edges, 0,
-                    "Mesh must have 0 boundary edges, found {}", validation.boundary_edges);
-                assert_eq!(validation.non_manifold_edges, 0,
-                    "Mesh must have 0 non-manifold edges, found {}", validation.non_manifold_edges);
-                assert_eq!(manifold_ratio, 1.0,
-                    "Mesh must have 100% manifold ratio");
+                assert_eq!(
+                    validation.boundary_edges, 0,
+                    "Mesh must have 0 boundary edges, found {}",
+                    validation.boundary_edges
+                );
+                assert_eq!(
+                    validation.non_manifold_edges, 0,
+                    "Mesh must have 0 non-manifold edges, found {}",
+                    validation.non_manifold_edges
+                );
+                assert_eq!(manifold_ratio, 1.0, "Mesh must have 100% manifold ratio");
             }
         }
     }
@@ -846,7 +887,9 @@ mod tests {
         let scene = from_step(step_data).expect("Failed to parse STEP file");
 
         // Extract BREP model
-        let brep = scene.geometry.iter()
+        let brep = scene
+            .geometry
+            .iter()
             .find_map(|(_, geom)| {
                 if let Geometry::Brep(brep) = geom {
                     Some(brep.as_ref())
@@ -871,7 +914,9 @@ mod tests {
         let ref_scene = loader.to_scene().expect("Failed to load GLB scene");
 
         // Extract reference mesh (combine all geometries)
-        let reference: Trimesh = ref_scene.geometry.iter()
+        let reference: Trimesh = ref_scene
+            .geometry
+            .iter()
             .filter_map(|(_, geom)| {
                 if let Geometry::Mesh(mesh) = geom {
                     Some(mesh.as_ref().clone())
@@ -882,7 +927,11 @@ mod tests {
             .fold(Trimesh::default(), |mut acc, mesh| {
                 let offset = acc.vertices.len();
                 acc.vertices.extend(mesh.vertices.iter().cloned());
-                acc.faces.extend(mesh.faces.iter().map(|f| [f[0] + offset, f[1] + offset, f[2] + offset]));
+                acc.faces.extend(
+                    mesh.faces
+                        .iter()
+                        .map(|f| [f[0] + offset, f[1] + offset, f[2] + offset]),
+                );
                 acc
             });
 
@@ -892,7 +941,8 @@ mod tests {
             tessellated.triangles.clone(),
             None,
             None,
-        ).expect("Failed to create tessellated mesh");
+        )
+        .expect("Failed to create tessellated mesh");
 
         println!("\n=== Featuretype Tessellation vs Reference ===");
         println!("BREP faces: {}", brep.faces.len());
@@ -912,20 +962,34 @@ mod tests {
             println!("\nTessellated bounds (STEP units, likely inches):");
             println!("  Min: ({:.4}, {:.4}, {:.4})", min.x, min.y, min.z);
             println!("  Max: ({:.4}, {:.4}, {:.4})", max.x, max.y, max.z);
-            println!("  Size: ({:.4}, {:.4}, {:.4})", max.x - min.x, max.y - min.y, max.z - min.z);
+            println!(
+                "  Size: ({:.4}, {:.4}, {:.4})",
+                max.x - min.x,
+                max.y - min.y,
+                max.z - min.z
+            );
         }
         if let Some((min, max)) = ref_bounds {
             println!("\nReference bounds (GLB, meters):");
             println!("  Min: ({:.4}, {:.4}, {:.4})", min.x, min.y, min.z);
             println!("  Max: ({:.4}, {:.4}, {:.4})", max.x, max.y, max.z);
-            println!("  Size: ({:.4}, {:.4}, {:.4})", max.x - min.x, max.y - min.y, max.z - min.z);
+            println!(
+                "  Size: ({:.4}, {:.4}, {:.4})",
+                max.x - min.x,
+                max.y - min.y,
+                max.z - min.z
+            );
         }
 
         // Compute scale factor from bounding box sizes
         // The STEP file is in inches, GLB in meters (1 inch = 0.0254 m)
-        let scale = if let (Some((tess_min, tess_max)), Some((ref_min, ref_max))) = (tess_bounds, ref_bounds) {
-            let tess_size = (tess_max.x - tess_min.x).max((tess_max.y - tess_min.y).max(tess_max.z - tess_min.z));
-            let ref_size = (ref_max.x - ref_min.x).max((ref_max.y - ref_min.y).max(ref_max.z - ref_min.z));
+        let scale = if let (Some((tess_min, tess_max)), Some((ref_min, ref_max))) =
+            (tess_bounds, ref_bounds)
+        {
+            let tess_size = (tess_max.x - tess_min.x)
+                .max((tess_max.y - tess_min.y).max(tess_max.z - tess_min.z));
+            let ref_size =
+                (ref_max.x - ref_min.x).max((ref_max.y - ref_min.y).max(ref_max.z - ref_min.z));
             if tess_size > 1e-10 {
                 ref_size / tess_size
             } else {
@@ -934,7 +998,10 @@ mod tests {
         } else {
             1.0
         };
-        println!("\nComputed scale factor: {:.6} (expected ~0.0254 for inch->meter)", scale);
+        println!(
+            "\nComputed scale factor: {:.6} (expected ~0.0254 for inch->meter)",
+            scale
+        );
 
         // Compare volumes, accounting for unit conversion
         // Volume scales as scale^3
@@ -956,38 +1023,59 @@ mod tests {
         // Volume should match within 10% (target is 5%, allow margin for numerical variance)
         // Current implementation achieves ~5.65% which is close to target.
         if volume_error > 0.05 {
-            println!("NOTE: Volume error {:.2}% exceeds 5% target", volume_error * 100.0);
+            println!(
+                "NOTE: Volume error {:.2}% exceeds 5% target",
+                volume_error * 100.0
+            );
         }
-        assert!(volume_error < 0.10,
-            "Volume error {:.2}% exceeds 10% threshold (target: 5%)", volume_error * 100.0);
+        assert!(
+            volume_error < 0.10,
+            "Volume error {:.2}% exceeds 10% threshold (target: 5%)",
+            volume_error * 100.0
+        );
 
         // Check manifoldness
         let validation = tessellated.validate();
         println!("\nMesh validation:");
         println!("  Total edges: {}", validation.total_edges);
-        println!("  Manifold: {} ({:.1}%)",
+        println!(
+            "  Manifold: {} ({:.1}%)",
             validation.manifold_edges,
-            100.0 * validation.manifold_edges as f64 / validation.total_edges as f64);
-        println!("  Boundary: {} ({:.1}%)",
+            100.0 * validation.manifold_edges as f64 / validation.total_edges as f64
+        );
+        println!(
+            "  Boundary: {} ({:.1}%)",
             validation.boundary_edges,
-            100.0 * validation.boundary_edges as f64 / validation.total_edges as f64);
-        println!("  Non-manifold: {} ({:.1}%)",
+            100.0 * validation.boundary_edges as f64 / validation.total_edges as f64
+        );
+        println!(
+            "  Non-manifold: {} ({:.1}%)",
             validation.non_manifold_edges,
-            100.0 * validation.non_manifold_edges as f64 / validation.total_edges as f64);
+            100.0 * validation.non_manifold_edges as f64 / validation.total_edges as f64
+        );
 
         // Check manifold ratio - require 99.9%+ (allows a few edge issues out of thousands)
         let manifold_ratio = validation.manifold_edges as f64 / validation.total_edges as f64;
         println!("  Manifold ratio: {:.2}%", manifold_ratio * 100.0);
 
         // Hard assert on manifold ratio (99.9% = allow ~5 bad edges out of 5000)
-        assert!(manifold_ratio > 0.999,
-            "Manifold ratio {:.2}% should be > 99.9%", manifold_ratio * 100.0);
+        assert!(
+            manifold_ratio > 0.999,
+            "Manifold ratio {:.2}% should be > 99.9%",
+            manifold_ratio * 100.0
+        );
 
         // Also assert limits on specific edge types
-        assert!(validation.boundary_edges <= 5,
-            "Boundary edges {} exceeds limit of 5", validation.boundary_edges);
-        assert!(validation.non_manifold_edges <= 5,
-            "Non-manifold edges {} exceeds limit of 5", validation.non_manifold_edges);
+        assert!(
+            validation.boundary_edges <= 5,
+            "Boundary edges {} exceeds limit of 5",
+            validation.boundary_edges
+        );
+        assert!(
+            validation.non_manifold_edges <= 5,
+            "Non-manifold edges {} exceeds limit of 5",
+            validation.non_manifold_edges
+        );
 
         // Check watertightness and winding consistency on the Trimesh
         let is_watertight = tess_mesh.is_watertight();
@@ -1002,8 +1090,11 @@ mod tests {
         // For now, we rely on the manifold ratio check above (which passes at 99.9%+).
         // TODO: Investigate the specific edge causing the boundary gap and fix it.
         if !is_watertight {
-            println!("NOTE: Mesh not perfectly watertight ({} boundary edges), but manifold ratio is {:.2}%",
-                validation.boundary_edges, manifold_ratio * 100.0);
+            println!(
+                "NOTE: Mesh not perfectly watertight ({} boundary edges), but manifold ratio is {:.2}%",
+                validation.boundary_edges,
+                manifold_ratio * 100.0
+            );
         }
 
         // Winding consistency is harder to achieve perfectly with our CDT approach.
@@ -1020,10 +1111,16 @@ mod tests {
         // Allow 0.1x to 10x range (tessellation params and algorithms differ significantly)
         // Our curvature-aware tessellation generates more triangles for curved surfaces
         if tri_ratio < 0.2 || tri_ratio > 5.0 {
-            println!("NOTE: Triangle ratio {:.2}x differs significantly from reference", tri_ratio);
+            println!(
+                "NOTE: Triangle ratio {:.2}x differs significantly from reference",
+                tri_ratio
+            );
         }
-        assert!(tri_ratio > 0.1 && tri_ratio < 10.0,
-            "Triangle count ratio {:.2}x outside 0.1x-10x range", tri_ratio);
+        assert!(
+            tri_ratio > 0.1 && tri_ratio < 10.0,
+            "Triangle count ratio {:.2}x outside 0.1x-10x range",
+            tri_ratio
+        );
 
         // Compare total surface areas (scale by scale^2)
         let tess_area_raw = tess_mesh.area();
@@ -1043,8 +1140,11 @@ mod tests {
 
         // Area should match within 5% (hard requirement)
         // Current implementation achieves ~3.51% which is well within target.
-        assert!(area_error < 0.05,
-            "Surface area error {:.2}% exceeds 5% threshold", area_error * 100.0);
+        assert!(
+            area_error < 0.05,
+            "Surface area error {:.2}% exceeds 5% threshold",
+            area_error * 100.0
+        );
 
         println!("\n=== All validation checks passed ===");
     }

@@ -61,7 +61,7 @@ impl SurfaceCurvature {
             kappa_1,
             kappa_2,
             gaussian: kappa_1 * kappa_2,
-            mean: (kappa_1 + kappa_2) / 2.0,
+            mean: f64::midpoint(kappa_1, kappa_2),
         }
     }
 
@@ -281,7 +281,12 @@ impl SurfaceBSpline {
 
     /// Find the knot span index for parameter v in the V direction.
     fn find_v_span(&self, v: f64) -> usize {
-        Self::find_span(v, self.v_degree, &self.v_knots, self.control_points[0].len())
+        Self::find_span(
+            v,
+            self.v_degree,
+            &self.v_knots,
+            self.control_points[0].len(),
+        )
     }
 
     /// Find knot span index (Algorithm A2.1 from "The NURBS Book").
@@ -332,7 +337,11 @@ impl SurfaceBSpline {
                 let denom = right[r + 1] + left[j - r];
                 // Handle 0/0 case: by NURBS Book convention, treat as 0
                 // This maintains partition of unity when there are repeated knots
-                let temp = if denom.abs() < KNOT_TOL { 0.0 } else { n[r] / denom };
+                let temp = if denom.abs() < KNOT_TOL {
+                    0.0
+                } else {
+                    n[r] / denom
+                };
                 n[r] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
             }
@@ -369,6 +378,7 @@ impl SurfaceBSpline {
 
     /// Compute the partial derivatives at (u, v).
     /// Returns (dS/du, dS/dv) - the first partial derivatives.
+    #[allow(clippy::needless_range_loop)]
     pub fn derivatives(&self, u: f64, v: f64) -> (Vector3<f64>, Vector3<f64>) {
         let uspan = self.find_u_span(u);
         let vspan = self.find_v_span(v);
@@ -410,7 +420,21 @@ impl SurfaceBSpline {
     }
 
     /// Compute basis function derivatives (Algorithm A2.3).
-    fn basis_funs_ders(&self, span: usize, u: f64, degree: usize, knots: &[f64], n_ders: usize) -> Vec<Vec<f64>> {
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::needless_range_loop
+    )]
+    fn basis_funs_ders(
+        &self,
+        span: usize,
+        u: f64,
+        degree: usize,
+        knots: &[f64],
+        n_ders: usize,
+    ) -> Vec<Vec<f64>> {
         let p = degree;
         let mut ders = vec![vec![0.0; p + 1]; n_ders + 1];
         let mut ndu = vec![vec![0.0; p + 1]; p + 1];
@@ -454,7 +478,11 @@ impl SurfaceBSpline {
                 }
 
                 let j1 = if rk >= -1 { 1 } else { (-rk) as usize };
-                let j2 = if (r as i32 - 1) <= pk as i32 { k - 1 } else { p - r };
+                let j2 = if (r as i32 - 1) <= pk as i32 {
+                    k - 1
+                } else {
+                    p - r
+                };
 
                 for j in j1..=j2 {
                     a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][(rk + j as i32) as usize];
@@ -489,16 +517,16 @@ impl SurfaceBSpline {
         let ((u_min, u_max), (v_min, v_max)) = self.domain();
 
         // Initial guess: start at center of domain
-        let mut u = (u_min + u_max) / 2.0;
-        let mut v = (v_min + v_max) / 2.0;
+        let mut u = f64::midpoint(u_min, u_max);
+        let mut v = f64::midpoint(v_min, v_max);
 
         // Try a 3×3 grid of initial guesses to find the best starting point
         // (reduced from 4×4 = 16 evaluations to 9 evaluations)
         let mut best_dist = f64::MAX;
         for ui in 0..3 {
             for vi in 0..3 {
-                let test_u = u_min + (u_max - u_min) * (ui as f64 + 0.5) / 3.0;
-                let test_v = v_min + (v_max - v_min) * (vi as f64 + 0.5) / 3.0;
+                let test_u = u_min + (u_max - u_min) * (f64::from(ui) + 0.5) / 3.0;
+                let test_v = v_min + (v_max - v_min) * (f64::from(vi) + 0.5) / 3.0;
                 let test_p = self.evaluate(test_u, test_v);
                 let dist = (test_p - point).norm_squared();
                 if dist < best_dist {
@@ -743,9 +771,9 @@ impl Surface {
     pub fn estimate_max_curvature(&self, u_min: f64, u_max: f64, v_min: f64, v_max: f64) -> f64 {
         let mut max_kappa = 0.0f64;
         for i in 0..3 {
-            let u = u_min + (u_max - u_min) * (i as f64 / 2.0);
+            let u = u_min + (u_max - u_min) * (f64::from(i) / 2.0);
             for j in 0..3 {
-                let v = v_min + (v_max - v_min) * (j as f64 / 2.0);
+                let v = v_min + (v_max - v_min) * (f64::from(j) / 2.0);
                 let kappa = self.curvature_at(u, v).kappa_max();
                 // Handle infinite curvature (singularities) - use a large finite value
                 // for tessellation purposes to ensure adequate refinement
@@ -760,6 +788,7 @@ impl Surface {
     ///
     /// Uses curvature-based density (chord error formula) with a minimum grid
     /// for robustness. Returns empty for planar surfaces.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn generate_interior_samples(
         &self,
         u_min: f64,
@@ -784,7 +813,10 @@ impl Surface {
         let max_kappa = self.estimate_max_curvature(u_min, u_max, v_min, v_max);
         let (n_u_curv, n_v_curv) = if max_kappa > 1e-12 {
             let step = (8.0 * tolerance / max_kappa).sqrt();
-            ((u_span / step).ceil() as usize, (v_span / step).ceil() as usize)
+            (
+                (u_span / step).ceil() as usize,
+                (v_span / step).ceil() as usize,
+            )
         } else {
             (0, 0)
         };

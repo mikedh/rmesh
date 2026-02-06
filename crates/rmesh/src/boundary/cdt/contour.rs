@@ -1,6 +1,7 @@
 use super::{
-    indexes::{PointIndex, EdgeIndex, HullIndex, ContourVec, ContourIndex,
-              EMPTY_EDGE, EMPTY_CONTOUR},
+    indexes::{
+        ContourIndex, ContourVec, EMPTY_CONTOUR, EMPTY_EDGE, EdgeIndex, HullIndex, PointIndex,
+    },
     triangulate::Triangulation,
 };
 
@@ -35,7 +36,12 @@ pub struct Contour {
 /// Triangulation is based on ["Triangulating Monotone Mountains"](http://www.ams.sunysb.edu/~jsbm/courses/345/13/triangulating-monotone-mountains.pdf)
 impl Contour {
     fn new(point: PointIndex, data: ContourData, sign: bool) -> Self {
-        let n = Node { point, data, prev: EMPTY_CONTOUR, next: EMPTY_CONTOUR };
+        let n = Node {
+            point,
+            data,
+            prev: EMPTY_CONTOUR,
+            next: EMPTY_CONTOUR,
+        };
         Contour {
             pts: ContourVec::of(vec![n]),
             end: ContourIndex::new(0),
@@ -96,10 +102,17 @@ impl Contour {
         Self::new(point, data, false)
     }
 
-    pub fn push(&mut self, t: &mut Triangulation,
-                point: PointIndex, data: ContourData) -> Option<EdgeIndex> {
+    pub fn push(
+        &mut self,
+        t: &mut Triangulation,
+        point: PointIndex,
+        data: ContourData,
+    ) -> Option<EdgeIndex> {
         let i = self.pts.push(Node {
-            point, data, next: EMPTY_CONTOUR, prev: self.end
+            point,
+            data,
+            next: EMPTY_CONTOUR,
+            prev: self.end,
         });
         assert!(self.pts[self.end].next == EMPTY_CONTOUR);
         self.pts[self.end].next = i;
@@ -130,19 +143,19 @@ impl Contour {
 
         let new_edge = if self.sign {
             /*
-                             c (self.index)
-                           /  ^
-                          /    \
-                    ba/ha/      \bc/hc
-                        /        \
-                       V   e_ab   \
-                [next] a - - - - - >b [prev]
+                            c (self.index)
+                          /  ^
+                         /    \
+                   ba/ha/      \bc/hc
+                       /        \
+                      V   e_ab   \
+               [next] a - - - - - >b [prev]
 
-                From the contour's perspective, this flattens out to
-                     a <---------- b
+               From the contour's perspective, this flattens out to
+                    a <---------- b
 
-                e_ab is a new edge inserted here
-             */
+               e_ab is a new edge inserted here
+            */
             let (a, b) = (self.pts[c.next], self.pts[c.prev]);
 
             // If the ear isn't strictly convex, then return immediately
@@ -151,8 +164,9 @@ impl Contour {
             }
 
             // Insert the new triangle
-            let e_ab = t.half.insert(a.point, b.point, c.point,
-                                     EMPTY_EDGE, EMPTY_EDGE, EMPTY_EDGE);
+            let e_ab = t.half.insert(
+                a.point, b.point, c.point, EMPTY_EDGE, EMPTY_EDGE, EMPTY_EDGE,
+            );
             // Link the new triangle with buddies or hull edges
             let edge_ab = t.half.edge(e_ab);
             let e_ca = edge_ab.prev;
@@ -162,7 +176,7 @@ impl Contour {
                 ContourData::Hull(hull_index, sign) => {
                     t.hull.update(hull_index, e_ca);
                     t.half.set_sign(e_bc, sign);
-                },
+                }
                 ContourData::Buddy(b) => t.half.link_new(b, e_ca),
             };
             match c.data {
@@ -170,26 +184,26 @@ impl Contour {
                 ContourData::Hull(hull_index, sign) => {
                     t.hull.update(hull_index, e_bc);
                     t.half.set_sign(e_bc, sign);
-                },
+                }
                 ContourData::Buddy(b) => t.half.link_new(b, e_bc),
             };
 
             e_ab
         } else {
             /*
-                               c (self.index)
-                             /  ^
-                            /    \
-                         ec/      \ea
-                          /        \
-                         V   e_ba   \
-                [prev]  b - - - - - >a [next]
+                              c (self.index)
+                            /  ^
+                           /    \
+                        ec/      \ea
+                         /        \
+                        V   e_ba   \
+               [prev]  b - - - - - >a [next]
 
-                From the contour's perspective, this flattens out to
-                       b <----------- a
+               From the contour's perspective, this flattens out to
+                      b <----------- a
 
-                e_ba is a new edge inserted here
-             */
+               e_ba is a new edge inserted here
+            */
             let (a, b) = (self.pts[c.next], self.pts[c.prev]);
             assert!(a.point != b.point);
             assert!(a.point != c.point);
@@ -201,8 +215,9 @@ impl Contour {
             }
 
             // Insert the new triangle
-            let e_ba = t.half.insert(b.point, a.point, c.point,
-                                     EMPTY_EDGE, EMPTY_EDGE, EMPTY_EDGE);
+            let e_ba = t.half.insert(
+                b.point, a.point, c.point, EMPTY_EDGE, EMPTY_EDGE, EMPTY_EDGE,
+            );
             // Link the new triangle with buddies or hull edges
             let edge_ba = t.half.edge(e_ba);
             let e_cb = edge_ba.prev;
@@ -212,7 +227,7 @@ impl Contour {
                 ContourData::Hull(hull_index, sign) => {
                     t.hull.update(hull_index, e_ac);
                     t.half.set_sign(e_ac, sign);
-                },
+                }
                 ContourData::Buddy(b) => t.half.link_new(b, e_ac),
             };
             match c.data {
@@ -220,13 +235,14 @@ impl Contour {
                 ContourData::Hull(hull_index, sign) => {
                     t.hull.update(hull_index, e_cb);
                     t.half.set_sign(e_cb, sign);
-                },
+                }
                 ContourData::Buddy(b) => t.half.link_new(b, e_cb),
             };
             e_ba
         };
 
-        {   // Legalize the two outer edges of the new triangle
+        {
+            // Legalize the two outer edges of the new triangle
             let edge = t.half.edge(new_edge);
             t.legalize(edge.next);
             t.legalize(edge.prev);
@@ -236,7 +252,8 @@ impl Contour {
         self.pts[self.index] = Node {
             point: PointIndex::new(0),
             data: ContourData::None,
-            prev: EMPTY_CONTOUR, next: EMPTY_CONTOUR
+            prev: EMPTY_CONTOUR,
+            next: EMPTY_CONTOUR,
         };
         self.pts[c.next].prev = c.prev;
         self.pts[c.prev].next = c.next;

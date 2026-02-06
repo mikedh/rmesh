@@ -8,18 +8,18 @@
 #![allow(clippy::range_plus_one)]
 #![allow(clippy::stable_sort_primitive)]
 
-use std::collections::{HashMap, HashSet};
 use arrayvec::ArrayVec;
-use memchr::{memchr, memchr2, memchr_iter};
+use memchr::{memchr, memchr_iter, memchr2};
 use nom::{
     branch::alt,
     bytes::complete::{is_not, tag},
     character::complete::{char, digit1},
     combinator::{map, map_res, opt},
     error::{Error, ErrorKind},
-    sequence::{delimited, preceded, tuple},
     multi::separated_list0,
+    sequence::{delimited, preceded, tuple},
 };
+use std::collections::{HashMap, HashSet};
 
 use super::id::{HasId, Id};
 
@@ -48,7 +48,9 @@ pub struct Derived;
 
 /// Trait for types that can be parsed from a STEP string
 pub trait Parse<'a> {
-    fn parse(s: &'a str) -> IResult<'a, Self> where Self: Sized;
+    fn parse(s: &'a str) -> IResult<'a, Self>
+    where
+        Self: Sized;
 }
 
 impl Parse<'_> for f64 {
@@ -66,11 +68,7 @@ impl Parse<'_> for i64 {
             tuple((opt(char('-')), digit1)),
             |(sign, digits): (Option<char>, &str)| -> Result<i64, <i64 as std::str::FromStr>::Err> {
                 let num = str::parse::<i64>(digits)?;
-                if sign.is_some() {
-                    Ok(-num)
-                } else {
-                    Ok(num)
-                }
+                if sign.is_some() { Ok(-num) } else { Ok(num) }
             },
         )(s)
     }
@@ -206,7 +204,9 @@ pub fn param_from_chunks<'a, T: Parse<'a>>(
 pub fn parse_enum_tag(s: &str) -> IResult<'_, &str> {
     delimited(
         char('.'),
-        nom::bytes::complete::take_while(|c: char| c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit()),
+        nom::bytes::complete::take_while(|c: char| {
+            c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit()
+        }),
         char('.'),
     )(s)
 }
@@ -266,11 +266,7 @@ pub fn into_blocks(data: &[u8]) -> Vec<&[u8]> {
 
 /// Find the DATA section boundaries in a STEP file
 pub fn find_data_section(blocks: &[&[u8]]) -> (usize, usize) {
-    let data_start = blocks
-        .iter()
-        .position(|b| *b == b"DATA;")
-        .unwrap_or(0)
-        + 1;
+    let data_start = blocks.iter().position(|b| *b == b"DATA;").unwrap_or(0) + 1;
     let data_end = blocks
         .iter()
         .skip(data_start)
@@ -280,8 +276,8 @@ pub fn find_data_section(blocks: &[&[u8]]) -> (usize, usize) {
     (data_start, data_end)
 }
 
-use memchr::memchr3;
 use super::ap214::{Entity, superclasses_of};
+use memchr::memchr3;
 
 /// Parse a complex entity mapping like `(ENTITY1()ENTITY2()...)`.
 /// Complex entities are used when an instance satisfies multiple type constraints.
@@ -309,7 +305,8 @@ pub fn parse_complex_mapping(s: &str) -> IResult<'_, Entity<'_>> {
                     name = std::str::from_utf8(name_slice).expect("Could not convert to name");
                     args_start = index + next + 1;
                     let name_tag_slice = &bstr[index..(index + next + 1)];
-                    let name_tag = std::str::from_utf8(name_tag_slice).expect("Could not convert tag");
+                    let name_tag =
+                        std::str::from_utf8(name_tag_slice).expect("Could not convert tag");
                     name_tags.insert(name, name_tag);
                 }
                 depth += 1;

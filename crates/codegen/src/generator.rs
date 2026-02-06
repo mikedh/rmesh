@@ -1,6 +1,6 @@
-use std::fmt::Write;
-use std::collections::{HashSet, HashMap};
 use crate::parse::*;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Helper types to use when doing code-gen
@@ -25,7 +25,7 @@ enum Type<'a> {
     Primitive(&'a str),
 }
 struct TypeMap<'a>(HashMap<&'a str, Type<'a>>, &'a HashMap<&'a str, Ref<'a>>);
-impl <'a> TypeMap<'a> {
+impl<'a> TypeMap<'a> {
     fn to_rtype_build(&mut self, s: &'a str) -> String {
         if !self.0.contains_key(s) {
             self.build(s);
@@ -35,7 +35,7 @@ impl <'a> TypeMap<'a> {
     fn is_entity(&self, s: &str) -> bool {
         let t = self.0.get(s).expect(&format!("Could not get {:?}", s));
         match &t {
-            Type::Entity{..} => true,
+            Type::Entity { .. } => true,
             Type::Select(v) => v.iter().all(|s| self.is_entity(s)),
             _ => false,
         }
@@ -51,28 +51,31 @@ impl <'a> TypeMap<'a> {
 
             Type::Primitive(s) => s.to_string(),
 
-            Type::Aggregation { optional, type_ } => if *optional {
-                format!("Vec<Option<{}>>", self.to_inner_rtype(type_))
-            } else {
-                format!("Vec<{}>", self.to_inner_rtype(type_))
-            },
+            Type::Aggregation { optional, type_ } => {
+                if *optional {
+                    format!("Vec<Option<{}>>", self.to_inner_rtype(type_))
+                } else {
+                    format!("Vec<{}>", self.to_inner_rtype(type_))
+                }
+            }
         }
     }
     fn to_inner_rtype(&self, t: &Type<'a>) -> String {
         match &t {
-            Type::Aggregation { optional, type_ } => if *optional {
-                format!("Vec<Option<{}>>", self.to_inner_rtype(type_))
-            } else {
-                format!("Vec<{}>", self.to_inner_rtype(type_))
-            },
+            Type::Aggregation { optional, type_ } => {
+                if *optional {
+                    format!("Vec<Option<{}>>", self.to_inner_rtype(type_))
+                } else {
+                    format!("Vec<{}>", self.to_inner_rtype(type_))
+                }
+            }
             Type::Redeclared(r) => {
                 format!("{}<'a>", to_camel(r))
-            },
+            }
             Type::RedeclaredPrimitive(r) => r.to_string(),
             Type::Primitive(r) => r.to_string(),
 
-            Type::Entity { .. } | Type::Enum(_) | Type::Select(_) =>
-                panic!("Invalid inner type"),
+            Type::Entity { .. } | Type::Enum(_) | Type::Select(_) => panic!("Invalid inner type"),
         }
     }
     fn build(&mut self, s: &'a str) {
@@ -98,33 +101,38 @@ impl <'a> TypeMap<'a> {
 
 impl<'a> Type<'a> {
     fn write_enum_variant<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
-        where W: std::fmt::Write
+    where
+        W: std::fmt::Write,
     {
         match self {
-            Type::Entity{..} => writeln!(buf, "    {0}({0}_<'a>),",
-                                         to_camel(name)),
+            Type::Entity { .. } => writeln!(buf, "    {0}({0}_<'a>),", to_camel(name)),
             _ => Ok(()),
         }
     }
     fn write_enum_match<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
-        where W: std::fmt::Write
+    where
+        W: std::fmt::Write,
     {
         match self {
-            Type::Entity{..} => writeln!(buf,
+            Type::Entity { .. } => writeln!(
+                buf,
                 r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}(v))),"#,
-                capitalize(name), to_camel(name)),
+                capitalize(name),
+                to_camel(name)
+            ),
             _ => Ok(()),
         }
     }
 
     fn is_entity(&self) -> bool {
-        matches!(self, Type::Entity{..})
+        matches!(self, Type::Entity { .. })
     }
 
     fn write_supertypes<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
-        where W: std::fmt::Write
+    where
+        W: std::fmt::Write,
     {
-        if let Type::Entity{supertypes, ..} = self {
+        if let Type::Entity { supertypes, .. } = self {
             if !supertypes.is_empty() {
                 write!(buf, r#"        "{}" => &["#, capitalize(name))?;
                 for (i, s) in supertypes.iter().enumerate() {
@@ -139,12 +147,15 @@ impl<'a> Type<'a> {
         Ok(())
     }
     fn write_type<W>(&self, name: &str, buf: &mut W, type_map: &TypeMap) -> std::fmt::Result
-        where W: std::fmt::Write
+    where
+        W: std::fmt::Write,
     {
         let camel_name = to_camel(name);
         match self {
             Type::Redeclared(c) => {
-                writeln!(buf,r#"
+                writeln!(
+                    buf,
+                    r#"
 #[derive(Debug)]
 pub struct {0}<'a>(pub {1}, std::marker::PhantomData<&'a ()>); // redeclared
 impl<'a> Parse<'a> for {0}<'a> {{
@@ -158,10 +169,15 @@ impl<'a> HasId for {0}<'a> {{
     }}
 }}
 "#,
-                camel_name, type_map.to_rtype(c), to_camel(c))?;
-            },
+                    camel_name,
+                    type_map.to_rtype(c),
+                    to_camel(c)
+                )?;
+            }
             Type::RedeclaredPrimitive(c) => {
-                writeln!(buf, r#"#[derive(Debug)]
+                writeln!(
+                    buf,
+                    r#"#[derive(Debug)]
 pub struct {0}<'a>(pub {1}, std::marker::PhantomData<&'a ()>); // primitive
 impl<'a> Parse<'a> for {0}<'a> {{
     fn parse(s: &'a str) -> IResult<'a, Self> {{
@@ -172,29 +188,45 @@ impl<'a> HasId for {0}<'a> {{
     fn append_ids(&self, _v: &mut Vec<usize>) {{ /* Nothing to do here */ }}
 }}
 "#,
-                    camel_name, c, strip_lifetime(c))?;
-            },
+                    camel_name,
+                    c,
+                    strip_lifetime(c)
+                )?;
+            }
 
             Type::Enum(c) => {
-                writeln!(buf, "#[derive(Debug)]
-pub enum {}<'a> {{ // enum", camel_name)?;
+                writeln!(
+                    buf,
+                    "#[derive(Debug)]
+pub enum {}<'a> {{ // enum",
+                    camel_name
+                )?;
                 for v in c {
                     writeln!(buf, "    {},", to_camel(v))?;
                 }
-                writeln!(buf,
+                writeln!(
+                    buf,
                     r#"    _Unused(std::marker::PhantomData<&'a ()>),
 }}
 impl<'a> Parse<'a> for {0}<'a> {{
     fn parse(s: &'a str) -> IResult<'a, Self> {{
         use {0}::*;
         let (s, tag) = parse_enum_tag(s)?;
-        let e = match tag {{"#, camel_name)?;
+        let e = match tag {{"#,
+                    camel_name
+                )?;
 
                 for enum_tag in c {
-                    writeln!(buf, r#"            "{}" => {},"#,
-                        capitalize(enum_tag), to_camel(enum_tag))?;
+                    writeln!(
+                        buf,
+                        r#"            "{}" => {},"#,
+                        capitalize(enum_tag),
+                        to_camel(enum_tag)
+                    )?;
                 }
-                writeln!(buf, r#"            _ => return nom_alt_err(s),
+                writeln!(
+                    buf,
+                    r#"            _ => return nom_alt_err(s),
         }};
         Ok((s, e))
     }}
@@ -202,51 +234,70 @@ impl<'a> Parse<'a> for {0}<'a> {{
 impl<'a> HasId for {0}<'a> {{
     fn append_ids(&self, _v: &mut Vec<usize>) {{ /* nothing to do here */ }}
 }}
-"#, camel_name)?;
-            },
+"#,
+                    camel_name
+                )?;
+            }
 
             Type::Select(c) => {
-                let num_entities = c.iter()
-                    .filter(|v| type_map.is_entity(v))
-                    .count();
+                let num_entities = c.iter().filter(|v| type_map.is_entity(v)).count();
                 // If every member of this SELECT statement is an entity, then
                 // we're just going to parse it to an Id anyways (since we
                 // can't disambiguate in the single pass of the parser)
                 if num_entities == c.len() {
-                    writeln!(buf, "#[derive(Debug)]
+                    writeln!(
+                        buf,
+                        "#[derive(Debug)]
 pub struct {0}_<'a>(std::marker::PhantomData<&'a ()>); // ambiguous select
 pub type {0}<'a> = Id<{0}_<'a>>;
-", camel_name)?;
+",
+                        camel_name
+                    )?;
                     return Ok(());
                 } else if num_entities > 1 {
                     // Print a warning here (TODO: handle better)
                     eprintln!(
                         "Ambiguous SELECT for {} (contains multiple entities)",
-                        camel_name);
+                        camel_name
+                    );
                 }
 
-                writeln!(buf, "#[derive(Debug)]
-pub enum {}<'a> {{ // select", camel_name)?;
+                writeln!(
+                    buf,
+                    "#[derive(Debug)]
+pub enum {}<'a> {{ // select",
+                    camel_name
+                )?;
                 for v in c {
-                    writeln!(buf, "    {}({}),", to_camel(v),
-                             type_map.to_rtype(v))?;
+                    writeln!(buf, "    {}({}),", to_camel(v), type_map.to_rtype(v))?;
                 }
-                writeln!(buf,
+                writeln!(
+                    buf,
                     r#"    _Unused(std::marker::PhantomData<&'a ()>)
 }}
 impl<'a> Parse<'a> for {}<'a> {{
-    fn parse(s: &'a str) -> IResult<'a, Self> {{"#, camel_name)?;
+    fn parse(s: &'a str) -> IResult<'a, Self> {{"#,
+                    camel_name
+                )?;
 
                 // Same logic as above
-                let to_parse_str = |v| if !type_map.is_entity(v) {
-                    format!(
-                        r#"        map(delimited(tag("{}("), <{}>::parse, char(')')), {}::{})"#,
-                        capitalize(v), type_map.to_rtype(v),
-                        camel_name, to_camel(v))
-                } else {
-                    format!(
-                        r#"        map(<{}>::parse, {}::{})"#,
-                        type_map.to_rtype(v), camel_name, to_camel(v))
+                let to_parse_str = |v| {
+                    if !type_map.is_entity(v) {
+                        format!(
+                            r#"        map(delimited(tag("{}("), <{}>::parse, char(')')), {}::{})"#,
+                            capitalize(v),
+                            type_map.to_rtype(v),
+                            camel_name,
+                            to_camel(v)
+                        )
+                    } else {
+                        format!(
+                            r#"        map(<{}>::parse, {}::{})"#,
+                            type_map.to_rtype(v),
+                            camel_name,
+                            to_camel(v)
+                        )
+                    }
                 };
 
                 if c.len() == 1 {
@@ -269,24 +320,36 @@ impl<'a> Parse<'a> for {}<'a> {{
                         write!(buf, "))")?;
                     }
                 }
-                writeln!(buf, "(s)
+                writeln!(
+                    buf,
+                    "(s)
     }}
 }}
 impl<'a> HasId for {0}<'a> {{
     fn append_ids(&self, _v: &mut Vec<usize>) {{
-        match self {{", camel_name)?;
+        match self {{",
+                    camel_name
+                )?;
                 for v in c {
-                    writeln!(buf, "            {}::{}(c) => c.append_ids(_v),",
-                        camel_name, to_camel(v))?;
+                    writeln!(
+                        buf,
+                        "            {}::{}(c) => c.append_ids(_v),",
+                        camel_name,
+                        to_camel(v)
+                    )?;
                 }
-                writeln!(buf, "            _ => (),
+                writeln!(
+                    buf,
+                    "            _ => (),
         }}
     }}
-}}")?;
-            },
+}}"
+                )?;
+            }
 
             Type::Aggregation { type_, .. } => {
-                writeln!(buf,
+                writeln!(
+                    buf,
                     r#"#[derive(Debug)]
 pub struct {0}<'a>(pub {1}, std::marker::PhantomData<&'a ()>); // aggregation
 impl<'a> Parse<'a> for {0}<'a> {{
@@ -302,16 +365,22 @@ impl<'a> HasId for {0}<'a> {{
     }}
 }}
 "#,
-                    camel_name, type_map.to_inner_rtype(self),
-                    type_map.to_inner_rtype(&*type_))?;
+                    camel_name,
+                    type_map.to_inner_rtype(self),
+                    type_map.to_inner_rtype(&*type_)
+                )?;
             }
 
             Type::Entity { attrs, .. } => {
                 if attrs.iter().any(|a| a.dupe) {
                     writeln!(buf, "#[allow(non_snake_case)]")?;
                 }
-                writeln!(buf, "#[derive(Debug)]
-pub struct {}_<'a> {{ // entity", camel_name)?;
+                writeln!(
+                    buf,
+                    "#[derive(Debug)]
+pub struct {}_<'a> {{ // entity",
+                    camel_name
+                )?;
                 for a in attrs {
                     // Skip derived attributes in the struct
                     if a.derived {
@@ -328,7 +397,9 @@ pub struct {}_<'a> {{ // entity", camel_name)?;
                         writeln!(buf, "{},", a.type_)?;
                     }
                 }
-                writeln!(buf, r#"    _marker: std::marker::PhantomData<&'a ()>,
+                writeln!(
+                    buf,
+                    r#"    _marker: std::marker::PhantomData<&'a ()>,
 }}
 pub type {0}<'a> = Id<{0}_<'a>>;
 impl<'a> FromEntity<'a> for {0}_<'a> {{
@@ -341,64 +412,74 @@ impl<'a> FromEntity<'a> for {0}_<'a> {{
 }}
 impl<'a> ParseFromChunks<'a> for {0}_<'a> {{
     fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{"#,
-                    camel_name)?;
+                    camel_name
+                )?;
 
                 // If we'll be reading attributes, then we need an index
                 if !attrs.is_empty() {
                     writeln!(buf, "        let mut i = 0;")?;
                 }
                 // Parse the tag
-                writeln!(buf, r#"        let (s, _) = tag("{}(")(strs[0])?;"#,
-                         capitalize(&name))?;
+                writeln!(
+                    buf,
+                    r#"        let (s, _) = tag("{}(")(strs[0])?;"#,
+                    capitalize(&name)
+                )?;
                 // Then, write a series of parsers which build the whole struct
-                for (i,a) in attrs.iter().enumerate() {
+                for (i, a) in attrs.iter().enumerate() {
                     if a.derived {
-                        write!(buf,
-                                 r#"        let (s, _) = param_from_chunks::<Derived>"#)?;
+                        write!(buf, r#"        let (s, _) = param_from_chunks::<Derived>"#)?;
                     } else {
                         if a.dupe {
                             writeln!(buf, "        #[allow(non_snake_case)]")?;
-                            write!(buf, "        let (s, {}__{})",
-                                   a.from.unwrap(), a.name)?;
+                            write!(buf, "        let (s, {}__{})", a.from.unwrap(), a.name)?;
                         } else {
                             write!(buf, "        let (s, {})", a.name)?;
                         }
                         if a.optional {
-                            write!(buf, " = param_from_chunks::<Option<{}>>",
-                                   a.type_)?;
+                            write!(buf, " = param_from_chunks::<Option<{}>>", a.type_)?;
                         } else {
                             write!(buf, " = param_from_chunks::<{}>", a.type_)?;
                         }
                     }
-                    writeln!(buf, "({}, s, &mut i, strs)?;",
-                             i == attrs.len() - 1)?;
+                    writeln!(buf, "({}, s, &mut i, strs)?;", i == attrs.len() - 1)?;
                 }
                 writeln!(buf, "        Ok((s, Self {{")?;
                 for a in attrs.iter().filter(|a| !a.derived) {
                     if a.dupe {
                         // TODO make this a function on `a`
-                        writeln!(buf, "            {}__{},",
-                                 a.from.unwrap(), a.name)?;
+                        writeln!(buf, "            {}__{},", a.from.unwrap(), a.name)?;
                     } else {
                         writeln!(buf, "            {},", a.name)?;
                     }
                 }
-                writeln!(buf, "            _marker: std::marker::PhantomData}}))
+                writeln!(
+                    buf,
+                    "            _marker: std::marker::PhantomData}}))
     }}
 }}
 impl<'a> HasId for {}_<'a> {{
-    fn append_ids(&self, _v: &mut Vec<usize>) {{", camel_name)?;
+    fn append_ids(&self, _v: &mut Vec<usize>) {{",
+                    camel_name
+                )?;
                 for a in attrs.iter().filter(|a| !a.derived) {
                     if a.dupe {
-                        writeln!(buf, "        self.{}__{}.append_ids(_v);",
-                                 a.from.unwrap(), a.name)?;
+                        writeln!(
+                            buf,
+                            "        self.{}__{}.append_ids(_v);",
+                            a.from.unwrap(),
+                            a.name
+                        )?;
                     } else {
                         writeln!(buf, "        self.{}.append_ids(_v);", a.name)?;
                     }
                 }
-                writeln!(buf, "    }}
-}}")?;
-            },
+                writeln!(
+                    buf,
+                    "    }}
+}}"
+                )?;
+            }
             Type::Primitive(_) => (),
         };
         Ok(())
@@ -407,11 +488,11 @@ impl<'a> HasId for {}_<'a> {{
 
 #[derive(Clone, Debug)]
 struct AttributeData<'a> {
-    name: &'a str, // already camel-case
+    name: &'a str,         // already camel-case
     from: Option<&'a str>, // original class, or None
     type_: String,
     optional: bool,
-    dupe: bool, // inherited from different parents with the same name
+    dupe: bool,    // inherited from different parents with the same name
     derived: bool, // marked whether this is a derived attribute
 }
 
@@ -455,7 +536,9 @@ pub fn generate(s: &mut Syntax) -> Result<String, std::fmt::Error> {
     let mut keys: Vec<&str> = type_map.0.keys().cloned().collect();
     keys.sort_unstable();
     let mut buf = String::new();
-    writeln!(&mut buf, "// Autogenerated file, do not hand-edit!
+    writeln!(
+        &mut buf,
+        "// Autogenerated file, do not hand-edit!
 use crate::{{
     id::{{Id, HasId}},
     parse::{{IResult, Logical, Derived, Parse, ParseFromChunks, nom_alt_err,
@@ -470,17 +553,23 @@ use nom::{{
     multi::{{many0}},
     sequence::{{delimited, pair}},
 }};
-use arrayvec::ArrayVec;")?;
+use arrayvec::ArrayVec;"
+    )?;
 
     for k in &keys {
         type_map.0[k].write_type(k, &mut buf, &type_map)?;
     }
-    writeln!(&mut buf, "#[derive(Debug)]
-pub enum Entity<'a> {{")?;
+    writeln!(
+        &mut buf,
+        "#[derive(Debug)]
+pub enum Entity<'a> {{"
+    )?;
     for k in &keys {
         type_map.0[k].write_enum_variant(k, &mut buf)?;
     }
-    writeln!(&mut buf, r#"    ComplexEntity(Vec<Entity<'a>>),
+    writeln!(
+        &mut buf,
+        r#"    ComplexEntity(Vec<Entity<'a>>),
     _FailedToParse,
     _EmptySlot,
 }}
@@ -490,35 +579,46 @@ impl<'a> ParseFromChunks<'a> for Entity<'a> {{
             alt((alpha0, tag("_"))),
             many0(alt((alphanumeric1, tag("_")))),
         ))(strs[0])?;
-        match r {{"#)?;
+        match r {{"#
+    )?;
     for k in &keys {
         type_map.0[k].write_enum_match(k, &mut buf)?;
     }
-    writeln!(&mut buf, r#"            "" => parse_complex_mapping(strs[0]),
+    writeln!(
+        &mut buf,
+        r#"            "" => parse_complex_mapping(strs[0]),
             _ => nom_alt_err(r),
         }}
     }}
 }}
 
 pub fn superclasses_of(s: &str) -> &[&str] {{
-    match s {{"#)?;
+    match s {{"#
+    )?;
     for k in &keys {
         type_map.0[k].write_supertypes(k, &mut buf)?;
     }
-    writeln!(&mut buf, "        _ => &[],
+    writeln!(
+        &mut buf,
+        "        _ => &[],
     }}
 }}
 impl<'a> Entity<'a> {{
     pub fn upstream(&self) -> Vec<usize> {{
         let mut out = Vec::new();
         match self {{
-")?;
+"
+    )?;
     for k in keys.iter().filter(|k| type_map.0[*k].is_entity()) {
-        writeln!(&mut buf,
+        writeln!(
+            &mut buf,
             "            Entity::{}(c) => c.append_ids(&mut out),",
-            to_camel(k))?;
+            to_camel(k)
+        )?;
     }
-    writeln!(&mut buf, "            Entity::ComplexEntity(v) => {{
+    writeln!(
+        &mut buf,
+        "            Entity::ComplexEntity(v) => {{
                 for e in v {{
                     out.extend(e.upstream().into_iter());
                 }}
@@ -527,13 +627,16 @@ impl<'a> Entity<'a> {{
         }};
         out
     }}
-}}")?;
+}}"
+    )?;
 
     Ok(buf)
 }
 
 fn capitalize(s: &str) -> String {
-    s.chars().map(|c| c.to_uppercase().next().unwrap()).collect()
+    s.chars()
+        .map(|c| c.to_uppercase().next().unwrap())
+        .collect()
 }
 
 // TODO: this is awkward; it would be cleaner to store lifetime separately
@@ -596,8 +699,7 @@ impl<'a> SchemaBody<'a> {
     fn collect_entity_names(&self, entity_names: &mut HashSet<&'a str>) {
         for d in &self.declarations {
             match d {
-                DeclarationOrRuleDecl::Declaration(d) =>
-                    d.collect_entity_names(entity_names),
+                DeclarationOrRuleDecl::Declaration(d) => d.collect_entity_names(entity_names),
                 DeclarationOrRuleDecl::RuleDecl(_) => (),
             }
         }
@@ -605,8 +707,7 @@ impl<'a> SchemaBody<'a> {
     fn build_ref_map(&'a self, ref_map: &mut HashMap<&'a str, Ref<'a>>) {
         for d in &self.declarations {
             match d {
-                DeclarationOrRuleDecl::Declaration(d) =>
-                    d.build_ref_map(ref_map),
+                DeclarationOrRuleDecl::Declaration(d) => d.build_ref_map(ref_map),
                 DeclarationOrRuleDecl::RuleDecl(_) => (),
             }
         }
@@ -614,8 +715,7 @@ impl<'a> SchemaBody<'a> {
     fn disambiguate(&mut self, entity_names: &HashSet<&str>) {
         for d in &mut self.declarations {
             match d {
-                DeclarationOrRuleDecl::Declaration(d) =>
-                    d.disambiguate(entity_names),
+                DeclarationOrRuleDecl::Declaration(d) => d.disambiguate(entity_names),
                 DeclarationOrRuleDecl::RuleDecl(_) => (),
             }
         }
@@ -636,10 +736,10 @@ impl<'a> Declaration<'a> {
         match self {
             Declaration::Entity(d) => {
                 ref_map.insert(d.0.0.0, Ref::Entity(d));
-            },
+            }
             Declaration::Type(d) => {
                 ref_map.insert(d.type_id.0, Ref::Type(&d.underlying_type));
-            },
+            }
             _ => (),
         }
     }
@@ -649,7 +749,7 @@ impl<'a> TypeDecl<'a> {
         match &mut self.underlying_type {
             UnderlyingType::Constructed(c) => {
                 c.disambiguate(entity_names);
-            },
+            }
             _ => (),
         }
     }
@@ -721,18 +821,22 @@ impl<'a> AggregationTypes<'a> {
     fn to_type(&self, type_map: &mut TypeMap<'a>) -> Type {
         let (optional, instantiable) = match self {
             AggregationTypes::Array(a) => (a.optional, &a.instantiable_type),
-            AggregationTypes::Bag(a) => (false,  &a.1),
+            AggregationTypes::Bag(a) => (false, &a.1),
             AggregationTypes::List(a) => (false, &a.instantiable_type),
             AggregationTypes::Set(a) => (false, &a.instantiable_type),
         };
         match &**instantiable {
             InstantiableType::Concrete(c) => {
                 let type_ = c.to_type(type_map);
-                Type::Aggregation { optional,  type_: Box::new(type_) }
-            },
-            InstantiableType::EntityRef(e) => Type::Aggregation {
-                optional, type_: Box::new(Type::Redeclared(e.0))
+                Type::Aggregation {
+                    optional,
+                    type_: Box::new(type_),
+                }
             }
+            InstantiableType::EntityRef(e) => Type::Aggregation {
+                optional,
+                type_: Box::new(Type::Redeclared(e.0)),
+            },
         }
     }
 }
@@ -746,10 +850,13 @@ impl<'a> ConstructedTypes<'a> {
 }
 impl<'a> EnumerationType<'a> {
     fn to_type(&self) -> Type {
-        assert!(!self.extensible, "Extensible enumerations are not supported");
+        assert!(
+            !self.extensible,
+            "Extensible enumerations are not supported"
+        );
         match self.items_or_extension.as_ref().unwrap() {
             EnumerationItemsOrExtension::Items(e) => e.to_type(),
-            _ => panic!("Extensions not supported")
+            _ => panic!("Extensions not supported"),
         }
     }
 }
@@ -815,7 +922,8 @@ impl<'a> EntityDecl<'a> {
                 }
             }
         }
-        let inherited_names: HashSet<&str> = inherited_name_count.into_iter()
+        let inherited_names: HashSet<&str> = inherited_name_count
+            .into_iter()
             .filter(|a| a.1 > 1)
             .map(|a| a.0)
             .collect();
@@ -829,25 +937,27 @@ impl<'a> EntityDecl<'a> {
 
                 // Import attributes from parent classes, patching the
                 // `from` field to indicate that it's from a superclass
-                attrs.extend(type_map
-                    .attributes(sub.0)
-                    .into_iter()
-                    .map(|mut a| {
-                        if a.from.is_none() {
-                            a.from = Some(sub.0);
-                        }
-                        // TODO: this falsely marks names as dupes if they've
-                        // got a match with another attr that's _derived_
-                        // (which wouldn't actually be stored in the struct)
-                        AttributeData {
-                            dupe: inherited_names.contains(a.name),
-                            derived: derived.contains(&(a.from.unwrap(), a.name)),
-                            ..a
-                        }
-                    })
-                    // Skip values that have already been seen (if we have
-                    // multiple inheritance from a common base class)
-                    .filter(|a| seen.insert((a.from.unwrap(), a.name))));
+                attrs.extend(
+                    type_map
+                        .attributes(sub.0)
+                        .into_iter()
+                        .map(|mut a| {
+                            if a.from.is_none() {
+                                a.from = Some(sub.0);
+                            }
+                            // TODO: this falsely marks names as dupes if they've
+                            // got a match with another attr that's _derived_
+                            // (which wouldn't actually be stored in the struct)
+                            AttributeData {
+                                dupe: inherited_names.contains(a.name),
+                                derived: derived.contains(&(a.from.unwrap(), a.name)),
+                                ..a
+                            }
+                        })
+                        // Skip values that have already been seen (if we have
+                        // multiple inheritance from a common base class)
+                        .filter(|a| seen.insert((a.from.unwrap(), a.name))),
+                );
             }
         }
 
@@ -875,8 +985,7 @@ impl<'a> AttributeDecl<'a> {
     fn name(&self) -> &str {
         match self {
             AttributeDecl::Id(i) => i.0,
-            AttributeDecl::Redeclared(_) =>
-                panic!("No support for renamed attributes"),
+            AttributeDecl::Redeclared(_) => panic!("No support for renamed attributes"),
         }
     }
     fn is_redeclared(&self) -> bool {
@@ -889,14 +998,10 @@ impl<'a> AttributeDecl<'a> {
 impl<'a> GeneralizedTypes<'a> {
     fn to_attr_type_str(&'a self, type_map: &mut TypeMap<'a>) -> String {
         match self {
-            GeneralizedTypes::Aggregate(_) =>
-                panic!("No support for aggregate type"),
-            GeneralizedTypes::GeneralAggregation(a) =>
-                a.to_attr_type_str(type_map),
-            GeneralizedTypes::GenericEntity(_) =>
-                panic!("No support for generic entity type"),
-            GeneralizedTypes::Generic(_) =>
-                panic!("No support for generic generalized type"),
+            GeneralizedTypes::Aggregate(_) => panic!("No support for aggregate type"),
+            GeneralizedTypes::GeneralAggregation(a) => a.to_attr_type_str(type_map),
+            GeneralizedTypes::GenericEntity(_) => panic!("No support for generic entity type"),
+            GeneralizedTypes::Generic(_) => panic!("No support for generic generalized type"),
         }
     }
 }
@@ -922,7 +1027,7 @@ impl<'a> GeneralAggregationTypes<'a> {
     fn to_attr_type_str(&'a self, type_map: &mut TypeMap<'a>) -> String {
         let (optional, param_type) = match self {
             GeneralAggregationTypes::Array(a) => (a.optional, &a.parameter_type),
-            GeneralAggregationTypes::Bag(a) => (false,  &a.1),
+            GeneralAggregationTypes::Bag(a) => (false, &a.1),
             GeneralAggregationTypes::List(a) => (false, &a.parameter_type),
             GeneralAggregationTypes::Set(a) => (false, &a.parameter_type),
         };
@@ -938,7 +1043,7 @@ impl<'a> GeneralAggregationTypes<'a> {
         }
     }
 }
-impl <'a> SimpleTypes<'a> {
+impl<'a> SimpleTypes<'a> {
     fn to_attr_type_str(&self) -> &str {
         match self {
             SimpleTypes::Binary(_) => "usize",
@@ -978,9 +1083,9 @@ impl<'a> NamedTypes<'a> {
     fn disambiguate(&mut self, entity_names: &HashSet<&str>) {
         if let NamedTypes::_Ambiguous(r) = self {
             *self = if entity_names.contains(r.0) {
-                 NamedTypes::Entity(EntityRef(r.0))
+                NamedTypes::Entity(EntityRef(r.0))
             } else {
-                 NamedTypes::Type(TypeRef(r.0))
+                NamedTypes::Type(TypeRef(r.0))
             };
         }
     }

@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use nalgebra::{Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
-use super::faces::{GEOMETRY_TOL, NEWTON_TOL};
 use super::Surface;
+use super::faces::{GEOMETRY_TOL, NEWTON_TOL};
 
 // ============================================================================
 // Curve types (1D geometry)
@@ -173,6 +173,7 @@ impl CurveBSpline {
 
     /// Compute first derivative at parameter u.
     /// Algorithm A3.2 from "The NURBS Book"
+    #[allow(clippy::needless_range_loop)]
     pub fn derivative(&self, u: f64) -> Vector3<f64> {
         let span = self.find_span(u);
         let p = self.degree;
@@ -329,8 +330,7 @@ impl Curve {
             Curve::Line(line) => line.origin + t * line.direction,
             Curve::Circle(circle) => {
                 let y_axis = circle.axis.cross(&circle.x_axis);
-                circle.center
-                    + circle.radius * (t.cos() * circle.x_axis + t.sin() * y_axis)
+                circle.center + circle.radius * (t.cos() * circle.x_axis + t.sin() * y_axis)
             }
             Curve::Ellipse(ellipse) => {
                 let y_axis = ellipse.axis.cross(&ellipse.x_axis);
@@ -1230,10 +1230,11 @@ mod tests {
 
         let errors = model.validate();
         // Should not contain InvalidParameterRange for periodic curves
-        assert!(!errors.iter().any(|e| matches!(
-            e,
-            BrepError::InvalidParameterRange { .. }
-        )));
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, BrepError::InvalidParameterRange { .. }))
+        );
     }
 
     #[test]

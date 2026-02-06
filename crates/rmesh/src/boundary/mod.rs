@@ -5,7 +5,7 @@ pub mod tesselate;
 pub mod topology;
 
 pub use faces::{Surface, SurfaceCurvature};
-pub use step::{from_step, StepError};
+pub use step::{StepError, from_step};
 pub use tesselate::{TesselatedFace, TesselatedModel, TesselationParams};
 pub use topology::{
     BrepEdge, BrepError, BrepFace, BrepLoop, BrepModel, BrepShell, BrepSolid, BrepVertex, Curve,

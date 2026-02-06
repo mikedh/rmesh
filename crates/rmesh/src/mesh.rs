@@ -927,8 +927,7 @@ impl Trimesh {
                         })
                     {
                         let face = self.faces[fi];
-                        for &(a, b) in
-                            &[(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+                        for &(a, b) in &[(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
                         {
                             result[ci].edges.push((vertices_2d[a], vertices_2d[b]));
                         }

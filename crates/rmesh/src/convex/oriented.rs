@@ -333,7 +333,8 @@ pub fn oriented_bounding_box(
     // If we have too many candidates, subsample uniformly
     if candidates.len() > MAX_CANDIDATES {
         let step = candidates.len() as f64 / MAX_CANDIDATES as f64;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Intentional index calculation
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // Intentional index calculation
         let subsampled = (0..MAX_CANDIDATES)
             .map(|i| candidates[(i as f64 * step) as usize])
             .collect();
