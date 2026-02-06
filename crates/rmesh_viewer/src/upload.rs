@@ -279,6 +279,20 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                 Geometry::Feature(_) => {
                     // FeatureModel not directly renderable; would need meshing first.
                 }
+                Geometry::Brep(brep) => {
+                    // Tessellate BREP to mesh for rendering
+                    let params = rmesh::boundary::tesselate::TesselationParams::default();
+                    let mesh = brep.tesselate(&params);
+                    upload_mesh(
+                        device,
+                        queue,
+                        &mesh,
+                        world_transform,
+                        &mut meshes,
+                        &mut bounds_min,
+                        &mut bounds_max,
+                    );
+                }
             }
         }
     });
@@ -330,6 +344,20 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                     );
                 }
                 Geometry::Feature(_) => {}
+                Geometry::Brep(brep) => {
+                    // Tessellate BREP to mesh for rendering
+                    let params = rmesh::boundary::tesselate::TesselationParams::default();
+                    let mesh = brep.tesselate(&params);
+                    upload_mesh(
+                        device,
+                        queue,
+                        &mesh,
+                        &identity,
+                        &mut meshes,
+                        &mut bounds_min,
+                        &mut bounds_max,
+                    );
+                }
             }
         }
     }

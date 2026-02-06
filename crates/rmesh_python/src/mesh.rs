@@ -1580,6 +1580,9 @@ impl PyTrimesh {
                     dict.set_item("major_radius", t.major_radius).unwrap();
                     dict.set_item("minor_radius", t.minor_radius).unwrap();
                 }
+                rmesh::boundary::Surface::BSpline(_) => {
+                    dict.set_item("kind", "BSpline").unwrap();
+                }
             }
             surfaces.append(dict).unwrap();
         }

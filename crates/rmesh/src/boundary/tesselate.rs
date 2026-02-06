@@ -22,7 +22,9 @@ use super::Surface;
 use super::cdt;
 use super::faces::{CURVATURE_TOL, Cone, Cylinder, GEOMETRY_TOL, Sphere, SurfacePlane, Torus};
 use super::topology::{BrepEdge, BrepFace, BrepModel, Curve, EdgeUse, OrientedEdge};
+use crate::attributes::{Attributes, Grouping, GroupingKind};
 use crate::creation::{Plane, perpendicular};
+use crate::mesh::Trimesh;
 
 /// Parameters controlling tesselation quality.
 #[derive(Debug, Clone)]
@@ -55,54 +57,6 @@ pub struct TesselatedFace {
     pub vertices: Vec<Point3<f64>>,
     pub triangles: Vec<[usize; 3]>,
     pub normals: Vec<Vector3<f64>>,
-}
-
-/// Result of tesselating a complete BREP model.
-#[derive(Debug, Clone)]
-pub struct TesselatedModel {
-    pub vertices: Vec<Point3<f64>>,
-    pub triangles: Vec<[usize; 3]>,
-    pub normals: Vec<Vector3<f64>>,
-    /// Maps each triangle to the face it came from
-    pub face_indices: Vec<usize>,
-}
-
-/// Statistics about mesh manifoldness and watertightness.
-#[derive(Debug, Clone, Default)]
-pub struct MeshValidation {
-    /// Number of edges shared by exactly 2 triangles (manifold edges)
-    pub manifold_edges: usize,
-    /// Number of edges used by only 1 triangle (boundary edges - indicates holes)
-    pub boundary_edges: usize,
-    /// Number of edges used by 3+ triangles (non-manifold edges)
-    pub non_manifold_edges: usize,
-    /// Total number of edges
-    pub total_edges: usize,
-    /// Number of triangles with consistent winding (based on neighbor normals)
-    pub consistent_winding: usize,
-    /// Number of triangles with inconsistent winding
-    pub inconsistent_winding: usize,
-    /// List of non-manifold edge endpoints (vertex index pairs)
-    pub non_manifold_edge_list: Vec<(usize, usize)>,
-    /// List of boundary edge endpoints (vertex index pairs)
-    pub boundary_edge_list: Vec<(usize, usize)>,
-}
-
-impl MeshValidation {
-    /// Returns true if the mesh is watertight (no boundary edges, no non-manifold edges).
-    pub fn is_watertight(&self) -> bool {
-        self.boundary_edges == 0 && self.non_manifold_edges == 0
-    }
-
-    /// Returns true if the mesh is manifold (no non-manifold edges).
-    pub fn is_manifold(&self) -> bool {
-        self.non_manifold_edges == 0
-    }
-
-    /// Returns true if all triangles have consistent winding.
-    pub fn has_consistent_winding(&self) -> bool {
-        self.inconsistent_winding == 0
-    }
 }
 
 /// Error analysis for a single triangle during adaptive subdivision.
@@ -188,156 +142,6 @@ impl FaceTriangulation {
             (local_b, local_a)
         };
         self.boundary_edges.contains(&edge)
-    }
-}
-
-impl TesselatedModel {
-    /// Validate the mesh for watertightness and manifoldness.
-    ///
-    /// A watertight mesh has:
-    /// - Every edge shared by exactly 2 triangles (no holes)
-    /// - Consistent face winding (all normals pointing outward)
-    ///
-    /// Returns validation statistics.
-    pub fn validate(&self) -> MeshValidation {
-        use std::collections::HashMap;
-
-        let mut validation = MeshValidation::default();
-
-        // Build edge usage map: (min_v, max_v) -> count
-        let mut edge_counts: HashMap<(usize, usize), usize> = HashMap::new();
-
-        for tri in &self.triangles {
-            for i in 0..3 {
-                let v1 = tri[i];
-                let v2 = tri[(i + 1) % 3];
-                let edge = if v1 < v2 { (v1, v2) } else { (v2, v1) };
-                *edge_counts.entry(edge).or_insert(0) += 1;
-            }
-        }
-
-        validation.total_edges = edge_counts.len();
-
-        // Count edge types
-        for (&edge, &count) in &edge_counts {
-            match count {
-                1 => {
-                    validation.boundary_edges += 1;
-                    validation.boundary_edge_list.push(edge);
-                }
-                2 => {
-                    validation.manifold_edges += 1;
-                }
-                _ => {
-                    validation.non_manifold_edges += 1;
-                    validation.non_manifold_edge_list.push(edge);
-                }
-            }
-        }
-
-        // Check winding consistency using normals
-        // For adjacent triangles, if they share an edge, they should use it in opposite directions
-        let mut half_edges: HashMap<(usize, usize), usize> = HashMap::new(); // (v1, v2) -> tri_idx
-
-        for (tri_idx, tri) in self.triangles.iter().enumerate() {
-            for i in 0..3 {
-                let v1 = tri[i];
-                let v2 = tri[(i + 1) % 3];
-                half_edges.insert((v1, v2), tri_idx);
-            }
-        }
-
-        // For each half-edge, check if the opposite half-edge exists
-        let mut checked_triangles = vec![false; self.triangles.len()];
-        let mut consistent_count = 0;
-        let mut inconsistent_count = 0;
-
-        for (tri_idx, tri) in self.triangles.iter().enumerate() {
-            if checked_triangles[tri_idx] {
-                continue;
-            }
-            checked_triangles[tri_idx] = true;
-
-            for i in 0..3 {
-                let v1 = tri[i];
-                let v2 = tri[(i + 1) % 3];
-
-                // For consistent winding, the adjacent triangle should have edge (v2, v1)
-                if let Some(&neighbor_idx) = half_edges.get(&(v2, v1)) {
-                    // Consistent: neighbor uses edge in opposite direction
-                    if !checked_triangles[neighbor_idx] {
-                        checked_triangles[neighbor_idx] = true;
-                        consistent_count += 1;
-                    }
-                } else if half_edges.contains_key(&(v1, v2)) {
-                    // There's a neighbor but with same edge direction - inconsistent
-                    inconsistent_count += 1;
-                }
-            }
-        }
-
-        // Each triangle pair counted once for consistency
-        validation.consistent_winding = consistent_count;
-        validation.inconsistent_winding = inconsistent_count;
-
-        validation
-    }
-
-    /// Returns true if the mesh is watertight.
-    pub fn is_watertight(&self) -> bool {
-        self.validate().is_watertight()
-    }
-
-    /// Returns true if all triangles have consistent winding.
-    ///
-    /// For adjacent triangles sharing an edge, they should use the edge in opposite
-    /// directions (one uses v1->v2, the other uses v2->v1). If they use the edge in
-    /// the same direction, the winding is inconsistent.
-    pub fn is_winding_consistent(&self) -> bool {
-        self.validate().has_consistent_winding()
-    }
-
-    /// Analyze which faces contribute to problematic edges.
-    /// Returns a map from face_idx to (boundary_edge_count, non_manifold_edge_count).
-    pub fn analyze_problematic_faces(&self) -> std::collections::HashMap<usize, (usize, usize)> {
-        use std::collections::HashMap;
-
-        // Build edge -> list of (triangle_idx, face_idx)
-        let mut edge_to_tris: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
-
-        for (tri_idx, tri) in self.triangles.iter().enumerate() {
-            let face_idx = self.face_indices[tri_idx];
-            for i in 0..3 {
-                let v1 = tri[i];
-                let v2 = tri[(i + 1) % 3];
-                let edge = if v1 < v2 { (v1, v2) } else { (v2, v1) };
-                edge_to_tris
-                    .entry(edge)
-                    .or_default()
-                    .push((tri_idx, face_idx));
-            }
-        }
-
-        // Count problematic edges per face
-        let mut face_stats: HashMap<usize, (usize, usize)> = HashMap::new();
-
-        for tris in edge_to_tris.values() {
-            let count = tris.len();
-            if count == 1 {
-                // Boundary edge
-                let face_idx = tris[0].1;
-                let entry = face_stats.entry(face_idx).or_insert((0, 0));
-                entry.0 += 1;
-            } else if count > 2 {
-                // Non-manifold edge
-                for (_, face_idx) in tris {
-                    let entry = face_stats.entry(*face_idx).or_insert((0, 0));
-                    entry.1 += 1;
-                }
-            }
-        }
-
-        face_stats
     }
 }
 
@@ -1988,8 +1792,8 @@ impl<'a> ShellTessellator<'a> {
         }
     }
 
-    /// Tessellate all faces and return the result.
-    fn tessellate(mut self) -> TesselatedModel {
+    /// Tessellate all faces and return a Trimesh.
+    fn tessellate(mut self) -> Trimesh {
         // Phase 1: Discretize all edges globally
         self.phase1_discretize_all_edges();
 
@@ -2005,12 +1809,24 @@ impl<'a> ShellTessellator<'a> {
         // Phase 4: Final assembly
         self.phase4_final_assembly();
 
-        TesselatedModel {
-            vertices: self.vertices,
-            triangles: self.triangles,
-            normals: self.normals,
-            face_indices: self.face_indices,
-        }
+        // Build Trimesh with attributes
+        let mut attrs_vertex = Attributes::default();
+        attrs_vertex.normals.push(self.normals);
+
+        let mut attrs_face = Attributes::default();
+        attrs_face.groupings.push(Grouping {
+            kind: GroupingKind::Surface,
+            names: vec![], // Could add face names if desired
+            indices: self.face_indices,
+        });
+
+        Trimesh::new(
+            self.vertices,
+            self.triangles,
+            Some(attrs_vertex),
+            Some(attrs_face),
+        )
+        .expect("tessellation produced valid mesh")
     }
 }
 
@@ -2044,14 +1860,20 @@ impl BrepModel {
     ///
     /// This method ensures watertight output by deduplicating edge vertices:
     /// adjacent faces sharing an edge will use the same vertex positions.
-    pub fn tesselate(&self, params: &TesselationParams) -> TesselatedModel {
+    ///
+    /// Returns a `Trimesh` with:
+    /// - `vertices`: 3D vertex positions
+    /// - `faces`: triangle indices
+    /// - `attributes_vertex.normals[0]`: per-vertex normals
+    /// - `attributes_face.groupings`: face-to-surface mapping with `GroupingKind::Surface`
+    pub fn tesselate(&self, params: &TesselationParams) -> Trimesh {
         ShellTessellator::new(self, params).tessellate()
     }
 
     /// Tesselate using the old (non-watertight) method.
     /// Each face is tessellated independently, which may result in cracks.
     #[allow(dead_code)]
-    pub fn tesselate_independent(&self, params: &TesselationParams) -> TesselatedModel {
+    pub fn tesselate_independent(&self, params: &TesselationParams) -> Trimesh {
         let mut all_vertices = Vec::new();
         let mut all_triangles = Vec::new();
         let mut all_normals = Vec::new();
@@ -2074,12 +1896,24 @@ impl BrepModel {
             }
         }
 
-        TesselatedModel {
-            vertices: all_vertices,
-            triangles: all_triangles,
-            normals: all_normals,
-            face_indices,
-        }
+        // Build Trimesh with attributes
+        let mut attrs_vertex = Attributes::default();
+        attrs_vertex.normals.push(all_normals);
+
+        let mut attrs_face = Attributes::default();
+        attrs_face.groupings.push(Grouping {
+            kind: GroupingKind::Surface,
+            names: vec![],
+            indices: face_indices,
+        });
+
+        Trimesh::new(
+            all_vertices,
+            all_triangles,
+            Some(attrs_vertex),
+            Some(attrs_face),
+        )
+        .expect("tessellation produced valid mesh")
     }
 }
 
@@ -2250,10 +2084,11 @@ mod tests {
         let result = model.tesselate(&params);
 
         assert!(!result.vertices.is_empty());
-        assert!(!result.triangles.is_empty());
+        assert!(!result.faces.is_empty());
 
         // All normals should point in +Z
-        for n in &result.normals {
+        let normals = &result.attributes_vertex.normals[0];
+        for n in normals {
             assert_relative_eq!(n.z, 1.0, epsilon = 1e-10);
         }
     }
@@ -2379,10 +2214,10 @@ mod tests {
         let result = model.tesselate(&params);
 
         assert!(!result.vertices.is_empty());
-        assert!(!result.triangles.is_empty());
+        assert!(!result.faces.is_empty());
 
         // Should have more triangles than a simple square (because of the hole)
-        assert!(result.triangles.len() >= 4);
+        assert!(result.faces.len() >= 4);
     }
 
     #[test]
@@ -2498,7 +2333,7 @@ mod tests {
         );
 
         // Should have 2 triangles
-        assert_eq!(result.triangles.len(), 2);
+        assert_eq!(result.faces.len(), 2);
 
         // Test independent tessellation (should have more vertices)
         let result_independent = model.tesselate_independent(&params);
@@ -2596,7 +2431,7 @@ mod tests {
         let result = model.tesselate(&params);
 
         // Verify we have some triangles
-        assert!(!result.triangles.is_empty());
+        assert!(!result.faces.is_empty());
 
         // Verify all vertices are on or near the cylinder surface
         for v in &result.vertices {
@@ -2625,24 +2460,10 @@ mod tests {
             [2, 0, 3], // left
         ];
 
-        let normals = vec![Vector3::zeros(); 4];
+        let mesh = Trimesh::new(vertices, triangles, None, None).expect("valid mesh");
 
-        let model = TesselatedModel {
-            vertices,
-            triangles,
-            normals,
-            face_indices: vec![0, 1, 2, 3],
-        };
-
-        let validation = model.validate();
-
-        // A tetrahedron has 6 edges, each shared by exactly 2 faces
-        assert_eq!(validation.total_edges, 6);
-        assert_eq!(validation.manifold_edges, 6);
-        assert_eq!(validation.boundary_edges, 0);
-        assert_eq!(validation.non_manifold_edges, 0);
-        assert!(validation.is_watertight());
-        assert!(validation.is_manifold());
+        // A tetrahedron should be watertight
+        assert!(mesh.is_watertight());
     }
 
     #[test]
@@ -2655,24 +2476,11 @@ mod tests {
         ];
 
         let triangles = vec![[0, 1, 2]];
-        let normals = vec![Vector3::z(); 3];
 
-        let model = TesselatedModel {
-            vertices,
-            triangles,
-            normals,
-            face_indices: vec![0],
-        };
+        let mesh = Trimesh::new(vertices, triangles, None, None).expect("valid mesh");
 
-        let validation = model.validate();
-
-        // A single triangle has 3 boundary edges
-        assert_eq!(validation.total_edges, 3);
-        assert_eq!(validation.manifold_edges, 0);
-        assert_eq!(validation.boundary_edges, 3);
-        assert_eq!(validation.non_manifold_edges, 0);
-        assert!(!validation.is_watertight());
-        assert!(validation.is_manifold());
+        // A single triangle is not watertight (has boundary edges)
+        assert!(!mesh.is_watertight());
     }
 
     #[test]
@@ -2692,21 +2500,11 @@ mod tests {
             [0, 1, 3], // bottom (note: same edge direction as top - non-manifold)
             [0, 1, 4], // front
         ];
-        let normals = vec![Vector3::zeros(); 5];
 
-        let model = TesselatedModel {
-            vertices,
-            triangles,
-            normals,
-            face_indices: vec![0, 1, 2],
-        };
+        let mesh = Trimesh::new(vertices, triangles, None, None).expect("valid mesh");
 
-        let validation = model.validate();
-
-        // Edge (0, 1) is used 3 times - non-manifold
-        assert!(validation.non_manifold_edges > 0);
-        assert!(!validation.is_manifold());
-        assert!(!validation.is_watertight());
+        // Edge (0, 1) is used 3 times - not watertight
+        assert!(!mesh.is_watertight());
     }
 
     #[test]
@@ -2787,27 +2585,16 @@ mod tests {
         let params = TesselationParams::default();
         let result = model.tesselate(&params);
 
-        // The shared edge should result in a manifold mesh
-        let validation = result.validate();
-        assert!(
-            validation.is_manifold(),
-            "Mesh should be manifold: boundary={}, non_manifold={}",
-            validation.boundary_edges,
-            validation.non_manifold_edges
+        // 2 triangles form a bow-tie shape - not watertight since it's not a closed surface
+        // The shared edge should be properly deduplicated (vertices shared)
+        assert_eq!(
+            result.vertices.len(),
+            4,
+            "Should have 4 deduplicated vertices"
         );
 
-        // 2 triangles form a bow-tie shape with 5 edges:
-        // - 1 shared edge (manifold)
-        // - 4 boundary edges (not watertight since it's not a closed surface)
-        assert_eq!(validation.total_edges, 5);
-        assert_eq!(
-            validation.manifold_edges, 1,
-            "Shared edge should be manifold"
-        );
-        assert_eq!(
-            validation.boundary_edges, 4,
-            "Outer edges should be boundaries"
-        );
+        // Verify we have the expected number of triangles
+        assert_eq!(result.faces.len(), 2, "Expected 2 triangles");
     }
 
     /// Helper to create a unit cube BREP model with proper edge sharing.
@@ -3065,41 +2852,19 @@ mod tests {
 
         // A cube has 6 faces, each quad becomes 2 triangles = 12 triangles
         assert_eq!(
-            mesh.triangles.len(),
+            mesh.faces.len(),
             12,
             "Expected 12 triangles for cube, got {}",
-            mesh.triangles.len()
+            mesh.faces.len()
         );
 
-        // Validate mesh is watertight
-        let validation = mesh.validate();
+        // Validate mesh is watertight using Trimesh's is_watertight method
+        assert!(mesh.is_watertight(), "Cube mesh should be watertight");
 
-        assert_eq!(
-            validation.boundary_edges, 0,
-            "Expected 0 boundary edges, got {} (gaps between faces)",
-            validation.boundary_edges
-        );
-
-        assert_eq!(
-            validation.non_manifold_edges, 0,
-            "Expected 0 non-manifold edges, got {} (edges shared by 3+ triangles)",
-            validation.non_manifold_edges
-        );
-
+        // Also check winding consistency
         assert!(
-            validation.is_watertight(),
-            "Cube mesh should be watertight: {} manifold, {} boundary, {} non-manifold edges",
-            validation.manifold_edges,
-            validation.boundary_edges,
-            validation.non_manifold_edges
-        );
-
-        // A cube has 18 unique edges in its triangulated mesh
-        // (12 edges from original cube + 6 diagonal edges from triangulation)
-        assert_eq!(
-            validation.total_edges, 18,
-            "Expected 18 edges in triangulated cube, got {}",
-            validation.total_edges
+            mesh.is_winding_consistent(),
+            "Cube mesh should have consistent winding"
         );
     }
 

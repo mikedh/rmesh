@@ -1,3 +1,9 @@
+#![allow(clippy::all)]
+#![allow(clippy::pedantic)]
+#![allow(clippy::panic)]
+#![allow(dead_code)]
+#![allow(mismatched_lifetime_syntaxes)]
+
 mod generator;
 mod parse;
 

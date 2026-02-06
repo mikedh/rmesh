@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use memchr::{memchr, memchr_iter};
 use nom::{
     branch::alt,

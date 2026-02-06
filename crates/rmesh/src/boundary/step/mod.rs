@@ -765,107 +765,20 @@ mod tests {
                 };
 
                 let mesh = brep.tesselate(&params);
-                let validation = mesh.validate();
 
                 println!("\nBREP '{}' tessellation (tolerance=0.1mm):", name);
                 println!("  BREP faces: {}", brep.faces.len());
                 println!("  Vertices: {}", mesh.vertices.len());
-                println!("  Triangles: {}", mesh.triangles.len());
-                println!("  Total edges: {}", validation.total_edges);
-                println!(
-                    "  Manifold edges: {} ({:.1}%)",
-                    validation.manifold_edges,
-                    100.0 * validation.manifold_edges as f64 / validation.total_edges as f64
-                );
-                println!(
-                    "  Boundary edges: {} ({:.1}%)",
-                    validation.boundary_edges,
-                    100.0 * validation.boundary_edges as f64 / validation.total_edges as f64
-                );
-                println!(
-                    "  Non-manifold edges: {} ({:.1}%)",
-                    validation.non_manifold_edges,
-                    100.0 * validation.non_manifold_edges as f64 / validation.total_edges as f64
-                );
-
-                // Analyze non-manifold edges if any
-                if validation.non_manifold_edges > 0 {
-                    use std::collections::HashMap;
-                    // Count how many times each edge appears
-                    let mut edge_counts: HashMap<(usize, usize), usize> = HashMap::new();
-                    for tri in &mesh.triangles {
-                        for i in 0..3 {
-                            let v1 = tri[i];
-                            let v2 = tri[(i + 1) % 3];
-                            let edge = if v1 < v2 { (v1, v2) } else { (v2, v1) };
-                            *edge_counts.entry(edge).or_insert(0) += 1;
-                        }
-                    }
-
-                    // Histogram of edge usage counts
-                    let mut usage_histogram: HashMap<usize, usize> = HashMap::new();
-                    for &count in edge_counts.values() {
-                        *usage_histogram.entry(count).or_insert(0) += 1;
-                    }
-
-                    println!("  Edge usage histogram:");
-                    let mut counts: Vec<_> = usage_histogram.iter().collect();
-                    counts.sort_by_key(|&(k, _)| *k);
-                    for (usage, count) in counts {
-                        println!("    {} triangles: {} edges", usage, count);
-                    }
-                }
-
-                // Analyze boundary edges (gaps)
-                if validation.boundary_edges > 0 && validation.boundary_edges < 20 {
-                    println!("  Boundary edges (gaps):");
-                    for &(v1, v2) in &validation.boundary_edge_list {
-                        let p1 = &mesh.vertices[v1];
-                        let p2 = &mesh.vertices[v2];
-                        let len = (p2 - p1).norm();
-                        println!(
-                            "    ({:.4}, {:.4}, {:.4}) - ({:.4}, {:.4}, {:.4}), len={:.4}",
-                            p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, len
-                        );
-                    }
-                }
-
-                // Analyze which faces contribute to problematic edges
-                if validation.boundary_edges > 0 || validation.non_manifold_edges > 0 {
-                    let face_stats = mesh.analyze_problematic_faces();
-                    let mut stats_vec: Vec<_> = face_stats.into_iter().collect();
-                    stats_vec.sort_by_key(|(_, (b, n))| std::cmp::Reverse(*b + *n));
-                    println!("  Problematic faces (sorted by total issues):");
-                    for (face_idx, (boundary, non_manifold)) in stats_vec.iter().take(10) {
-                        if *boundary > 0 || *non_manifold > 0 {
-                            println!(
-                                "    Face {}: {} boundary, {} non-manifold",
-                                face_idx, boundary, non_manifold
-                            );
-                        }
-                    }
-                }
+                println!("  Triangles: {}", mesh.faces.len());
+                println!("  is_watertight: {}", mesh.is_watertight());
+                println!("  is_winding_consistent: {}", mesh.is_winding_consistent());
 
                 // Basic sanity checks
-                assert!(mesh.vertices.len() > 0, "Should have vertices");
-                assert!(mesh.triangles.len() > 0, "Should have triangles");
+                assert!(!mesh.vertices.is_empty(), "Should have vertices");
+                assert!(!mesh.faces.is_empty(), "Should have triangles");
 
-                // Require 100% watertight mesh
-                let manifold_ratio =
-                    validation.manifold_edges as f64 / validation.total_edges as f64;
-                println!("  Manifold ratio: {:.2}%", manifold_ratio * 100.0);
-
-                assert_eq!(
-                    validation.boundary_edges, 0,
-                    "Mesh must have 0 boundary edges, found {}",
-                    validation.boundary_edges
-                );
-                assert_eq!(
-                    validation.non_manifold_edges, 0,
-                    "Mesh must have 0 non-manifold edges, found {}",
-                    validation.non_manifold_edges
-                );
-                assert_eq!(manifold_ratio, 1.0, "Mesh must have 100% manifold ratio");
+                // Require watertight mesh
+                assert!(mesh.is_watertight(), "Mesh must be watertight");
             }
         }
     }
@@ -906,7 +819,7 @@ mod tests {
             max_segments: 256,
             ..Default::default()
         };
-        let tessellated = brep.tesselate(&params);
+        let tess_mesh = brep.tesselate(&params);
 
         // Load reference GLB
         let glb_data = include_bytes!("../../../../../test/data/featuretype.glb");
@@ -934,15 +847,6 @@ mod tests {
                 );
                 acc
             });
-
-        // Build tessellated Trimesh for comparison
-        let tess_mesh = Trimesh::new(
-            tessellated.vertices.clone(),
-            tessellated.triangles.clone(),
-            None,
-            None,
-        )
-        .expect("Failed to create tessellated mesh");
 
         println!("\n=== Featuretype Tessellation vs Reference ===");
         println!("BREP faces: {}", brep.faces.len());
@@ -1034,49 +938,6 @@ mod tests {
             volume_error * 100.0
         );
 
-        // Check manifoldness
-        let validation = tessellated.validate();
-        println!("\nMesh validation:");
-        println!("  Total edges: {}", validation.total_edges);
-        println!(
-            "  Manifold: {} ({:.1}%)",
-            validation.manifold_edges,
-            100.0 * validation.manifold_edges as f64 / validation.total_edges as f64
-        );
-        println!(
-            "  Boundary: {} ({:.1}%)",
-            validation.boundary_edges,
-            100.0 * validation.boundary_edges as f64 / validation.total_edges as f64
-        );
-        println!(
-            "  Non-manifold: {} ({:.1}%)",
-            validation.non_manifold_edges,
-            100.0 * validation.non_manifold_edges as f64 / validation.total_edges as f64
-        );
-
-        // Check manifold ratio - require 99.9%+ (allows a few edge issues out of thousands)
-        let manifold_ratio = validation.manifold_edges as f64 / validation.total_edges as f64;
-        println!("  Manifold ratio: {:.2}%", manifold_ratio * 100.0);
-
-        // Hard assert on manifold ratio (99.9% = allow ~5 bad edges out of 5000)
-        assert!(
-            manifold_ratio > 0.999,
-            "Manifold ratio {:.2}% should be > 99.9%",
-            manifold_ratio * 100.0
-        );
-
-        // Also assert limits on specific edge types
-        assert!(
-            validation.boundary_edges <= 5,
-            "Boundary edges {} exceeds limit of 5",
-            validation.boundary_edges
-        );
-        assert!(
-            validation.non_manifold_edges <= 5,
-            "Non-manifold edges {} exceeds limit of 5",
-            validation.non_manifold_edges
-        );
-
         // Check watertightness and winding consistency on the Trimesh
         let is_watertight = tess_mesh.is_watertight();
         let is_winding_consistent = tess_mesh.is_winding_consistent();
@@ -1085,24 +946,8 @@ mod tests {
         println!("  is_watertight: {}", is_watertight);
         println!("  is_winding_consistent: {}", is_winding_consistent);
 
-        // Note: We have 1 boundary edge causing watertight=false, but manifold ratio is 100%.
-        // The Trimesh is_watertight check may be stricter than our validation.
-        // For now, we rely on the manifold ratio check above (which passes at 99.9%+).
-        // TODO: Investigate the specific edge causing the boundary gap and fix it.
-        if !is_watertight {
-            println!(
-                "NOTE: Mesh not perfectly watertight ({} boundary edges), but manifold ratio is {:.2}%",
-                validation.boundary_edges,
-                manifold_ratio * 100.0
-            );
-        }
-
-        // Winding consistency is harder to achieve perfectly with our CDT approach.
-        // We check that at least 95% of triangles have consistent winding with neighbors.
-        // TODO: Improve winding consistency in tessellation.
-        if !is_winding_consistent {
-            println!("NOTE: Some triangles have inconsistent winding orientation.");
-        }
+        // The tessellated mesh should be watertight
+        assert!(is_watertight, "Tessellated mesh should be watertight");
 
         // Triangle count should be in same order of magnitude as reference
         let tri_ratio = tess_mesh.faces.len() as f64 / reference.faces.len() as f64;
