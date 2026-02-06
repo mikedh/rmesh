@@ -1,0 +1,19 @@
+[package]
+name = "codegen"
+version = "0.1.0"
+edition = "2024"
+description = "EXPRESS schema → Rust codegen for STEP file parsing"
+
+[[bin]]
+name = "express-gen"
+path = "src/main.rs"
+
+[dependencies]
+nom = "7"
+memchr = "2"
+fast-float = "0.2"
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true
