@@ -21,7 +21,7 @@ test = ["pytest", "trimesh"]
 
 [tool.maturin]
 manifest-path = "crates/rmesh_python/Cargo.toml"
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 python-source = "python"
 
 # [tool.uv]
