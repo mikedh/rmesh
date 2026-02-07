@@ -32,9 +32,9 @@ pub use id::{HasId, Id};
 pub use parse::{Logical, strip_flatten};
 pub use step_file::{FromEntity, StepFile};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Matrix4, Point3, Vector3};
 
 use super::faces::{Cone, Cylinder, Sphere, SurfaceBSpline, SurfacePlane, Torus};
 use super::{
@@ -83,45 +83,205 @@ pub fn from_step(content: &[u8]) -> Result<Scene, StepError> {
     convert_to_scene(&step_file)
 }
 
-/// Convert a parsed STEP file to a Scene.
-fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
-    let mut scene = Scene::new();
-    let mut brep_models: Vec<(String, BrepModel)> = Vec::new();
+/// Directed tree of STEP representations built from RRWT and SRR entities.
+///
+/// The tree has two kinds of edges:
+/// - **Transform edges** (from RRWT): parent → child with a placement transform.
+///   These form a strict tree (a child has exactly one RRWT parent in practice).
+/// - **Geometry lookup** (from standalone SRR): maps a part representation to
+///   the geometry representation(s) that hold its `ManifoldSolidBrep` items.
+///   These are *not* tree edges — they're a flat lookup used when harvesting
+///   geometry at leaf nodes.
+struct RepGraph {
+    /// RRWT tree: parent_rep → [(child_rep, transform)]
+    children: HashMap<usize, Vec<(usize, Matrix4<f64>)>>,
+    /// SRR lookup: rep → [geometry_rep] (bidirectional, but only consulted, never traversed)
+    geometry_for: HashMap<usize, Vec<usize>>,
+    /// Root representations (have outgoing RRWT edges but no incoming ones)
+    roots: Vec<usize>,
+}
 
-    // Find all MANIFOLD_SOLID_BREP entities
-    for (id, entity) in step.0.iter().enumerate() {
-        if let ap214::Entity::ManifoldSolidBrep(msb) = entity {
-            let name = get_name_from_entity(step, id);
-            if let Ok(brep) = convert_manifold_solid_brep(step, msb) {
-                brep_models.push((name, brep));
+impl RepGraph {
+    /// Build the representation graph by scanning STEP entities once.
+    fn build(step: &StepFile<'_>) -> Self {
+        let mut children: HashMap<usize, Vec<(usize, Matrix4<f64>)>> = HashMap::new();
+        let mut incoming: HashSet<usize> = HashSet::new();
+        let mut outgoing: HashSet<usize> = HashSet::new();
+        let mut rrwt_pairs: HashSet<(usize, usize)> = HashSet::new();
+        let mut geometry_for: HashMap<usize, Vec<usize>> = HashMap::new();
+
+        // Pass 1: collect RRWT edges (directed transform tree)
+        for entity in &step.entities {
+            if let ap214::Entity::RepresentationRelationshipWithTransformation(rrwt) = entity {
+                let parent = rrwt.rep_1.index();
+                let child = rrwt.rep_2.index();
+                let tf = item_defined_transform(step, rrwt.transformation_operator.index())
+                    .unwrap_or_else(|_| Matrix4::identity());
+                children.entry(parent).or_default().push((child, tf));
+                incoming.insert(child);
+                outgoing.insert(parent);
+                rrwt_pairs.insert((parent, child));
             }
         }
-        // Also check for ADVANCED_BREP_SHAPE_REPRESENTATION which contains MANIFOLD_SOLID_BREP
-        if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
-            let name = absr.name.0.to_string();
-            for item_id in &absr.items {
-                if let ap214::Entity::ManifoldSolidBrep(msb) = &step.0[item_id.index()]
-                    && let Ok(brep) = convert_manifold_solid_brep(step, msb)
-                {
-                    brep_models.push((name.clone(), brep));
+
+        // Pass 2: collect standalone SRR links (geometry lookup, not tree edges)
+        for entity in &step.entities {
+            if let ap214::Entity::ShapeRepresentationRelationship(srr) = entity {
+                let a = srr.rep_1.index();
+                let b = srr.rep_2.index();
+                if !rrwt_pairs.contains(&(a, b)) {
+                    geometry_for.entry(a).or_default().push(b);
+                    geometry_for.entry(b).or_default().push(a);
                 }
+            }
+        }
+
+        // Roots: nodes with outgoing RRWT edges but no incoming ones
+        let roots: Vec<usize> = outgoing
+            .iter()
+            .filter(|id| !incoming.contains(id))
+            .copied()
+            .collect();
+
+        Self {
+            children,
+            geometry_for,
+            roots,
+        }
+    }
+
+    /// Walk the tree from all roots, accumulating transforms.
+    ///
+    /// Returns a map of `msb_entity_id → (part_name, [transforms])` for every
+    /// `ManifoldSolidBrep` reachable through the representation graph.
+    fn collect_instances(
+        &self,
+        step: &StepFile<'_>,
+    ) -> HashMap<usize, (String, Vec<Matrix4<f64>>)> {
+        let mut result: HashMap<usize, (String, Vec<Matrix4<f64>>)> = HashMap::new();
+
+        for &root in &self.roots {
+            let name = rep_name(step, root);
+            self.walk(step, root, &Matrix4::identity(), &name, &mut result);
+        }
+
+        result
+    }
+
+    /// Recursive DFS: visit `node`, harvest geometry, then recurse into RRWT children.
+    fn walk(
+        &self,
+        step: &StepFile<'_>,
+        node: usize,
+        transform: &Matrix4<f64>,
+        inherited_name: &str,
+        result: &mut HashMap<usize, (String, Vec<Matrix4<f64>>)>,
+    ) {
+        let node_name = rep_name(step, node);
+        let name = if node_name.is_empty() {
+            inherited_name
+        } else {
+            &node_name
+        };
+
+        // Harvest MSBs from this rep and any SRR-linked geometry reps
+        self.harvest_geometry(step, node, transform, name, result);
+
+        // Recurse into RRWT children (directed edges — no cycles)
+        if let Some(kids) = self.children.get(&node) {
+            for &(child, ref child_tf) in kids {
+                let combined = transform * child_tf;
+                self.walk(step, child, &combined, name, result);
             }
         }
     }
 
-    // Add all BREP models to the scene
-    for (name, brep) in brep_models {
-        scene.add(&name, Geometry::Brep(Box::new(brep)), None);
+    /// Collect `ManifoldSolidBrep` items from a representation and its SRR-linked reps.
+    fn harvest_geometry(
+        &self,
+        step: &StepFile<'_>,
+        rep_id: usize,
+        transform: &Matrix4<f64>,
+        name: &str,
+        result: &mut HashMap<usize, (String, Vec<Matrix4<f64>>)>,
+    ) {
+        // Check this rep and all SRR-linked geometry reps
+        let mut reps_to_check = vec![rep_id];
+        if let Some(linked) = self.geometry_for.get(&rep_id) {
+            reps_to_check.extend(linked);
+        }
+
+        for rid in reps_to_check {
+            for item_id in rep_items(step, rid) {
+                if matches!(&step.entities[item_id], ap214::Entity::ManifoldSolidBrep(_)) {
+                    let part_name = {
+                        let rn = rep_name(step, rid);
+                        if !rn.is_empty() {
+                            rn
+                        } else if !name.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("brep_{item_id}")
+                        }
+                    };
+                    result
+                        .entry(item_id)
+                        .or_insert_with(|| (part_name, Vec::new()))
+                        .1
+                        .push(*transform);
+                }
+            }
+        }
+    }
+}
+
+/// Convert a parsed STEP file to a Scene.
+fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
+    let graph = RepGraph::build(step);
+
+    // If no RRWT edges exist this is a single-body file — fall back to flat scan.
+    if graph.roots.is_empty() {
+        return convert_to_scene_flat(step);
+    }
+
+    let to_mesh = graph.collect_instances(step);
+
+    let mut scene = Scene::new();
+    for (msb_id, (name, transforms)) in &to_mesh {
+        if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[*msb_id]
+            && let Ok(brep) = convert_manifold_solid_brep(step, msb)
+        {
+            scene.add(name, Geometry::Brep(Box::new(brep)), Some(transforms));
+        }
     }
 
     Ok(scene)
 }
 
-/// Get a human-readable name for an entity (from PRODUCT_DEFINITION or similar)
-fn get_name_from_entity<'a>(_step: &'a StepFile<'a>, id: usize) -> String {
-    // For now, just use a simple name. In a full implementation,
-    // we would trace back through PRODUCT_DEFINITION_SHAPE etc.
-    format!("brep_{id}")
+/// Flat fallback for single-body STEP files with no representation relationships.
+fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
+    let mut scene = Scene::new();
+
+    for (id, entity) in step.entities.iter().enumerate() {
+        if let ap214::Entity::ManifoldSolidBrep(msb) = entity
+            && let Ok(brep) = convert_manifold_solid_brep(step, msb)
+        {
+            scene.add(&format!("brep_{id}"), Geometry::Brep(Box::new(brep)), None);
+        }
+        if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
+            let name = absr.name.0.to_string();
+            for item_id in &absr.items {
+                let idx = item_id.index();
+                if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[idx]
+                    && let Ok(brep) = convert_manifold_solid_brep(step, msb)
+                {
+                    scene.add(&name, Geometry::Brep(Box::new(brep)), None);
+                }
+            }
+        }
+    }
+
+    Ok(scene)
 }
 
 /// Convert a MANIFOLD_SOLID_BREP to a BrepModel
@@ -141,7 +301,7 @@ fn convert_manifold_solid_brep<'a>(
 
     // Get the outer shell
     let shell_id = msb.outer.index();
-    let shell = match &step.0[shell_id] {
+    let shell = match &step.entities[shell_id] {
         ap214::Entity::ClosedShell(s) => s,
         _ => return Err(StepError::UnsupportedEntity("Expected CLOSED_SHELL".into())),
     };
@@ -189,7 +349,7 @@ fn convert_face<'a>(
     curve_map: &mut HashMap<usize, usize>,
     surface_map: &mut HashMap<usize, usize>,
 ) -> Result<usize, StepError> {
-    let face = match &step.0[face_id] {
+    let face = match &step.entities[face_id] {
         ap214::Entity::AdvancedFace(f) => f,
         _ => {
             return Err(StepError::UnsupportedEntity(
@@ -214,7 +374,7 @@ fn convert_face<'a>(
     let mut inner_loop_indices = Vec::new();
 
     for bound_id in &face.bounds {
-        let (is_outer, loop_id) = match &step.0[bound_id.index()] {
+        let (is_outer, loop_id) = match &step.entities[bound_id.index()] {
             ap214::Entity::FaceOuterBound(b) => (true, b.bound.index()),
             ap214::Entity::FaceBound(b) => (false, b.bound.index()),
             _ => continue,
@@ -252,7 +412,7 @@ fn convert_loop<'a>(
     edge_map: &mut HashMap<usize, usize>,
     curve_map: &mut HashMap<usize, usize>,
 ) -> Result<usize, StepError> {
-    let edge_loop = match &step.0[loop_id] {
+    let edge_loop = match &step.entities[loop_id] {
         ap214::Entity::EdgeLoop(el) => el,
         _ => return Err(StepError::UnsupportedEntity("Expected EDGE_LOOP".into())),
     };
@@ -260,7 +420,7 @@ fn convert_loop<'a>(
     let mut oriented_edges = Vec::new();
 
     for oe_id in &edge_loop.edge_list {
-        let oe = match &step.0[oe_id.index()] {
+        let oe = match &step.entities[oe_id.index()] {
             ap214::Entity::OrientedEdge(oe) => oe,
             _ => continue,
         };
@@ -291,7 +451,7 @@ fn convert_edge<'a>(
     vertex_map: &mut HashMap<usize, usize>,
     curve_map: &mut HashMap<usize, usize>,
 ) -> Result<usize, StepError> {
-    let edge = match &step.0[edge_id] {
+    let edge = match &step.entities[edge_id] {
         ap214::Entity::EdgeCurve(ec) => ec,
         _ => return Err(StepError::UnsupportedEntity("Expected EDGE_CURVE".into())),
     };
@@ -359,7 +519,7 @@ fn convert_vertex<'a>(
         return Ok(idx);
     }
 
-    let vp = match &step.0[vertex_id] {
+    let vp = match &step.entities[vertex_id] {
         ap214::Entity::VertexPoint(vp) => vp,
         _ => return Err(StepError::UnsupportedEntity("Expected VERTEX_POINT".into())),
     };
@@ -372,7 +532,7 @@ fn convert_vertex<'a>(
 
 /// Convert a CARTESIAN_POINT to Point3
 fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point3<f64>, StepError> {
-    let cp = match &step.0[point_id] {
+    let cp = match &step.entities[point_id] {
         ap214::Entity::CartesianPoint(cp) => cp,
         _ => {
             return Err(StepError::UnsupportedEntity(
@@ -395,7 +555,7 @@ fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point
 /// This function normalizes the vector and returns an error if the
 /// direction is degenerate (zero-length).
 fn convert_direction(step: &StepFile<'_>, dir_id: usize) -> Result<Vector3<f64>, StepError> {
-    let dir = match &step.0[dir_id] {
+    let dir = match &step.entities[dir_id] {
         ap214::Entity::Direction(d) => d,
         _ => return Err(StepError::UnsupportedEntity("Expected DIRECTION".into())),
     };
@@ -479,10 +639,10 @@ fn validate_bspline_knots(
 
 /// Convert a curve entity to Curve enum
 fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepError> {
-    match &step.0[curve_id] {
+    match &step.entities[curve_id] {
         ap214::Entity::Line(line) => {
             let origin = convert_cartesian_point(step, line.pnt.index())?;
-            let dir_entity = &step.0[line.dir.index()];
+            let dir_entity = &step.entities[line.dir.index()];
             let direction = if let ap214::Entity::Vector(v) = dir_entity {
                 let dir = convert_direction(step, v.orientation.index())?;
                 dir * v.magnitude.0
@@ -557,7 +717,7 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
 
 /// Convert a surface entity to Surface enum
 fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, StepError> {
-    match &step.0[surface_id] {
+    match &step.entities[surface_id] {
         ap214::Entity::Plane(plane) => {
             let (origin, normal, _) = convert_axis2_placement_3d(step, plane.position.index())?;
             Ok(Surface::Plane(SurfacePlane { origin, normal }))
@@ -651,7 +811,7 @@ fn convert_axis2_placement_3d(
     step: &StepFile<'_>,
     placement_id: usize,
 ) -> Result<(Point3<f64>, Vector3<f64>, Vector3<f64>), StepError> {
-    let a2p3d = match &step.0[placement_id] {
+    let a2p3d = match &step.entities[placement_id] {
         ap214::Entity::Axis2Placement3d(a) => a,
         _ => {
             return Err(StepError::UnsupportedEntity(
@@ -698,6 +858,56 @@ fn convert_axis2_placement_3d(
     };
 
     Ok((origin, z_axis, x_axis))
+}
+
+/// Extract the name from a representation entity (ShapeRepresentation or ABSR).
+fn rep_name(step: &StepFile<'_>, id: usize) -> String {
+    match &step.entities[id] {
+        ap214::Entity::ShapeRepresentation(sr) => sr.name.0.to_string(),
+        ap214::Entity::AdvancedBrepShapeRepresentation(absr) => absr.name.0.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Extract the item entity IDs from a representation entity.
+fn rep_items(step: &StepFile<'_>, id: usize) -> Vec<usize> {
+    match &step.entities[id] {
+        ap214::Entity::ShapeRepresentation(sr) => sr.items.iter().map(|i| i.index()).collect(),
+        ap214::Entity::AdvancedBrepShapeRepresentation(absr) => {
+            absr.items.iter().map(|i| i.index()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Build a 4x4 homogeneous transform matrix from an AXIS2_PLACEMENT_3D entity.
+fn placement_to_matrix(step: &StepFile<'_>, id: usize) -> Result<Matrix4<f64>, StepError> {
+    let (origin, z, x) = convert_axis2_placement_3d(step, id)?;
+    let y = z.cross(&x);
+    Ok(Matrix4::new(
+        x.x, y.x, z.x, origin.x,
+        x.y, y.y, z.y, origin.y,
+        x.z, y.z, z.z, origin.z,
+        0.0, 0.0, 0.0, 1.0,
+    ))
+}
+
+/// Extract the transform from an ITEM_DEFINED_TRANSFORMATION entity.
+///
+/// Computes `target * source.inverse()` where source and target are the two
+/// coordinate systems referenced by the IDT.
+fn item_defined_transform(step: &StepFile<'_>, idt_id: usize) -> Result<Matrix4<f64>, StepError> {
+    let idt = match &step.entities[idt_id] {
+        ap214::Entity::ItemDefinedTransformation(v) => v,
+        _ => {
+            return Err(StepError::UnsupportedEntity(
+                "Expected ITEM_DEFINED_TRANSFORMATION".into(),
+            ));
+        }
+    };
+    let t1 = placement_to_matrix(step, idt.transform_item_1.index())?;
+    let t2 = placement_to_matrix(step, idt.transform_item_2.index())?;
+    Ok(t2 * t1.try_inverse().unwrap_or_else(Matrix4::identity))
 }
 
 #[cfg(test)]
@@ -992,5 +1202,209 @@ mod tests {
         );
 
         println!("\n=== All validation checks passed ===");
+    }
+
+    /// Test that STEP files can be loaded through the `load()` pipeline
+    /// (FileType detection + dispatch) and produce valid watertight meshes.
+    #[test]
+    fn test_rosetta_featuretype_via_load_pipeline() {
+        use crate::boundary::tesselate::TesselationParams;
+        use crate::exchange::{FileType, load};
+        use crate::exchange::gltf::GltfLoader;
+        use crate::mesh::Trimesh;
+
+        let step_data = include_bytes!("../../../../../test/data/featuretype.STEP");
+
+        // Verify magic byte detection works
+        assert_eq!(FileType::from_bytes(step_data), Some(FileType::STEP));
+
+        // Load through the load() pipeline with auto-detection
+        let scene = load(step_data, None, None).expect("Failed to load STEP via pipeline");
+        assert!(!scene.geometry.is_empty(), "Scene should have geometry");
+
+        // Also test explicit FileType::STEP
+        let scene = load(step_data, Some(FileType::STEP), None)
+            .expect("Failed to load STEP with explicit type");
+
+        // Extract BREP and tessellate
+        let brep = scene
+            .geometry
+            .iter()
+            .find_map(|(_, geom)| {
+                if let Geometry::Brep(brep) = geom {
+                    Some(brep.as_ref())
+                } else {
+                    None
+                }
+            })
+            .expect("No BREP model found via load pipeline");
+
+        let params = TesselationParams {
+            tolerance: 0.1,
+            min_segments: 4,
+            max_segments: 256,
+            ..Default::default()
+        };
+        let tess_mesh = brep.tesselate(&params);
+
+        // Must be watertight
+        assert!(tess_mesh.is_watertight(), "Mesh from load pipeline must be watertight");
+
+        // Load reference GLB and compare
+        let glb_data = include_bytes!("../../../../../test/data/featuretype.glb");
+        let loader = GltfLoader::from_glb(glb_data).expect("Failed to parse GLB");
+        let ref_scene = loader.to_scene().expect("Failed to load GLB scene");
+
+        let reference: Trimesh = ref_scene
+            .geometry
+            .iter()
+            .filter_map(|(_, geom)| {
+                if let Geometry::Mesh(mesh) = geom {
+                    Some(mesh.as_ref().clone())
+                } else {
+                    None
+                }
+            })
+            .fold(Trimesh::default(), |mut acc, mesh| {
+                let offset = acc.vertices.len();
+                acc.vertices.extend(mesh.vertices.iter().cloned());
+                acc.faces.extend(
+                    mesh.faces
+                        .iter()
+                        .map(|f| [f[0] + offset, f[1] + offset, f[2] + offset]),
+                );
+                acc
+            });
+
+        // Compute scale factor from bounding boxes (STEP is inches, GLB is meters)
+        let (tess_min, tess_max) = tess_mesh.bounds().expect("tessellated mesh has no bounds");
+        let (ref_min, ref_max) = reference.bounds().expect("reference mesh has no bounds");
+
+        let tess_size = (tess_max.x - tess_min.x)
+            .max((tess_max.y - tess_min.y).max(tess_max.z - tess_min.z));
+        let ref_size =
+            (ref_max.x - ref_min.x).max((ref_max.y - ref_min.y).max(ref_max.z - ref_min.z));
+        let scale = ref_size / tess_size;
+
+        // Volume error < 10%
+        let tess_vol = tess_mesh.volume().abs() * scale.powi(3);
+        let ref_vol = reference.volume().abs();
+        let volume_error = ((tess_vol - ref_vol) / ref_vol).abs();
+        println!("Rosetta volume error: {:.2}%", volume_error * 100.0);
+        assert!(
+            volume_error < 0.10,
+            "Volume error {:.2}% exceeds 10%",
+            volume_error * 100.0
+        );
+
+        // Area error < 5%
+        let tess_area = tess_mesh.area() * scale.powi(2);
+        let ref_area = reference.area();
+        let area_error = ((tess_area - ref_area) / ref_area).abs();
+        println!("Rosetta area error: {:.2}%", area_error * 100.0);
+        assert!(
+            area_error < 0.05,
+            "Area error {:.2}% exceeds 5%",
+            area_error * 100.0
+        );
+    }
+
+    /// Test that an assembly STEP file loads with correct instancing.
+    ///
+    /// box_sides.STEP has 6 unique parts and 10 instances positioned with transforms.
+    #[test]
+    fn test_box_sides() {
+        let step_data = include_bytes!("../../../../../test/data/box_sides.STEP");
+        let scene = from_step(step_data).expect("Failed to parse assembly STEP file");
+
+        println!("\n=== box_sides.STEP assembly test ===");
+        println!("Unique geometries: {}", scene.geometry.len());
+        println!("Scene graph nodes: {}", scene.graph.nodes.len());
+
+        for (name, geom) in &scene.geometry {
+            if let Geometry::Brep(brep) = geom {
+                println!("  '{}': {} faces", name, brep.faces.len());
+            }
+        }
+
+        // Should have 6 unique geometries
+        assert_eq!(
+            scene.geometry.len(),
+            6,
+            "Expected 6 unique geometries, got {}",
+            scene.geometry.len()
+        );
+
+        // Should have 11 scene graph nodes: 1 root + 10 instances
+        assert_eq!(
+            scene.graph.nodes.len(),
+            11,
+            "Expected 11 scene graph nodes (1 root + 10 instances), got {}",
+            scene.graph.nodes.len()
+        );
+
+        // The root node should have 10 children
+        let root = &scene.graph.nodes[scene.graph.root];
+        assert_eq!(
+            root.children.len(),
+            10,
+            "Root should have 10 children, got {}",
+            root.children.len()
+        );
+
+        // At least some instance nodes should have non-identity transforms
+        let has_transforms = scene.graph.nodes[1..]
+            .iter()
+            .any(|n| n.transform.is_some());
+        assert!(has_transforms, "Instance nodes should have transforms");
+
+        println!("\n=== box_sides assembly test passed ===");
+    }
+
+    #[test]
+    fn test_box_sides_tessellation() {
+        use crate::boundary::tesselate::TesselationParams;
+
+        let step_data = include_bytes!("../../../../../test/data/box_sides.STEP");
+
+        let t0 = std::time::Instant::now();
+        let scene = from_step(step_data).expect("Failed to parse assembly STEP file");
+        let parse_ms = t0.elapsed().as_millis();
+
+        let params = TesselationParams {
+            tolerance: 0.1,
+            min_segments: 4,
+            max_segments: 64,
+            ..Default::default()
+        };
+
+        let t1 = std::time::Instant::now();
+        let mut total_verts = 0;
+        let mut total_tris = 0;
+        for (name, geom) in &scene.geometry {
+            if let Geometry::Brep(brep) = geom {
+                let mesh = brep.tesselate(&params);
+                println!(
+                    "  '{}': {} faces → {} verts, {} tris, watertight={}",
+                    name,
+                    brep.faces.len(),
+                    mesh.vertices.len(),
+                    mesh.faces.len(),
+                    mesh.is_watertight(),
+                );
+                if !mesh.is_watertight() {
+                    println!("    WARNING: '{}' is not watertight", name);
+                }
+                total_verts += mesh.vertices.len();
+                total_tris += mesh.faces.len();
+            }
+        }
+        let tess_ms = t1.elapsed().as_millis();
+
+        println!("\nbox_sides timing:");
+        println!("  Parse: {}ms", parse_ms);
+        println!("  Tessellate: {}ms", tess_ms);
+        println!("  Total: {}ms", parse_ms + tess_ms);
+        println!("  Output: {} verts, {} tris", total_verts, total_tris);
     }
 }

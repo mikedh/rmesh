@@ -1,12 +1,16 @@
 //! STEP file container and entity lookup.
 
+use rayon::prelude::*;
+
 use super::ap214::Entity;
 use super::id::Id;
 use super::parse::{find_data_section, into_blocks, strip_flatten};
 
 /// A parsed STEP file containing a vector of entities indexed by ID.
 #[derive(Debug)]
-pub struct StepFile<'a>(pub Vec<Entity<'a>>);
+pub struct StepFile<'a> {
+    pub entities: Vec<Entity<'a>>,
+}
 
 impl<'a> StepFile<'a> {
     /// Parses a STEP file from a raw array of bytes.
@@ -16,7 +20,7 @@ impl<'a> StepFile<'a> {
         let (data_start, data_end) = find_data_section(&blocks);
 
         let parsed: Vec<(usize, Entity<'a>)> = blocks[data_start..data_end]
-            .iter()
+            .par_iter()
             .filter_map(|b| {
                 parse_entity_decl(b)
                     .or_else(|()| parse_entity_fallback(b))
@@ -33,7 +37,7 @@ impl<'a> StepFile<'a> {
             out[p.0] = p.1;
         }
 
-        Self(out)
+        Self { entities: out }
     }
 
     /// Preprocess a STEP file (remove comments/whitespace).
@@ -43,17 +47,17 @@ impl<'a> StepFile<'a> {
 
     /// Get an entity by ID, attempting to cast it to type T.
     pub fn entity<T: FromEntity<'a>>(&'a self, i: Id<T>) -> Option<&'a T> {
-        T::try_from_entity(&self.0[i.0])
+        T::try_from_entity(&self.entities[i.0])
     }
 
     /// Get the number of entities in the file.
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.entities.len()
     }
 
     /// Check if the file is empty.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.entities.is_empty()
     }
 }
 
@@ -61,7 +65,7 @@ impl<'a, T> std::ops::Index<Id<T>> for StepFile<'a> {
     type Output = Entity<'a>;
 
     fn index(&self, id: Id<T>) -> &Self::Output {
-        &self.0[id.0]
+        &self.entities[id.0]
     }
 }
 

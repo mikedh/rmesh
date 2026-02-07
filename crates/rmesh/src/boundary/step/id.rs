@@ -5,7 +5,7 @@ use arrayvec::ArrayVec;
 /// A type-safe reference to a STEP entity.
 /// The type parameter `T` indicates what kind of entity this ID points to.
 #[derive(Debug)]
-pub struct Id<T>(pub usize, std::marker::PhantomData<*const T>);
+pub struct Id<T>(pub usize, std::marker::PhantomData<fn() -> T>);
 
 impl<T> Id<T> {
     pub fn new(i: usize) -> Self {
@@ -24,11 +24,6 @@ impl<T> Id<T> {
         self.0
     }
 }
-
-// Safety: Id only contains a usize and PhantomData, both of which are Send+Sync.
-// We use SAFETY comments to satisfy the linter but the actual safety reasoning
-// is that we're just wrapping a primitive type.
-// Note: These are safe because Id<T> is just a usize wrapper with PhantomData.
 
 impl<T> Clone for Id<T> {
     fn clone(&self) -> Self {
