@@ -28,9 +28,9 @@ mod id;
 mod parse;
 mod step_file;
 
-pub use id::{HasId, Id};
+pub use id::Id;
 pub use parse::{Logical, strip_flatten};
-pub use step_file::{FromEntity, StepFile};
+pub use step_file::StepFile;
 
 use std::collections::{HashMap, HashSet};
 
@@ -140,9 +140,9 @@ impl RepGraph {
         for entity in &step.entities {
             match entity {
                 ap214::Entity::RepresentationRelationshipWithTransformation(rrwt) => {
-                    let parent = rrwt.rep_1.index();
-                    let child = rrwt.rep_2.index();
-                    let tf = item_defined_transform(step, rrwt.transformation_operator.index())
+                    let parent = rrwt.rep_1;
+                    let child = rrwt.rep_2;
+                    let tf = item_defined_transform(step, rrwt.transformation_operator)
                         .unwrap_or_else(|e| {
                             eprintln!("warning: transform extraction failed, using identity: {e}");
                             Matrix4::identity()
@@ -153,7 +153,7 @@ impl RepGraph {
                     rrwt_pairs.insert((parent, child));
                 }
                 ap214::Entity::ShapeRepresentationRelationship(srr) => {
-                    srr_candidates.push((srr.rep_1.index(), srr.rep_2.index()));
+                    srr_candidates.push((srr.rep_1, srr.rep_2));
                 }
                 _ => {}
             }
@@ -266,6 +266,24 @@ impl RepGraph {
     }
 }
 
+/// Extract the numeric value from a MEASURE_WITH_UNIT generic entity.
+///
+/// Handles forms like `MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#10)` and
+/// `MEASURE_WITH_UNIT(POSITIVE_LENGTH_MEASURE(25.4),#10)`.
+fn extract_mwu_value(entity: &ap214::Entity<'_>) -> Option<f64> {
+    let raw = match entity {
+        ap214::Entity::Generic(s) => *s,
+        _ => return None,
+    };
+    let inner = raw.strip_prefix("MEASURE_WITH_UNIT(")?;
+    // inner = "LENGTH_MEASURE(25.4),#10)"
+    let paren = inner.find('(')?;
+    let rest = &inner[paren + 1..];
+    fast_float::parse_partial::<f64, _>(rest)
+        .ok()
+        .map(|(v, _)| v)
+}
+
 /// Extract the length unit scale factor from a STEP file.
 ///
 /// STEP files declare their length unit as a complex entity combining
@@ -294,13 +312,13 @@ fn extract_length_scale(step: &StepFile<'_>) -> f64 {
         // Check for SI_UNIT with optional prefix
         for sub in subs {
             if let ap214::Entity::SiUnit(si) = sub
-                && matches!(si.name, ap214::SiUnitName::Metre)
+                && si.name == "METRE"
             {
-                return match &si.prefix {
-                    Some(ap214::SiPrefix::Milli) => 0.001,
-                    Some(ap214::SiPrefix::Centi) => 0.01,
-                    Some(ap214::SiPrefix::Micro) => 1e-6,
-                    Some(ap214::SiPrefix::Kilo) => 1000.0,
+                return match si.prefix {
+                    Some("MILLI") => 0.001,
+                    Some("CENTI") => 0.01,
+                    Some("MICRO") => 1e-6,
+                    Some("KILO") => 1000.0,
                     _ => 1.0,
                 };
             }
@@ -309,14 +327,9 @@ fn extract_length_scale(step: &StepFile<'_>) -> f64 {
         // Check for CONVERSION_BASED_UNIT — follow its conversion_factor ref
         for sub in subs {
             if let ap214::Entity::ConversionBasedUnit(cbu) = sub {
-                let mwu_id = cbu.conversion_factor.index();
-                if let ap214::Entity::MeasureWithUnit(mwu) = &step.entities[mwu_id] {
-                    if let ap214::MeasureValue::LengthMeasure(lm) = &mwu.value_component {
-                        return lm.0;
-                    }
-                    if let ap214::MeasureValue::PositiveLengthMeasure(plm) = &mwu.value_component {
-                        return (plm.0).0.0;
-                    }
+                let mwu_id = cbu.conversion_factor;
+                if let Some(val) = extract_mwu_value(&step.entities[mwu_id]) {
+                    return val;
                 }
             }
         }
@@ -378,9 +391,9 @@ fn convert_to_scene_flat<'a>(
             work.push((format!("brep_{id}"), msb));
         }
         if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
-            let name = absr.name.0.to_string();
+            let name = absr.name.to_string();
             for item_id in &absr.items {
-                if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[item_id.index()] {
+                if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[*item_id] {
                     work.push((name.clone(), msb));
                 }
             }
@@ -417,7 +430,7 @@ fn convert_manifold_solid_brep<'a>(
     let mut surface_map: HashMap<usize, usize> = HashMap::new();
 
     // Get the outer shell
-    let shell_id = msb.outer.index();
+    let shell_id = msb.outer;
     let shell = match &step.entities[shell_id] {
         ap214::Entity::ClosedShell(s) => s,
         _ => return Err(StepError::UnsupportedEntity("Expected CLOSED_SHELL".into())),
@@ -429,7 +442,7 @@ fn convert_manifold_solid_brep<'a>(
         match convert_face(
             step,
             &mut model,
-            face_id.index(),
+            *face_id,
             &mut vertex_map,
             &mut edge_map,
             &mut curve_map,
@@ -473,7 +486,7 @@ fn convert_face<'a>(
     };
 
     // Convert the surface
-    let surface_id = face.face_geometry.index();
+    let surface_id = face.face_geometry;
     let surface_idx = if let Some(&idx) = surface_map.get(&surface_id) {
         idx
     } else {
@@ -488,9 +501,9 @@ fn convert_face<'a>(
     let mut inner_loop_indices = Vec::new();
 
     for bound_id in &face.bounds {
-        let (is_outer, loop_id) = match &step.entities[bound_id.index()] {
-            ap214::Entity::FaceOuterBound(b) => (true, b.bound.index()),
-            ap214::Entity::FaceBound(b) => (false, b.bound.index()),
+        let (is_outer, loop_id) = match &step.entities[*bound_id] {
+            ap214::Entity::FaceOuterBound(b) => (true, b.bound),
+            ap214::Entity::FaceBound(b) => (false, b.bound),
             _ => continue,
         };
 
@@ -533,12 +546,12 @@ fn convert_loop<'a>(
     let mut oriented_edges = Vec::new();
 
     for oe_id in &edge_loop.edge_list {
-        let oe = match &step.entities[oe_id.index()] {
+        let oe = match &step.entities[*oe_id] {
             ap214::Entity::OrientedEdge(oe) => oe,
             _ => continue,
         };
 
-        let edge_id = oe.edge_element.index();
+        let edge_id = oe.edge_element;
         let edge_idx = if let Some(&idx) = edge_map.get(&edge_id) {
             idx
         } else {
@@ -570,11 +583,11 @@ fn convert_edge<'a>(
     };
 
     // Convert vertices
-    let start_vertex = convert_vertex(step, model, edge.edge_start.index(), vertex_map)?;
-    let end_vertex = convert_vertex(step, model, edge.edge_end.index(), vertex_map)?;
+    let start_vertex = convert_vertex(step, model, edge.edge_start, vertex_map)?;
+    let end_vertex = convert_vertex(step, model, edge.edge_end, vertex_map)?;
 
     // Convert curve
-    let curve_id = edge.edge_geometry.index();
+    let curve_id = edge.edge_geometry;
     let curve_idx = if let Some(&idx) = curve_map.get(&curve_id) {
         idx
     } else {
@@ -637,7 +650,7 @@ fn convert_vertex<'a>(
         _ => return Err(StepError::UnsupportedEntity("Expected VERTEX_POINT".into())),
     };
 
-    let point = convert_cartesian_point(step, vp.vertex_geometry.index())?;
+    let point = convert_cartesian_point(step, vp.vertex_geometry)?;
     let idx = model.add_vertex(point);
     vertex_map.insert(vertex_id, idx);
     Ok(idx)
@@ -656,9 +669,9 @@ fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point
 
     let coords = &cp.coordinates;
     Ok(Point3::new(
-        coords.first().map_or(0.0, |v| v.0),
-        coords.get(1).map_or(0.0, |v| v.0),
-        coords.get(2).map_or(0.0, |v| v.0),
+        coords.first().copied().unwrap_or(0.0),
+        coords.get(1).copied().unwrap_or(0.0),
+        coords.get(2).copied().unwrap_or(0.0),
     ))
 }
 
@@ -754,11 +767,11 @@ fn validate_bspline_knots(
 fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepError> {
     match &step.entities[curve_id] {
         ap214::Entity::Line(line) => {
-            let origin = convert_cartesian_point(step, line.pnt.index())?;
-            let dir_entity = &step.entities[line.dir.index()];
+            let origin = convert_cartesian_point(step, line.pnt)?;
+            let dir_entity = &step.entities[line.dir];
             let direction = if let ap214::Entity::Vector(v) = dir_entity {
-                let dir = convert_direction(step, v.orientation.index())?;
-                dir * v.magnitude.0
+                let dir = convert_direction(step, v.orientation)?;
+                dir * v.magnitude
             } else {
                 return Err(StepError::UnsupportedEntity(
                     "Expected VECTOR for LINE".into(),
@@ -767,23 +780,22 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
             Ok(Curve::Line(CurveLine { origin, direction }))
         }
         ap214::Entity::Circle(circle) => {
-            let (center, axis, x_axis) = convert_axis2_placement_3d(step, circle.position.index())?;
+            let (center, axis, x_axis) = convert_axis2_placement_3d(step, circle.position)?;
             Ok(Curve::Circle(CurveCircle {
                 center,
                 axis,
                 x_axis,
-                radius: circle.radius.0.0.0,
+                radius: circle.radius,
             }))
         }
         ap214::Entity::Ellipse(ellipse) => {
-            let (center, axis, x_axis) =
-                convert_axis2_placement_3d(step, ellipse.position.index())?;
+            let (center, axis, x_axis) = convert_axis2_placement_3d(step, ellipse.position)?;
             Ok(Curve::Ellipse(CurveEllipse {
                 center,
                 axis,
                 x_axis,
-                semi_major: ellipse.semi_axis_1.0.0.0,
-                semi_minor: ellipse.semi_axis_2.0.0.0,
+                semi_major: ellipse.semi_axis_1,
+                semi_minor: ellipse.semi_axis_2,
             }))
         }
         ap214::Entity::BSplineCurveWithKnots(bspline) => {
@@ -793,12 +805,12 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
             let control_points: Result<Vec<Point3<f64>>, StepError> = bspline
                 .control_points_list
                 .iter()
-                .map(|cp_id| convert_cartesian_point(step, cp_id.index()))
+                .map(|cp_id| convert_cartesian_point(step, *cp_id))
                 .collect();
             let control_points = control_points?;
 
             // Convert knots and multiplicities
-            let knot_values: Vec<f64> = bspline.knots.iter().map(|k| k.0).collect();
+            let knot_values: Vec<f64> = bspline.knots.clone();
             let multiplicities: Vec<usize> = bspline
                 .knot_multiplicities
                 .iter()
@@ -852,7 +864,7 @@ fn convert_complex_curve(
     // We need either the WithKnots variant (which has everything) or both base + knots
     let (degree, control_point_ids, knot_values, multiplicities) = if let Some(bk) = bspline_knots {
         let degree = bk.degree as usize;
-        let knot_values: Vec<f64> = bk.knots.iter().map(|k| k.0).collect();
+        let knot_values: Vec<f64> = bk.knots.clone();
         let multiplicities: Vec<usize> =
             bk.knot_multiplicities.iter().map(|&m| m as usize).collect();
         (degree, &bk.control_points_list, knot_values, multiplicities)
@@ -876,7 +888,7 @@ fn convert_complex_curve(
 
     let control_points: Result<Vec<Point3<f64>>, StepError> = cp_ids
         .iter()
-        .map(|cp_id| convert_cartesian_point(step, cp_id.index()))
+        .map(|cp_id| convert_cartesian_point(step, *cp_id))
         .collect();
     let control_points = control_points?;
 
@@ -903,35 +915,31 @@ fn convert_complex_curve(
 fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, StepError> {
     match &step.entities[surface_id] {
         ap214::Entity::Plane(plane) => {
-            let (origin, normal, _) = convert_axis2_placement_3d(step, plane.position.index())?;
+            let (origin, normal, _) = convert_axis2_placement_3d(step, plane.position)?;
             Ok(Surface::Plane(SurfacePlane::new(origin, normal)))
         }
         ap214::Entity::CylindricalSurface(cyl) => {
-            let (origin, axis, _) = convert_axis2_placement_3d(step, cyl.position.index())?;
-            Ok(Surface::Cylinder(Cylinder::new(
-                origin,
-                axis,
-                cyl.radius.0.0.0,
-            )))
+            let (origin, axis, _) = convert_axis2_placement_3d(step, cyl.position)?;
+            Ok(Surface::Cylinder(Cylinder::new(origin, axis, cyl.radius)))
         }
         ap214::Entity::ConicalSurface(cone) => {
-            let (apex, axis, _) = convert_axis2_placement_3d(step, cone.position.index())?;
-            Ok(Surface::Cone(Cone::new(apex, axis, cone.semi_angle.0)))
+            let (apex, axis, _) = convert_axis2_placement_3d(step, cone.position)?;
+            Ok(Surface::Cone(Cone::new(apex, axis, cone.semi_angle)))
         }
         ap214::Entity::SphericalSurface(sphere) => {
-            let (center, _, _) = convert_axis2_placement_3d(step, sphere.position.index())?;
+            let (center, _, _) = convert_axis2_placement_3d(step, sphere.position)?;
             Ok(Surface::Sphere(Sphere {
                 center,
-                radius: sphere.radius.0.0.0,
+                radius: sphere.radius,
             }))
         }
         ap214::Entity::ToroidalSurface(torus) => {
-            let (center, axis, _) = convert_axis2_placement_3d(step, torus.position.index())?;
+            let (center, axis, _) = convert_axis2_placement_3d(step, torus.position)?;
             Ok(Surface::Torus(Torus::new(
                 center,
                 axis,
-                torus.major_radius.0.0.0,
-                torus.minor_radius.0.0.0,
+                torus.major_radius,
+                torus.minor_radius,
             )))
         }
         ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf, None),
@@ -984,15 +992,15 @@ fn convert_bspline_surface(
     for row in &bsurf.control_points_list {
         let mut row_points = Vec::new();
         for cp_id in row {
-            let point = convert_cartesian_point(step, cp_id.index())?;
+            let point = convert_cartesian_point(step, *cp_id)?;
             row_points.push(point);
         }
         control_points.push(row_points);
     }
 
     // Convert knot vectors
-    let u_knot_values: Vec<f64> = bsurf.u_knots.iter().map(|k| k.0).collect();
-    let v_knot_values: Vec<f64> = bsurf.v_knots.iter().map(|k| k.0).collect();
+    let u_knot_values: Vec<f64> = bsurf.u_knots.clone();
+    let v_knot_values: Vec<f64> = bsurf.v_knots.clone();
 
     // Convert multiplicities
     let u_multiplicities: Vec<usize> = bsurf.u_multiplicities.iter().map(|&m| m as usize).collect();
@@ -1043,18 +1051,18 @@ fn convert_axis2_placement_3d(
         }
     };
 
-    let origin = convert_cartesian_point(step, a2p3d.location.index())?;
+    let origin = convert_cartesian_point(step, a2p3d.location)?;
 
     // Get z_axis (already normalized by convert_direction)
-    let z_axis = if let Some(axis_id) = a2p3d.axis.as_ref() {
-        convert_direction(step, axis_id.index())?
+    let z_axis = if let Some(&axis_id) = a2p3d.axis.as_ref() {
+        convert_direction(step, axis_id)?
     } else {
         Vector3::z()
     };
 
     // Get x_axis candidate and orthogonalize using Gram-Schmidt
-    let x_axis = if let Some(ref_dir_id) = a2p3d.ref_direction.as_ref() {
-        let x_candidate = convert_direction(step, ref_dir_id.index())?;
+    let x_axis = if let Some(&ref_dir_id) = a2p3d.ref_direction.as_ref() {
+        let x_candidate = convert_direction(step, ref_dir_id)?;
 
         // Gram-Schmidt: x = x_candidate - (x_candidate · z) * z
         // This removes the component of x_candidate parallel to z_axis
@@ -1078,8 +1086,8 @@ fn convert_axis2_placement_3d(
 /// Extract the name from a representation entity (ShapeRepresentation or ABSR).
 fn rep_name(step: &StepFile<'_>, id: usize) -> String {
     match &step.entities[id] {
-        ap214::Entity::ShapeRepresentation(sr) => sr.name.0.to_string(),
-        ap214::Entity::AdvancedBrepShapeRepresentation(absr) => absr.name.0.to_string(),
+        ap214::Entity::ShapeRepresentation(sr) => sr.name.to_string(),
+        ap214::Entity::AdvancedBrepShapeRepresentation(absr) => absr.name.to_string(),
         _ => String::new(),
     }
 }
@@ -1087,10 +1095,8 @@ fn rep_name(step: &StepFile<'_>, id: usize) -> String {
 /// Extract the item entity IDs from a representation entity.
 fn rep_items(step: &StepFile<'_>, id: usize) -> Vec<usize> {
     match &step.entities[id] {
-        ap214::Entity::ShapeRepresentation(sr) => sr.items.iter().map(|i| i.index()).collect(),
-        ap214::Entity::AdvancedBrepShapeRepresentation(absr) => {
-            absr.items.iter().map(|i| i.index()).collect()
-        }
+        ap214::Entity::ShapeRepresentation(sr) => sr.items.clone(),
+        ap214::Entity::AdvancedBrepShapeRepresentation(absr) => absr.items.clone(),
         _ => Vec::new(),
     }
 }
@@ -1118,8 +1124,8 @@ fn item_defined_transform(step: &StepFile<'_>, idt_id: usize) -> Result<Matrix4<
             ));
         }
     };
-    let t1 = placement_to_matrix(step, idt.transform_item_1.index())?;
-    let t2 = placement_to_matrix(step, idt.transform_item_2.index())?;
+    let t1 = placement_to_matrix(step, idt.transform_item_1)?;
+    let t2 = placement_to_matrix(step, idt.transform_item_2)?;
     Ok(t2
         * t1.try_inverse().unwrap_or_else(|| {
             eprintln!("warning: singular placement matrix at #{idt_id}, using identity");

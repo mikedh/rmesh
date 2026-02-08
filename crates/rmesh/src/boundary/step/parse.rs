@@ -12,16 +12,15 @@ use arrayvec::ArrayVec;
 use memchr::{memchr, memchr_iter, memchr2};
 use nom::{
     branch::alt,
-    bytes::complete::{is_not, tag},
+    bytes::complete::tag,
     character::complete::{char, digit1},
     combinator::{map, map_res, opt},
     error::{Error, ErrorKind},
-    multi::separated_list0,
     sequence::{delimited, preceded, tuple},
 };
 use std::collections::{HashMap, HashSet};
 
-use super::id::{HasId, Id};
+use super::id::Id;
 
 pub type IResult<'a, U> = nom::IResult<&'a str, U, Error<&'a str>>;
 
@@ -30,21 +29,9 @@ fn nom_err<'a, U>(s: &'a str, kind: ErrorKind) -> IResult<'a, U> {
     Err(nom::Err::Error(Error::new(s, kind)))
 }
 
-/// Helper function to generate a `nom` error result with the `Alt` tag
-pub fn nom_alt_err<'a, U>(s: &'a str) -> IResult<'a, U> {
-    nom_err(s, ErrorKind::Alt)
-}
-
 /// A three-valued logical (true, false, unknown)
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Logical(pub Option<bool>);
-
-impl HasId for Logical {
-    fn append_ids(&self, _v: &mut Vec<usize>) {}
-}
-
-/// Marker type for derived attributes ('*' in STEP files)
-pub struct Derived;
 
 /// Trait for types that can be parsed from a STEP string
 pub trait Parse<'a> {
@@ -77,18 +64,39 @@ impl Parse<'_> for i64 {
 impl<'a> Parse<'a> for &'a str {
     fn parse(s: &'a str) -> IResult<'a, &'a str> {
         alt((
-            map(delimited(char('\''), opt(is_not("'")), char('\'')), |r| {
-                r.unwrap_or("")
-            }),
+            map(
+                delimited(
+                    char('\''),
+                    opt(nom::bytes::complete::is_not("'")),
+                    char('\''),
+                ),
+                |r| r.unwrap_or(""),
+            ),
+            // Enum tag like .SOMETHING.
+            parse_enum_tag,
             // NUL REF
             map(char('$'), |_| ""),
         ))(s)
     }
 }
 
+/// A derived (computed) attribute marker `*` in STEP entity parameters.
+#[derive(Debug, Copy, Clone)]
+pub struct Derived;
+
+impl Parse<'_> for Derived {
+    fn parse(s: &str) -> IResult<'_, Self> {
+        map(char('*'), |_| Derived)(s)
+    }
+}
+
 impl<'a, T: Parse<'a>> Parse<'a> for Vec<T> {
     fn parse(s: &'a str) -> IResult<'a, Vec<T>> {
-        delimited(char('('), separated_list0(char(','), T::parse), char(')'))(s)
+        delimited(
+            char('('),
+            nom::multi::separated_list0(char(','), T::parse),
+            char(')'),
+        )(s)
     }
 }
 
@@ -144,6 +152,16 @@ impl<'a> Parse<'a> for bool {
     }
 }
 
+impl<'a> Parse<'a> for usize {
+    fn parse(s: &'a str) -> IResult<'a, Self> {
+        alt((
+            map_res(preceded(char('#'), digit1), |s: &str| s.parse::<usize>()),
+            // NUL id deserializes to 0
+            map(char('$'), |_| 0),
+        ))(s)
+    }
+}
+
 impl<'a, T> Parse<'a> for Id<T> {
     fn parse(s: &str) -> IResult<'_, Self> {
         alt((
@@ -156,24 +174,15 @@ impl<'a, T> Parse<'a> for Id<T> {
     }
 }
 
-impl<'a> Parse<'a> for Derived {
-    fn parse(s: &str) -> IResult<'_, Self> {
-        map(char('*'), |_| Derived)(s)
-    }
-}
-
-/// Trait for types that can be parsed from multiple string chunks
-/// (used for complex entity mapping).
-pub trait ParseFromChunks<'a> {
-    fn parse_chunks(s: &[&'a str]) -> IResult<'a, Self>
-    where
-        Self: Sized;
-}
-
-impl<'a, T: ParseFromChunks<'a>> Parse<'a> for T {
-    fn parse(s: &'a str) -> IResult<'a, Self> {
-        T::parse_chunks(&[s])
-    }
+/// Parse an enum tag like .SOMETHING.
+pub fn parse_enum_tag(s: &str) -> IResult<'_, &str> {
+    delimited(
+        char('.'),
+        nom::bytes::complete::take_while(|c: char| {
+            c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit()
+        }),
+        char('.'),
+    )(s)
 }
 
 /// Check if we need to advance to next chunk
@@ -198,17 +207,6 @@ pub fn param_from_chunks<'a, T: Parse<'a>>(
     let s = check_str(s, i, strs);
     let (s, _) = char(if last { ')' } else { ',' })(s)?;
     Ok((check_str(s, i, strs), out))
-}
-
-/// Parse an enum tag like .SOMETHING.
-pub fn parse_enum_tag(s: &str) -> IResult<'_, &str> {
-    delimited(
-        char('.'),
-        nom::bytes::complete::take_while(|c: char| {
-            c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit()
-        }),
-        char('.'),
-    )(s)
 }
 
 /// Preprocesses a STEP file, removing comments and whitespace.
@@ -430,6 +428,17 @@ mod tests {
 
         let (remaining, value) = <Id<()>>::parse("$,").unwrap();
         assert_eq!(value.0, 0);
+        assert_eq!(remaining, ",");
+    }
+
+    #[test]
+    fn test_parse_usize_ref() {
+        let (remaining, value) = usize::parse("#123,").unwrap();
+        assert_eq!(value, 123);
+        assert_eq!(remaining, ",");
+
+        let (remaining, value) = usize::parse("$,").unwrap();
+        assert_eq!(value, 0);
         assert_eq!(remaining, ",");
     }
 

@@ -49,12 +49,6 @@ impl<'a, T> std::ops::Index<Id<T>> for StepFile<'a> {
     }
 }
 
-/// Trait for extracting a specific entity type from the generic Entity enum.
-/// Used by auto-generated ap214 entity code.
-pub trait FromEntity<'a> {
-    fn try_from_entity(e: &'a Entity<'a>) -> Option<&'a Self>;
-}
-
 /// Parse a single entity declaration like "#123=ENTITY_NAME(...);"
 fn parse_entity_decl(s: &[u8]) -> Result<(&[u8], (usize, Entity<'_>)), ()> {
     let s = std::str::from_utf8(s).map_err(|_| ())?;

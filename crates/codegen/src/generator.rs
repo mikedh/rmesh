@@ -2,6 +2,57 @@ use crate::parse::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+/// Entities that get full typed structs in the generated code.
+/// Everything else is parsed as `Entity::Generic(&str)`.
+///
+/// To add a new typed entity:
+/// 1. Add its EXPRESS name (lowercase) to this list
+/// 2. Run codegen to regenerate ap214.rs
+/// 3. Use it in mod.rs via `ap214::Entity::NewEntity(e) => { ... }`
+const TYPED_ENTITIES: &[&str] = &[
+    // Geometry
+    "cartesian_point",
+    "direction",
+    "vector",
+    "axis2_placement_3d",
+    // Curves
+    "line",
+    "circle",
+    "ellipse",
+    "b_spline_curve",
+    "b_spline_curve_with_knots",
+    "rational_b_spline_curve",
+    // Surfaces
+    "plane",
+    "cylindrical_surface",
+    "conical_surface",
+    "spherical_surface",
+    "toroidal_surface",
+    "b_spline_surface_with_knots",
+    "rational_b_spline_surface",
+    // Topology
+    "vertex_point",
+    "edge_curve",
+    "oriented_edge",
+    "edge_loop",
+    "face_bound",
+    "face_outer_bound",
+    "advanced_face",
+    "closed_shell",
+    "manifold_solid_brep",
+    // Representations
+    "shape_representation",
+    "advanced_brep_shape_representation",
+    // Assembly / transforms
+    "representation_relationship_with_transformation",
+    "shape_representation_relationship",
+    "item_defined_transformation",
+    // Units
+    "si_unit",
+    "conversion_based_unit",
+    "length_unit",
+];
+
 ////////////////////////////////////////////////////////////////////////////////
 // Helper types to use when doing code-gen
 #[derive(Debug)]
@@ -78,6 +129,124 @@ impl<'a> TypeMap<'a> {
             Type::Entity { .. } | Type::Enum(_) | Type::Select(_) => panic!("Invalid inner type"),
         }
     }
+
+    /// Find the EXPRESS name (lowercase with underscores) for a CamelCase Rust type name.
+    fn find_express_name(&self, camel: &str) -> Option<&'a str> {
+        self.0.keys().copied().find(|&k| to_camel(k) == camel)
+    }
+
+    /// Resolve a type name to its flattened Rust type for typed entity fields.
+    /// Entity refs → usize, measures → f64, labels → &'a str, etc.
+    fn to_flat_type(&self, type_str: &str) -> String {
+        // Already a primitive
+        match type_str {
+            "f64" | "i64" | "bool" | "usize" | "Logical" => return type_str.to_string(),
+            "&'a str" => return type_str.to_string(),
+            _ => {}
+        }
+
+        // Handle Vec<T>, Option<T>, ArrayVec<T, N>
+        if let Some(inner) = type_str
+            .strip_prefix("Vec<")
+            .and_then(|s| s.strip_suffix('>'))
+        {
+            let flat_inner = self.to_flat_type(inner);
+            return format!("Vec<{}>", flat_inner);
+        }
+        if let Some(inner) = type_str
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))
+        {
+            let flat_inner = self.to_flat_type(inner);
+            return format!("Option<{}>", flat_inner);
+        }
+        if let Some(rest) = type_str.strip_prefix("ArrayVec::<") {
+            if let Some(comma_pos) = rest.rfind(',') {
+                let inner = &rest[..comma_pos].trim();
+                let cap = rest[comma_pos + 1..]
+                    .trim()
+                    .strip_suffix('>')
+                    .unwrap_or("3")
+                    .trim();
+                let flat_inner = self.to_flat_type(inner);
+                return format!("ArrayVec::<{}, {}>", flat_inner, cap);
+            }
+        }
+
+        // Strip lifetime from type name to look up
+        let camel = type_str.strip_suffix("<'a>").unwrap_or(type_str);
+
+        // Resolve CamelCase Rust name back to EXPRESS name for type map lookup
+        let lookup = self.find_express_name(camel).unwrap_or(camel);
+
+        // Look up in type map
+        if let Some(t) = self.0.get(lookup) {
+            match t {
+                // Entity ref → usize
+                Type::Entity { .. } => return "usize".to_string(),
+                // SELECT where all members are entities → usize
+                Type::Select(members) if members.iter().all(|m| self.is_entity(m)) => {
+                    return "usize".to_string();
+                }
+                // Redeclared (newtype wrapper) → resolve recursively
+                Type::Redeclared(inner) => {
+                    let inner_rtype = self.to_rtype(inner);
+                    return self.to_flat_type(&inner_rtype);
+                }
+                // Primitive wrapper → resolve to inner primitive
+                Type::RedeclaredPrimitive(prim) => {
+                    return self.to_flat_type(prim);
+                }
+                // Enum → &'a str (parsed as enum tag string)
+                Type::Enum(_) => return "&'a str".to_string(),
+                // Non-entity SELECT → &'a str (rare)
+                Type::Select(_) => return "&'a str".to_string(),
+                // Aggregation → resolve inner
+                Type::Aggregation { optional, type_ } => {
+                    let inner = self.to_flat_inner_type(type_);
+                    if *optional {
+                        return format!("Vec<Option<{}>>", inner);
+                    } else {
+                        return format!("Vec<{}>", inner);
+                    }
+                }
+                Type::Primitive(p) => return p.to_string(),
+            }
+        }
+
+        // Fallback: if it looks like a CamelCase type with lifetime, try as entity ref
+        if type_str.ends_with("<'a>") {
+            return "usize".to_string();
+        }
+
+        type_str.to_string()
+    }
+
+    fn to_flat_inner_type(&self, t: &Type<'a>) -> String {
+        match t {
+            Type::Aggregation { optional, type_ } => {
+                let inner = self.to_flat_inner_type(type_);
+                if *optional {
+                    format!("Vec<Option<{}>>", inner)
+                } else {
+                    format!("Vec<{}>", inner)
+                }
+            }
+            Type::Redeclared(r) => {
+                let rtype = self.to_rtype(r);
+                self.to_flat_type(&rtype)
+            }
+            Type::RedeclaredPrimitive(r) => self.to_flat_type(r),
+            Type::Primitive(r) => r.to_string(),
+            Type::Entity { .. } => "usize".to_string(),
+            Type::Enum(_) => "&'a str".to_string(),
+            Type::Select(members) if members.iter().all(|m| self.is_entity(m)) => {
+                "usize".to_string()
+            }
+            Type::Select(_) => "&'a str".to_string(),
+        }
+    }
+
     fn build(&mut self, s: &'a str) {
         let v = self.1.get(s).unwrap();
         let m = match v {
@@ -100,30 +269,6 @@ impl<'a> TypeMap<'a> {
 }
 
 impl<'a> Type<'a> {
-    fn write_enum_variant<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
-    where
-        W: std::fmt::Write,
-    {
-        match self {
-            Type::Entity { .. } => writeln!(buf, "    {0}({0}_<'a>),", to_camel(name)),
-            _ => Ok(()),
-        }
-    }
-    fn write_enum_match<W>(&self, name: &str, buf: &mut W) -> std::fmt::Result
-    where
-        W: std::fmt::Write,
-    {
-        match self {
-            Type::Entity { .. } => writeln!(
-                buf,
-                r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}(v))),"#,
-                capitalize(name),
-                to_camel(name)
-            ),
-            _ => Ok(()),
-        }
-    }
-
     fn is_entity(&self) -> bool {
         matches!(self, Type::Entity { .. })
     }
@@ -144,344 +289,6 @@ impl<'a> Type<'a> {
                 }
             }
         }
-        Ok(())
-    }
-    fn write_type<W>(&self, name: &str, buf: &mut W, type_map: &TypeMap) -> std::fmt::Result
-    where
-        W: std::fmt::Write,
-    {
-        let camel_name = to_camel(name);
-        match self {
-            Type::Redeclared(c) => {
-                writeln!(
-                    buf,
-                    r#"
-#[derive(Debug)]
-pub struct {0}<'a>(pub {1}, std::marker::PhantomData<&'a ()>); // redeclared
-impl<'a> Parse<'a> for {0}<'a> {{
-    fn parse(s: &'a str) -> IResult<'a, Self> {{
-        map({2}::parse, |r| Self(r, std::marker::PhantomData))(s)
-    }}
-}}
-impl<'a> HasId for {0}<'a> {{
-    fn append_ids(&self, v: &mut Vec<usize>) {{
-        self.0.append_ids(v);
-    }}
-}}
-"#,
-                    camel_name,
-                    type_map.to_rtype(c),
-                    to_camel(c)
-                )?;
-            }
-            Type::RedeclaredPrimitive(c) => {
-                writeln!(
-                    buf,
-                    r#"#[derive(Debug)]
-pub struct {0}<'a>(pub {1}, std::marker::PhantomData<&'a ()>); // primitive
-impl<'a> Parse<'a> for {0}<'a> {{
-    fn parse(s: &'a str) -> IResult<'a, Self> {{
-        map(<{2}>::parse, |r| Self(r, std::marker::PhantomData))(s)
-    }}
-}}
-impl<'a> HasId for {0}<'a> {{
-    fn append_ids(&self, _v: &mut Vec<usize>) {{ /* Nothing to do here */ }}
-}}
-"#,
-                    camel_name,
-                    c,
-                    strip_lifetime(c)
-                )?;
-            }
-
-            Type::Enum(c) => {
-                writeln!(
-                    buf,
-                    "#[derive(Debug)]
-pub enum {}<'a> {{ // enum",
-                    camel_name
-                )?;
-                for v in c {
-                    writeln!(buf, "    {},", to_camel(v))?;
-                }
-                writeln!(
-                    buf,
-                    r#"    _Unused(std::marker::PhantomData<&'a ()>),
-}}
-impl<'a> Parse<'a> for {0}<'a> {{
-    fn parse(s: &'a str) -> IResult<'a, Self> {{
-        use {0}::*;
-        let (s, tag) = parse_enum_tag(s)?;
-        let e = match tag {{"#,
-                    camel_name
-                )?;
-
-                for enum_tag in c {
-                    writeln!(
-                        buf,
-                        r#"            "{}" => {},"#,
-                        capitalize(enum_tag),
-                        to_camel(enum_tag)
-                    )?;
-                }
-                writeln!(
-                    buf,
-                    r#"            _ => return nom_alt_err(s),
-        }};
-        Ok((s, e))
-    }}
-}}
-impl<'a> HasId for {0}<'a> {{
-    fn append_ids(&self, _v: &mut Vec<usize>) {{ /* nothing to do here */ }}
-}}
-"#,
-                    camel_name
-                )?;
-            }
-
-            Type::Select(c) => {
-                let num_entities = c.iter().filter(|v| type_map.is_entity(v)).count();
-                // If every member of this SELECT statement is an entity, then
-                // we're just going to parse it to an Id anyways (since we
-                // can't disambiguate in the single pass of the parser)
-                if num_entities == c.len() {
-                    writeln!(
-                        buf,
-                        "#[derive(Debug)]
-pub struct {0}_<'a>(std::marker::PhantomData<&'a ()>); // ambiguous select
-pub type {0}<'a> = Id<{0}_<'a>>;
-",
-                        camel_name
-                    )?;
-                    return Ok(());
-                } else if num_entities > 1 {
-                    // Print a warning here (TODO: handle better)
-                    eprintln!(
-                        "Ambiguous SELECT for {} (contains multiple entities)",
-                        camel_name
-                    );
-                }
-
-                writeln!(
-                    buf,
-                    "#[derive(Debug)]
-pub enum {}<'a> {{ // select",
-                    camel_name
-                )?;
-                for v in c {
-                    writeln!(buf, "    {}({}),", to_camel(v), type_map.to_rtype(v))?;
-                }
-                writeln!(
-                    buf,
-                    r#"    _Unused(std::marker::PhantomData<&'a ()>)
-}}
-impl<'a> Parse<'a> for {}<'a> {{
-    fn parse(s: &'a str) -> IResult<'a, Self> {{"#,
-                    camel_name
-                )?;
-
-                // Same logic as above
-                let to_parse_str = |v| {
-                    if !type_map.is_entity(v) {
-                        format!(
-                            r#"        map(delimited(tag("{}("), <{}>::parse, char(')')), {}::{})"#,
-                            capitalize(v),
-                            type_map.to_rtype(v),
-                            camel_name,
-                            to_camel(v)
-                        )
-                    } else {
-                        format!(
-                            r#"        map(<{}>::parse, {}::{})"#,
-                            type_map.to_rtype(v),
-                            camel_name,
-                            to_camel(v)
-                        )
-                    }
-                };
-
-                if c.len() == 1 {
-                    write!(buf, "{}", to_parse_str(c[0]))?;
-                } else {
-                    const NOM_MAX_ALT: usize = 21;
-                    let mut offset = 0;
-                    while offset < c.len() {
-                        writeln!(buf, "        alt((")?;
-                        let mut i = 0;
-                        while i < NOM_MAX_ALT - 2 && i + offset < c.len() {
-                            let v = c[i + offset];
-                            writeln!(buf, "    {},", to_parse_str(v))?;
-                            i += 1;
-                        }
-                        offset += NOM_MAX_ALT - 2;
-                    }
-                    write!(buf, "        ")?;
-                    for _ in 0..(offset / (NOM_MAX_ALT - 2)) {
-                        write!(buf, "))")?;
-                    }
-                }
-                writeln!(
-                    buf,
-                    "(s)
-    }}
-}}
-impl<'a> HasId for {0}<'a> {{
-    fn append_ids(&self, _v: &mut Vec<usize>) {{
-        match self {{",
-                    camel_name
-                )?;
-                for v in c {
-                    writeln!(
-                        buf,
-                        "            {}::{}(c) => c.append_ids(_v),",
-                        camel_name,
-                        to_camel(v)
-                    )?;
-                }
-                writeln!(
-                    buf,
-                    "            _ => (),
-        }}
-    }}
-}}"
-                )?;
-            }
-
-            Type::Aggregation { type_, .. } => {
-                writeln!(
-                    buf,
-                    r#"#[derive(Debug)]
-pub struct {0}<'a>(pub {1}, std::marker::PhantomData<&'a ()>); // aggregation
-impl<'a> Parse<'a> for {0}<'a> {{
-    fn parse(s: &'a str) -> IResult<'a, Self> {{
-        map(many0(<{2}>::parse), |r| Self(r, std::marker::PhantomData))(s)
-    }}
-}}
-impl<'a> HasId for {0}<'a> {{
-    fn append_ids(&self, v: &mut Vec<usize>) {{
-        for i in &self.0 {{
-            i.append_ids(v);
-        }}
-    }}
-}}
-"#,
-                    camel_name,
-                    type_map.to_inner_rtype(self),
-                    type_map.to_inner_rtype(&*type_)
-                )?;
-            }
-
-            Type::Entity { attrs, .. } => {
-                if attrs.iter().any(|a| a.dupe) {
-                    writeln!(buf, "#[allow(non_snake_case)]")?;
-                }
-                writeln!(
-                    buf,
-                    "#[derive(Debug)]
-pub struct {}_<'a> {{ // entity",
-                    camel_name
-                )?;
-                for a in attrs {
-                    // Skip derived attributes in the struct
-                    if a.derived {
-                        continue;
-                    }
-                    if a.dupe {
-                        write!(buf, "    pub {}__{}: ", a.from.unwrap(), a.name)?;
-                    } else {
-                        write!(buf, "    pub {}: ", a.name)?;
-                    }
-                    if a.optional {
-                        writeln!(buf, "Option<{}>,", a.type_)?;
-                    } else {
-                        writeln!(buf, "{},", a.type_)?;
-                    }
-                }
-                writeln!(
-                    buf,
-                    r#"    _marker: std::marker::PhantomData<&'a ()>,
-}}
-pub type {0}<'a> = Id<{0}_<'a>>;
-impl<'a> FromEntity<'a> for {0}_<'a> {{
-    fn try_from_entity(e: &'a Entity<'a>) -> Option<&'a Self> {{
-        match e {{
-            Entity::{0}(v) => Some(v),
-            _ => None,
-        }}
-    }}
-}}
-impl<'a> ParseFromChunks<'a> for {0}_<'a> {{
-    fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{"#,
-                    camel_name
-                )?;
-
-                // If we'll be reading attributes, then we need an index
-                if !attrs.is_empty() {
-                    writeln!(buf, "        let mut i = 0;")?;
-                }
-                // Parse the tag
-                writeln!(
-                    buf,
-                    r#"        let (s, _) = tag("{}(")(strs[0])?;"#,
-                    capitalize(&name)
-                )?;
-                // Then, write a series of parsers which build the whole struct
-                for (i, a) in attrs.iter().enumerate() {
-                    if a.derived {
-                        write!(buf, r#"        let (s, _) = param_from_chunks::<Derived>"#)?;
-                    } else {
-                        if a.dupe {
-                            writeln!(buf, "        #[allow(non_snake_case)]")?;
-                            write!(buf, "        let (s, {}__{})", a.from.unwrap(), a.name)?;
-                        } else {
-                            write!(buf, "        let (s, {})", a.name)?;
-                        }
-                        if a.optional {
-                            write!(buf, " = param_from_chunks::<Option<{}>>", a.type_)?;
-                        } else {
-                            write!(buf, " = param_from_chunks::<{}>", a.type_)?;
-                        }
-                    }
-                    writeln!(buf, "({}, s, &mut i, strs)?;", i == attrs.len() - 1)?;
-                }
-                writeln!(buf, "        Ok((s, Self {{")?;
-                for a in attrs.iter().filter(|a| !a.derived) {
-                    if a.dupe {
-                        // TODO make this a function on `a`
-                        writeln!(buf, "            {}__{},", a.from.unwrap(), a.name)?;
-                    } else {
-                        writeln!(buf, "            {},", a.name)?;
-                    }
-                }
-                writeln!(
-                    buf,
-                    "            _marker: std::marker::PhantomData}}))
-    }}
-}}
-impl<'a> HasId for {}_<'a> {{
-    fn append_ids(&self, _v: &mut Vec<usize>) {{",
-                    camel_name
-                )?;
-                for a in attrs.iter().filter(|a| !a.derived) {
-                    if a.dupe {
-                        writeln!(
-                            buf,
-                            "        self.{}__{}.append_ids(_v);",
-                            a.from.unwrap(),
-                            a.name
-                        )?;
-                    } else {
-                        writeln!(buf, "        self.{}.append_ids(_v);", a.name)?;
-                    }
-                }
-                writeln!(
-                    buf,
-                    "    }}
-}}"
-                )?;
-            }
-            Type::Primitive(_) => (),
-        };
         Ok(())
     }
 }
@@ -515,12 +322,11 @@ pub fn generate(s: &mut Syntax) -> Result<String, std::fmt::Error> {
     s.collect_entity_names(&mut entity_names);
     s.disambiguate(&entity_names);
 
-    // From this point on, `s` is becomes immutable.  We build a map from type
-    // names (in camel_case) to references into `s`, for ease of access.
+    // Build a map from type names to references into `s`
     let mut ref_map = HashMap::new();
     s.build_ref_map(&mut ref_map);
 
-    // Finally, we can build out the type map
+    // Build the type map
     let mut type_map = TypeMap(HashMap::new(), &ref_map);
     type_map.0.insert("usize", Type::Primitive("usize"));
     type_map.0.insert("bool", Type::Primitive("bool"));
@@ -532,103 +338,209 @@ pub fn generate(s: &mut Syntax) -> Result<String, std::fmt::Error> {
         type_map.build(k);
     }
 
-    // Step four: do codegen on the completed type map (sorted for determinism)
+    // Sorted keys for determinism
     let mut keys: Vec<&str> = type_map.0.keys().cloned().collect();
     keys.sort_unstable();
+
     let mut buf = String::new();
+
+    // ── File header ─────────────────────────────────────────────────
     writeln!(
         &mut buf,
-        "// Autogenerated file, do not hand-edit!
-use crate::{{
-    id::{{Id, HasId}},
-    parse::{{IResult, Logical, Derived, Parse, ParseFromChunks, nom_alt_err,
-            parse_enum_tag, param_from_chunks, parse_complex_mapping}},
-    step_file::FromEntity,
+        r#"//! Auto-generated AP214 entity definitions.
+//!
+//! ## Adding a new entity type
+//!
+//! 1. Add the entity's EXPRESS name (lowercase) to `TYPED_ENTITIES` in
+//!    `crates/codegen/src/generator.rs`.
+//! 2. Run: `cargo run -p codegen -- ./reference/APs/10303-214e3-aim-long.exp \
+//!         -o crates/rmesh/src/boundary/step/ap214.rs`
+//! 3. Use in mod.rs: `ap214::Entity::NewEntity(e) => {{ ... }}`
+
+// Autogenerated file, do not hand-edit!
+#![allow(dead_code)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+#![allow(clippy::all)]
+#![allow(clippy::pedantic)]
+#![allow(clippy::restriction)]
+#![allow(clippy::nursery)]
+
+use super::parse::{{
+    Derived, IResult, Logical, Parse,
+    param_from_chunks, parse_complex_mapping,
 }};
+use arrayvec::ArrayVec;
 use nom::{{
-    branch::{{alt}},
     bytes::complete::tag,
-    character::complete::{{alpha0, alphanumeric1, char}},
-    combinator::{{map, recognize}},
-    multi::{{many0}},
-    sequence::{{delimited, pair}},
-}};
-use arrayvec::ArrayVec;"
+    character::complete::{{alpha0, alphanumeric1}},
+    combinator::recognize,
+    multi::many0,
+    sequence::pair,
+}};"#
     )?;
 
-    for k in &keys {
-        type_map.0[k].write_type(k, &mut buf, &type_map)?;
+    // ── Typed entity struct definitions ──────────────────────────────
+    for entity_name in TYPED_ENTITIES {
+        if !type_map.0.contains_key(entity_name) {
+            eprintln!(
+                "Warning: typed entity '{}' not found in schema",
+                entity_name
+            );
+            continue;
+        }
+        let t = &type_map.0[entity_name];
+        if let Type::Entity { attrs, .. } = t {
+            let camel = to_camel(entity_name);
+
+            // Struct definition with flattened types
+            writeln!(buf, "\n#[derive(Debug)]")?;
+            writeln!(buf, "pub struct {}_<'a> {{", camel)?;
+            for a in attrs {
+                if a.derived {
+                    continue;
+                }
+                let field_name = if a.dupe {
+                    format!("{}__{}", a.from.unwrap(), a.name)
+                } else {
+                    a.name.to_string()
+                };
+                let flat_type = type_map.to_flat_type(&a.type_);
+                if a.optional {
+                    writeln!(buf, "    pub {}: Option<{}>,", field_name, flat_type)?;
+                } else {
+                    writeln!(buf, "    pub {}: {},", field_name, flat_type)?;
+                }
+            }
+            writeln!(buf, "    _p: std::marker::PhantomData<&'a ()>,")?;
+            writeln!(buf, "}}")?;
+
+            // parse_chunks method
+            writeln!(buf, "impl<'a> {}_<'a> {{", camel)?;
+            writeln!(
+                buf,
+                "    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{"
+            )?;
+            if !attrs.is_empty() {
+                writeln!(buf, "        let mut i = 0;")?;
+            }
+            writeln!(
+                buf,
+                r#"        let (s, _) = tag("{}(")(strs[0])?;"#,
+                capitalize(entity_name)
+            )?;
+
+            for (idx, a) in attrs.iter().enumerate() {
+                let is_last = idx == attrs.len() - 1;
+                if a.derived {
+                    // Skip derived attribute (serialized as `*` in STEP)
+                    writeln!(
+                        buf,
+                        "        let (s, _) = param_from_chunks::<Derived>({}, s, &mut i, strs)?;",
+                        is_last
+                    )?;
+                } else {
+                    let flat_type = type_map.to_flat_type(&a.type_);
+                    let field_name = if a.dupe {
+                        format!("{}__{}", a.from.unwrap(), a.name)
+                    } else {
+                        a.name.to_string()
+                    };
+
+                    // Determine the parse type — what parser to call
+                    let parse_type = if a.optional {
+                        format!("Option<{}>", flat_type)
+                    } else {
+                        flat_type.clone()
+                    };
+
+                    writeln!(
+                        buf,
+                        "        let (s, {}) = param_from_chunks::<{}>({}, s, &mut i, strs)?;",
+                        field_name, parse_type, is_last
+                    )?;
+                }
+            }
+
+            writeln!(buf, "        Ok((s, Self {{")?;
+            for a in attrs.iter().filter(|a| !a.derived) {
+                let field_name = if a.dupe {
+                    format!("{}__{}", a.from.unwrap(), a.name)
+                } else {
+                    a.name.to_string()
+                };
+                writeln!(buf, "            {},", field_name)?;
+            }
+            writeln!(
+                buf,
+                "            _p: std::marker::PhantomData,\n        }}))\n    }}\n}}"
+            )?;
+        }
+    }
+
+    // ── Entity enum ─────────────────────────────────────────────────
+    writeln!(buf, "\n#[derive(Debug)]")?;
+    writeln!(buf, "pub enum Entity<'a> {{")?;
+    for entity_name in TYPED_ENTITIES {
+        if type_map.0.contains_key(entity_name) {
+            writeln!(buf, "    {0}({0}_<'a>),", to_camel(entity_name))?;
+        }
     }
     writeln!(
-        &mut buf,
-        "#[derive(Debug)]
-pub enum Entity<'a> {{"
+        buf,
+        "    /// Unparsed entity — tag extracted, payload left as raw str."
     )?;
-    for k in &keys {
-        type_map.0[k].write_enum_variant(k, &mut buf)?;
-    }
+    writeln!(buf, "    Generic(&'a str),")?;
+    writeln!(buf, "    ComplexEntity(Vec<Entity<'a>>),")?;
+    writeln!(buf, "    _FailedToParse,")?;
+    writeln!(buf, "    _EmptySlot,")?;
+    writeln!(buf, "}}")?;
+
+    // ── Parse dispatch ──────────────────────────────────────────────
     writeln!(
-        &mut buf,
-        r#"    ComplexEntity(Vec<Entity<'a>>),
-    _FailedToParse,
-    _EmptySlot,
-}}
-impl<'a> ParseFromChunks<'a> for Entity<'a> {{
-    fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{
+        buf,
+        r#"
+impl<'a> Entity<'a> {{
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {{
         let (_, r) = recognize(pair(
-            alt((alpha0, tag("_"))),
-            many0(alt((alphanumeric1, tag("_")))),
+            nom::branch::alt((alpha0, tag("_"))),
+            many0(nom::branch::alt((alphanumeric1, tag("_")))),
         ))(strs[0])?;
         match r {{"#
     )?;
-    for k in &keys {
-        type_map.0[k].write_enum_match(k, &mut buf)?;
+    for entity_name in TYPED_ENTITIES {
+        if type_map.0.contains_key(entity_name) {
+            writeln!(
+                buf,
+                r#"            "{0}" => {1}_::parse_chunks(strs).map(|(s, v)| (s, Entity::{1}(v))),"#,
+                capitalize(entity_name),
+                to_camel(entity_name)
+            )?;
+        }
     }
     writeln!(
-        &mut buf,
+        buf,
         r#"            "" => parse_complex_mapping(strs[0]),
-            _ => nom_alt_err(r),
+            _ => Ok(("", Entity::Generic(strs[0]))),
         }}
     }}
 }}
 
-pub fn superclasses_of(s: &str) -> &[&str] {{
-    match s {{"#
+impl<'a> Parse<'a> for Entity<'a> {{
+    fn parse(s: &'a str) -> IResult<'a, Self> {{
+        Self::parse_chunks(&[s])
+    }}
+}}"#
     )?;
+
+    // ── superclasses_of (all entities from schema) ──────────────────
+    writeln!(buf, "\npub fn superclasses_of(s: &str) -> &[&str] {{")?;
+    writeln!(buf, "    match s {{")?;
     for k in &keys {
         type_map.0[k].write_supertypes(k, &mut buf)?;
     }
-    writeln!(
-        &mut buf,
-        "        _ => &[],
-    }}
-}}
-impl<'a> Entity<'a> {{
-    pub fn upstream(&self) -> Vec<usize> {{
-        let mut out = Vec::new();
-        match self {{
-"
-    )?;
-    for k in keys.iter().filter(|k| type_map.0[*k].is_entity()) {
-        writeln!(
-            &mut buf,
-            "            Entity::{}(c) => c.append_ids(&mut out),",
-            to_camel(k)
-        )?;
-    }
-    writeln!(
-        &mut buf,
-        "            Entity::ComplexEntity(v) => {{
-                for e in v {{
-                    out.extend(e.upstream().into_iter());
-                }}
-            }},
-            _ => (),
-        }};
-        out
-    }}
-}}"
-    )?;
+    writeln!(buf, "        _ => &[],")?;
+    writeln!(buf, "    }}\n}}")?;
 
     Ok(buf)
 }
@@ -637,16 +549,6 @@ fn capitalize(s: &str) -> String {
     s.chars()
         .map(|c| c.to_uppercase().next().unwrap())
         .collect()
-}
-
-// TODO: this is awkward; it would be cleaner to store lifetime separately
-// in the `ReplacedPrimitive` enum
-fn strip_lifetime(s: &str) -> String {
-    if s.starts_with("&'a ") {
-        s.replacen("&'a ", "&", 1)
-    } else {
-        s.to_owned()
-    }
 }
 
 fn to_camel(s: &str) -> String {
@@ -890,15 +792,11 @@ impl<'a> SelectList<'a> {
 }
 impl<'a> EntityDecl<'a> {
     fn to_type(&'a self, type_map: &mut TypeMap<'a>) -> Type<'a> {
-        // Derived values from parents shouldn't be stored in the struct, so
-        // we build a map of them here and skip them when collecting attributes
-        // from superclasses.
         let mut derived: HashSet<(&str, &str)> = HashSet::new();
         if let Some(derive) = &self.1.derive {
             for d in &derive.0 {
                 match &d.0 {
                     AttributeDecl::Redeclared(r) => {
-                        // There can't be a RENAMED clause here
                         assert!(r.1.is_none());
                         derived.insert((r.0.0.0.0, r.0.1.0.0));
                     }
@@ -907,12 +805,8 @@ impl<'a> EntityDecl<'a> {
             }
         }
 
-        // Skip attributes when we have multiple inheritance with a common
-        // base class.
         let mut seen: HashSet<(&str, &str)> = HashSet::new();
 
-        // Tag any inherited attribute names with > 1 occurence so we can
-        // special-case them in the struct
         let subsuper = &self.0.1;
         let mut inherited_name_count: HashMap<&str, usize> = HashMap::new();
         if let Some(subs) = &subsuper.1 {
@@ -932,11 +826,8 @@ impl<'a> EntityDecl<'a> {
         let mut supertypes = Vec::new();
         if let Some(subs) = &subsuper.1 {
             for sub in subs.0.iter() {
-                // Record the supertype name
                 supertypes.push(sub.0);
 
-                // Import attributes from parent classes, patching the
-                // `from` field to indicate that it's from a superclass
                 attrs.extend(
                     type_map
                         .attributes(sub.0)
@@ -945,17 +836,12 @@ impl<'a> EntityDecl<'a> {
                             if a.from.is_none() {
                                 a.from = Some(sub.0);
                             }
-                            // TODO: this falsely marks names as dupes if they've
-                            // got a match with another attr that's _derived_
-                            // (which wouldn't actually be stored in the struct)
                             AttributeData {
                                 dupe: inherited_names.contains(a.name),
                                 derived: derived.contains(&(a.from.unwrap(), a.name)),
                                 ..a
                             }
                         })
-                        // Skip values that have already been seen (if we have
-                        // multiple inheritance from a common base class)
                         .filter(|a| seen.insert((a.from.unwrap(), a.name))),
                 );
             }
@@ -965,7 +851,6 @@ impl<'a> EntityDecl<'a> {
             let attr_type = attr.parameter_type.to_attr_type_str(type_map);
             for a in &attr.attributes {
                 if a.is_redeclared() {
-                    // TODO: tweak existing attr type
                     continue;
                 }
                 attrs.push(AttributeData {
