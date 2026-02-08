@@ -609,8 +609,7 @@ struct MergeResult {
     merged_uvs: Vec<Point2<f64>>,
     /// Remapped contour indices referencing merged_uvs
     merged_contours: Vec<Vec<usize>>,
-    /// Maps original index -> merged index (unused but kept for debugging)
-    #[allow(dead_code)]
+    /// Maps original index -> merged index
     original_to_merged: Vec<usize>,
     /// Maps merged index -> first original index that mapped to it
     merged_to_original: Vec<usize>,
@@ -769,10 +768,13 @@ fn log_cdt_failure(
 /// Check if all edges from all contours (outer + holes) are present in the triangulation.
 ///
 /// This validates that the CDT result properly preserves all boundary constraints,
-/// including inner loops (holes).
+/// including inner loops (holes). When `original_to_merged` is provided, contour edges
+/// where both vertices map to the same merged index are skipped — these edges were
+/// collapsed by vertex merging and cannot appear in the triangulation.
 fn check_all_contour_edges_present(
     triangles: &[(usize, usize, usize)],
     contours: &[Vec<usize>],
+    original_to_merged: Option<&[usize]>,
 ) -> bool {
     // Build set of all triangle edges
     let mut tri_edges: HashSet<(usize, usize)> = HashSet::new();
@@ -792,6 +794,12 @@ fn check_all_contour_edges_present(
         for window in contour.windows(2) {
             let a = window[0];
             let b = window[1];
+            // Skip edges collapsed by vertex merging (both endpoints merged to same vertex)
+            if let Some(mapping) = original_to_merged {
+                if mapping[a] == mapping[b] {
+                    continue;
+                }
+            }
             let edge = (a.min(b), a.max(b));
             if !tri_edges.contains(&edge) {
                 return false;
@@ -950,7 +958,7 @@ fn triangulate_with_plane_projection(
                 .collect();
 
             let score = composite_score(&mapped_tris);
-            if check_all_contour_edges_present(&mapped_tris, contours) && score > best_score {
+            if check_all_contour_edges_present(&mapped_tris, contours, Some(&merge_result.original_to_merged)) && score > best_score {
                 best_score = score;
                 best_tris = Some(mapped_tris);
                 continue;
@@ -982,7 +990,7 @@ fn triangulate_with_plane_projection(
                 .collect();
 
             let score = composite_score(&mapped_tris);
-            if check_all_contour_edges_present(&mapped_tris, contours) && score > best_score {
+            if check_all_contour_edges_present(&mapped_tris, contours, Some(&merge_result.original_to_merged)) && score > best_score {
                 best_score = score;
                 best_tris = Some(mapped_tris);
             }
@@ -1668,7 +1676,7 @@ impl<'a> ShellTessellator<'a> {
                         // that don't match their neighbors.
                         let as_tuples: Vec<(usize, usize, usize)> = filtered.iter()
                             .map(|t| (t[0], t[1], t[2])).collect();
-                        if check_all_contour_edges_present(&as_tuples, &contours) {
+                        if check_all_contour_edges_present(&as_tuples, &contours, Some(&merge_result.original_to_merged)) {
                             filtered
                         } else {
                             #[cfg(test)]
