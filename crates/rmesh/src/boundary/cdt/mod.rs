@@ -115,39 +115,6 @@ where
     Ok(t.triangles().collect())
 }
 
-/// Given a set of points and edges which are known to panic, figures out the
-/// max number of save steps, then saves an SVG right before the panic occurs
-#[allow(dead_code)]
-pub fn save_debug_panic<'a, E>(pts: &[Point], edges: E, filename: &str) -> std::io::Result<()>
-where
-    E: IntoIterator<Item = &'a (usize, usize)> + Copy + Clone + std::panic::UnwindSafe,
-{
-    let mut safe_steps = 0;
-    loop {
-        let result = std::panic::catch_unwind(move || {
-            let mut t = Triangulation::new_with_edges(pts, edges)
-                .expect("Could not build CDT triangulation");
-            for _ in 0..safe_steps {
-                t.step().expect("Step failed");
-            }
-        });
-        if result.is_ok() {
-            safe_steps += 1;
-        } else {
-            safe_steps -= 1;
-            break;
-        }
-    }
-
-    // This will still panic if we can't *construct* the initial triangulation
-    let mut t =
-        Triangulation::new_with_edges(pts, edges).expect("Could not build CDT triangulation");
-    for _ in 0..safe_steps {
-        t.step().expect("Step failed");
-    }
-    t.save_debug_svg(filename)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +203,66 @@ mod tests {
         for (surface, (total, pass)) in &by_surface {
             eprintln!("  {surface}: {pass}/{total} boundary pass");
         }
+    }
+
+    /// Test donut (annular) geometry: outer square with inner square hole.
+    /// This exercises the `toggle_lock_sign` double-lock semantics where
+    /// the connecting edge between outer and inner contours is locked twice,
+    /// resulting in `sign == Some(false)` (does not toggle inside/outside).
+    #[test]
+    fn test_donut_contours() {
+        // Outer square
+        let pts: Vec<(f64, f64)> = vec![
+            (0.0, 0.0), // 0
+            (4.0, 0.0), // 1
+            (4.0, 4.0), // 2
+            (0.0, 4.0), // 3
+            // Inner square (hole)
+            (1.0, 1.0), // 4
+            (3.0, 1.0), // 5
+            (3.0, 3.0), // 6
+            (1.0, 3.0), // 7
+        ];
+
+        // Two closed contours: outer CCW, inner CW
+        let contours = vec![
+            vec![0, 1, 2, 3, 0],       // outer
+            vec![4, 7, 6, 5, 4],       // inner (CW = hole)
+        ];
+
+        let tris = triangulate_contours(&pts, &contours).expect("donut CDT should succeed");
+
+        // The center of the hole (2, 2) should NOT be inside any triangle
+        let center = (2.0, 2.0);
+        for &(a, b, c) in &tris {
+            let inside = point_in_triangle(center, pts[a], pts[b], pts[c]);
+            assert!(!inside, "triangle ({a},{b},{c}) covers the hole center");
+        }
+
+        // All boundary edges from both contours must be present
+        let tri_edges: HashSet<(usize, usize)> = tris
+            .iter()
+            .flat_map(|&(a, b, c)| {
+                [(a.min(b), a.max(b)), (b.min(c), b.max(c)), (c.min(a), c.max(a))]
+            })
+            .collect();
+
+        for contour in &contours {
+            for w in contour.windows(2) {
+                let edge = (w[0].min(w[1]), w[0].max(w[1]));
+                assert!(tri_edges.contains(&edge), "missing boundary edge {edge:?}");
+            }
+        }
+    }
+
+    /// Barycentric point-in-triangle test for donut verification.
+    fn point_in_triangle(p: (f64, f64), a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> bool {
+        let (px, py) = p;
+        let d1 = (px - b.0) * (a.1 - b.1) - (a.0 - b.0) * (py - b.1);
+        let d2 = (px - c.0) * (b.1 - c.1) - (b.0 - c.0) * (py - c.1);
+        let d3 = (px - a.0) * (c.1 - a.1) - (c.0 - a.0) * (py - a.1);
+        let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+        let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+        !(has_neg && has_pos)
     }
 }

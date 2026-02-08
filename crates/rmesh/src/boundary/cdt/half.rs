@@ -190,6 +190,17 @@ impl Half {
     /// triangulation.  Every triangle outside the boundary is removed,
     /// using odd-even counting (i.e. we switch from outside to inside every
     /// time we cross a fixed edge).
+    ///
+    /// The `inside` flag is toggled by the XOR expression:
+    ///   `inside ^ (edge.sign == Some(true))`
+    ///
+    /// Sign semantics:
+    /// - `sign == None`: unfixed edge — does not toggle inside/outside parity.
+    /// - `sign == Some(true)`: fixed boundary edge — toggles parity (real boundary crossing).
+    /// - `sign == Some(false)`: fixed edge locked twice via [`toggle_lock_sign`] — does NOT
+    ///   toggle parity. This happens when two contours share the same edge (e.g. the
+    ///   doubled edge connecting outer and inner contours in a donut). Crossing such an
+    ///   edge should not change inside/outside status since both sides are interior.
     pub fn flood_erase_from(&mut self, e: EdgeIndex) {
         assert!(self.edge(e).buddy == EMPTY_EDGE);
         let mut seen = EdgeVec::of(vec![false; self.edges.len()]);

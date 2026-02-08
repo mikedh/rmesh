@@ -1961,31 +1961,39 @@ mod tests {
             });
         }
 
-        // Print results
+        // Print results as a compact 4-column table
+        let mut total_wt_pass = 0usize;
+        let mut total_wt_total = 0usize;
         println!();
         println!(
-            "  {:<20} {:>7} {:>7} {:>8} {:>5} {:>8} {:>8}  {:<7} {:>8} {:>8}  {}",
-            "file", "parse", "convert", "tess", "face", "verts", "tris", "wt",
-            "r_verts", "r_tris", "error"
+            "  {:<24} {:>11} {:>9} {:>10}",
+            "file", "watertight", "time", "triangles"
         );
-        println!("  {}", "-".repeat(110));
+        println!("  {}", "-".repeat(58));
         for r in &results {
             let total_ms = r.parse_ms + r.convert_ms + r.tess_ms;
+            total_wt_pass += r.wt_pass;
+            total_wt_total += r.wt_total;
             println!(
-                "  {:<20} {:>5.0}ms {:>5.0}ms {:>6.0}ms {:>5} {:>8} {:>8}  {:<7} {:>8} {:>8}  {}",
+                "  {:<24} {:>5}/{:<5} {:>7.0}ms {:>10}",
                 r.name,
-                r.parse_ms,
-                r.convert_ms,
-                r.tess_ms,
-                r.faces,
-                r.verts,
+                r.wt_pass,
+                r.wt_total,
+                total_ms,
                 r.tris,
-                format!("{}/{}", r.wt_pass, r.wt_total),
-                r.ref_verts,
-                r.ref_tris,
-                r.error.as_deref().unwrap_or(""),
             );
         }
+        println!("  {}", "-".repeat(58));
+        let total_tris: usize = results.iter().map(|r| r.tris).sum();
+        let total_ms: f64 = results.iter().map(|r| r.parse_ms + r.convert_ms + r.tess_ms).sum();
+        println!(
+            "  {:<24} {:>5}/{:<5} {:>7.0}ms {:>10}",
+            "TOTAL",
+            total_wt_pass,
+            total_wt_total,
+            total_ms,
+            total_tris,
+        );
         println!();
     }
 }
