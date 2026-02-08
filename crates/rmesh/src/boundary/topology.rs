@@ -60,8 +60,11 @@ pub struct CurveEllipse {
     pub semi_minor: f64,
 }
 
-/// A B-spline curve in 3D space.
+/// A B-spline curve in 3D space (optionally rational / NURBS).
 /// Uses De Boor's algorithm for evaluation.
+/// When `weights` is `Some`, the curve is rational (NURBS) and the
+/// evaluation uses the weighted formula:
+///   C(u) = Σ(w_i * N_i(u) * P_i) / Σ(w_i * N_i(u))
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CurveBSpline {
     /// Polynomial degree (order = degree + 1)
@@ -70,16 +73,125 @@ pub struct CurveBSpline {
     pub control_points: Vec<Point3<f64>>,
     /// Knot vector (length = control_points.len() + degree + 1)
     pub knots: Vec<f64>,
+    /// Optional weights for rational B-spline (NURBS).
+    /// When present, length must equal control_points.len().
+    pub weights: Option<Vec<f64>>,
+}
+
+/// Compute binomial coefficient C(n, k).
+fn binomial(n: usize, k: usize) -> usize {
+    if k > n {
+        return 0;
+    }
+    let k = k.min(n - k);
+    let mut result = 1usize;
+    for i in 0..k {
+        result = result * (n - i) / (i + 1);
+    }
+    result
+}
+
+/// Compute basis function derivatives (Algorithm A2.3 from "The NURBS Book").
+/// Returns `ders[k][j]` = k-th derivative of N_{span-degree+j, degree}(u).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::needless_range_loop
+)]
+fn basis_funs_ders(
+    span: usize,
+    u: f64,
+    degree: usize,
+    knots: &[f64],
+    n_ders: usize,
+) -> Vec<Vec<f64>> {
+    let p = degree;
+    let mut ders = vec![vec![0.0; p + 1]; n_ders + 1];
+    let mut ndu = vec![vec![0.0; p + 1]; p + 1];
+    let mut left = vec![0.0; p + 1];
+    let mut right = vec![0.0; p + 1];
+
+    ndu[0][0] = 1.0;
+    for j in 1..=p {
+        left[j] = u - knots[span + 1 - j];
+        right[j] = knots[span + j] - u;
+        let mut saved = 0.0;
+        for r in 0..j {
+            ndu[j][r] = right[r + 1] + left[j - r];
+            let temp = ndu[r][j - 1] / ndu[j][r];
+            ndu[r][j] = saved + right[r + 1] * temp;
+            saved = left[j - r] * temp;
+        }
+        ndu[j][j] = saved;
+    }
+
+    // Load basis functions
+    for j in 0..=p {
+        ders[0][j] = ndu[j][p];
+    }
+
+    // Compute derivatives
+    let mut a = vec![vec![0.0; p + 1]; 2];
+    for r in 0..=p {
+        let mut s1 = 0;
+        let mut s2 = 1;
+        a[0][0] = 1.0;
+
+        for k in 1..=n_ders.min(p) {
+            let mut d = 0.0;
+            let rk = r as i32 - k as i32;
+            let pk = (p as i32 - k as i32) as usize;
+
+            if rk >= 0 {
+                a[s2][0] = a[s1][0] / ndu[pk + 1][rk as usize];
+                d = a[s2][0] * ndu[rk as usize][pk];
+            }
+
+            let j1 = if rk >= -1 { 1 } else { (-rk) as usize };
+            let j2 = if (r as i32 - 1) <= pk as i32 {
+                k - 1
+            } else {
+                p - r
+            };
+
+            for j in j1..=j2 {
+                a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][(rk + j as i32) as usize];
+                d += a[s2][j] * ndu[(rk + j as i32) as usize][pk];
+            }
+
+            if r <= pk {
+                a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r];
+                d += a[s2][k] * ndu[r][pk];
+            }
+
+            ders[k][r] = d;
+            std::mem::swap(&mut s1, &mut s2);
+        }
+    }
+
+    // Multiply by factorial terms
+    let mut r = p as f64;
+    for k in 1..=n_ders.min(p) {
+        for j in 0..=p {
+            ders[k][j] *= r;
+        }
+        r *= (p - k) as f64;
+    }
+
+    ders
 }
 
 impl CurveBSpline {
     /// Create a B-spline from STEP-style multiplicities.
     /// `knot_values` are the unique knot positions, `multiplicities` are their repetition counts.
+    /// `weights` is `Some` for rational B-splines (NURBS).
     pub fn from_multiplicities(
         degree: usize,
         control_points: Vec<Point3<f64>>,
         knot_values: &[f64],
         multiplicities: &[usize],
+        weights: Option<Vec<f64>>,
     ) -> Self {
         assert_eq!(knot_values.len(), multiplicities.len());
         let knots: Vec<f64> = knot_values
@@ -91,6 +203,7 @@ impl CurveBSpline {
             degree,
             control_points,
             knots,
+            weights,
         }
     }
 
@@ -150,19 +263,32 @@ impl CurveBSpline {
     }
 
     /// Evaluate the curve at parameter u.
-    /// Algorithm A3.1 from "The NURBS Book"
+    /// Algorithm A3.1 from "The NURBS Book" (extended for rational/NURBS).
     #[allow(clippy::needless_range_loop)]
     pub fn evaluate(&self, u: f64) -> Point3<f64> {
         let span = self.find_span(u);
         let basis = self.basis_funs(span, u);
         let p = self.degree;
 
-        let mut point = Point3::origin();
-        for i in 0..=p {
-            let idx = span - p + i;
-            point.coords += basis[i] * self.control_points[idx].coords;
+        if let Some(ref weights) = self.weights {
+            // Rational (NURBS): C(u) = Σ(w_i * N_i * P_i) / Σ(w_i * N_i)
+            let mut numerator = Vector3::zeros();
+            let mut denominator = 0.0;
+            for i in 0..=p {
+                let idx = span - p + i;
+                let wn = weights[idx] * basis[i];
+                numerator += wn * self.control_points[idx].coords;
+                denominator += wn;
+            }
+            Point3::from(numerator / denominator)
+        } else {
+            let mut point = Point3::origin();
+            for i in 0..=p {
+                let idx = span - p + i;
+                point.coords += basis[i] * self.control_points[idx].coords;
+            }
+            point
         }
-        point
     }
 
     /// Get the valid parameter range [u_min, u_max].
@@ -172,137 +298,142 @@ impl CurveBSpline {
     }
 
     /// Compute first derivative at parameter u.
-    /// Algorithm A3.2 from "The NURBS Book"
     #[allow(clippy::needless_range_loop)]
     pub fn derivative(&self, u: f64) -> Vector3<f64> {
-        let span = self.find_span(u);
-        let p = self.degree;
-
-        // Compute basis function derivatives (order 1)
-        let mut n_ders = vec![vec![0.0; p + 1]; 2];
-        let mut left = vec![0.0; p + 1];
-        let mut right = vec![0.0; p + 1];
-
-        // Basis functions
-        n_ders[0][0] = 1.0;
-        for j in 1..=p {
-            left[j] = u - self.knots[span + 1 - j];
-            right[j] = self.knots[span + j] - u;
-            let mut saved = 0.0;
-            for r in 0..j {
-                let temp = n_ders[0][r] / (right[r + 1] + left[j - r]);
-                n_ders[0][r] = saved + right[r + 1] * temp;
-                saved = left[j - r] * temp;
-            }
-            n_ders[0][j] = saved;
-        }
-
-        // Compute derivatives of basis functions
-        for r in 0..=p {
-            let mut s1 = 0;
-            let mut s2 = 1;
-            let mut a = vec![vec![0.0; 2]; 2];
-            a[0][0] = 1.0;
-
-            // Compute first derivative
-            if p >= 1 {
-                a[s2][0] = -a[s1][0] / (self.knots[span + 1] - self.knots[span + 1 - p]);
-                if r >= 1 {
-                    a[s2][1] = a[s1][0] / (self.knots[span + r + 1] - self.knots[span + r + 1 - p]);
-                }
-                let d = if r == 0 {
-                    a[s2][1] * n_ders[0][1]
-                } else if r == p {
-                    a[s2][0] * n_ders[0][p - 1]
-                } else {
-                    a[s2][0] * n_ders[0][r - 1] + a[s2][1] * n_ders[0][r]
-                };
-                n_ders[1][r] = d * p as f64;
-                std::mem::swap(&mut s1, &mut s2);
-            }
-        }
-
-        // Compute derivative
-        let mut deriv = Vector3::zeros();
-        for i in 0..=p {
-            let idx = span - p + i;
-            deriv += n_ders[1][i] * self.control_points[idx].coords;
-        }
-        deriv
+        self.evaluate_with_derivatives(u, 1)[1]
     }
 
     /// Compute second derivative at parameter u.
-    /// Uses finite differences on the first derivative for simplicity.
     pub fn second_derivative(&self, u: f64) -> Vector3<f64> {
-        let (u_min, u_max) = self.domain();
-        let h = (u_max - u_min) * 1e-6;
+        self.evaluate_with_derivatives(u, 2)[2]
+    }
 
-        // Central difference: f''(u) ≈ (f'(u+h) - f'(u-h)) / (2h)
-        let u_plus = (u + h).min(u_max);
-        let u_minus = (u - h).max(u_min);
-        let actual_h = (u_plus - u_minus) / 2.0;
+    /// Evaluate C(u) and derivatives C'(u), C''(u), ... up to order `n_ders`
+    /// in a single find_span + basis_funs_ders pass (Algorithm A2.3).
+    /// For rational (NURBS) curves, uses Algorithm A4.2 from "The NURBS Book".
+    #[allow(clippy::needless_range_loop)]
+    pub fn evaluate_with_derivatives(&self, u: f64, n_ders: usize) -> Vec<Vector3<f64>> {
+        let span = self.find_span(u);
+        let p = self.degree;
+        let ders = basis_funs_ders(span, u, p, &self.knots, n_ders);
 
-        if actual_h.abs() < GEOMETRY_TOL * 1e-2 {
-            return Vector3::zeros();
+        if let Some(ref weights) = self.weights {
+            // Compute weighted derivatives: Aw[k] = Σ w_i * N_i^(k) * P_i
+            //                               wders[k] = Σ w_i * N_i^(k)
+            let mut a_ders = vec![Vector3::zeros(); n_ders + 1];
+            let mut w_ders = vec![0.0; n_ders + 1];
+            for k in 0..=n_ders {
+                for j in 0..=p {
+                    let idx = span - p + j;
+                    let w = weights[idx];
+                    a_ders[k] += (w * ders[k][j]) * self.control_points[idx].coords;
+                    w_ders[k] += w * ders[k][j];
+                }
+            }
+
+            // Apply quotient rule (Algorithm A4.2):
+            // CK[0] = Aw[0] / w[0]  (the point itself)
+            // CK[k] = (Aw[k] - Σ_{i=1}^{k} C(k,i) * w[i] * CK[k-i]) / w[0]
+            let mut ck = vec![Vector3::zeros(); n_ders + 1];
+            for k in 0..=n_ders {
+                let mut v = a_ders[k];
+                for i in 1..=k {
+                    let bin = binomial(k, i) as f64;
+                    v -= (bin * w_ders[i]) * ck[k - i];
+                }
+                ck[k] = v / w_ders[0];
+            }
+            ck
+        } else {
+            let mut result = vec![Vector3::zeros(); n_ders + 1];
+            for k in 0..=n_ders {
+                for j in 0..=p {
+                    let idx = span - p + j;
+                    result[k] += ders[k][j] * self.control_points[idx].coords;
+                }
+            }
+            result
         }
-
-        (self.derivative(u_plus) - self.derivative(u_minus)) / (2.0 * actual_h)
     }
 
     /// Find parameter t for a point on the curve using Newton-Raphson.
-    /// Samples the curve to find a good starting point, then refines.
+    /// Uses control polygon for initial guess, then refines with analytical derivatives.
     pub fn parameter_at(&self, point: &Point3<f64>) -> f64 {
         let (u_min, u_max) = self.domain();
         let eps = NEWTON_TOL;
-        let max_iter = 50;
+        let max_iter = 20;
 
-        // Sample curve to find best starting point
-        let n_samples = self.control_points.len() * 4;
-        let mut best_u = u_min;
-        let mut best_dist = f64::MAX;
+        // Control polygon initial guess: find closest control polygon edge
+        // and map projection to parameter domain. O(n) dot products, no curve evals.
+        let n_cp = self.control_points.len();
+        let p = self.degree;
+        let best_u = if n_cp >= 2 {
+            let mut best_dist_sq = f64::MAX;
+            let mut best_idx = 0;
+            let mut best_t = 0.0;
 
-        for i in 0..=n_samples {
-            let frac = i as f64 / n_samples as f64;
-            let u = u_min + frac * (u_max - u_min);
-            let p = self.evaluate(u);
-            let dist = (p - point).norm_squared();
-            if dist < best_dist {
-                best_dist = dist;
-                best_u = u;
+            for i in 0..n_cp - 1 {
+                let a = &self.control_points[i];
+                let b = &self.control_points[i + 1];
+                let ab = b - a;
+                let ab_len_sq = ab.norm_squared();
+                let t = if ab_len_sq < 1e-30 {
+                    0.0
+                } else {
+                    ((point - a).dot(&ab) / ab_len_sq).clamp(0.0, 1.0)
+                };
+                let proj = a.coords + t * ab;
+                let dist_sq = (proj - point.coords).norm_squared();
+                if dist_sq < best_dist_sq {
+                    best_dist_sq = dist_sq;
+                    best_idx = i;
+                    best_t = t;
+                }
             }
-        }
 
-        // Newton-Raphson refinement with full second derivative term
-        // for quadratic convergence (typically 4-5 iterations vs 50)
+            // Map control polygon index to parameter domain using Greville abscissae.
+            // Greville abscissa for control point i: avg(knots[i+1..=i+p])
+            let greville = |idx: usize| -> f64 {
+                if p == 0 {
+                    return (u_min + u_max) * 0.5;
+                }
+                let sum: f64 = (1..=p).map(|j| self.knots[idx + j]).sum();
+                sum / p as f64
+            };
+            let g_a = greville(best_idx);
+            let g_b = greville(best_idx + 1);
+            (g_a + best_t * (g_b - g_a)).clamp(u_min, u_max)
+        } else {
+            (u_min + u_max) * 0.5
+        };
+
+        // Newton-Raphson refinement with analytical derivatives
         let mut u = best_u;
         for _ in 0..max_iter {
-            let c = self.evaluate(u);
-            let c_prime = self.derivative(u);
+            let d = self.evaluate_with_derivatives(u, 2);
+            let c = Point3::from(d[0]);
+            let c_prime = d[1];
+            let c_double_prime = d[2];
 
             let r = c - point;
-            let dist = r.norm();
-            if dist < eps {
+            if r.norm() < eps {
                 break;
             }
 
             // f(u) = (C(u) - P) · C'(u) = 0 at the closest point
             // f'(u) = C'(u) · C'(u) + (C(u) - P) · C''(u)
             let f = r.dot(&c_prime);
-            let c_double_prime = self.second_derivative(u);
             let f_prime = c_prime.norm_squared() + r.dot(&c_double_prime);
 
             if f_prime.abs() < GEOMETRY_TOL {
-                // Fall back to simplified formula if f' is degenerate
                 let f_prime_simple = c_prime.norm_squared();
                 if f_prime_simple.abs() < GEOMETRY_TOL {
                     break;
                 }
-                let du = -f / f_prime_simple;
-                u = (u + du).clamp(u_min, u_max);
+                u = (u - f / f_prime_simple).clamp(u_min, u_max);
             } else {
                 let du = -f / f_prime;
                 u = (u + du).clamp(u_min, u_max);
-
                 if du.abs() < eps {
                     break;
                 }

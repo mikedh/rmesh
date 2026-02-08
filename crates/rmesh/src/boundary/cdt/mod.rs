@@ -147,3 +147,94 @@ where
     }
     t.save_debug_svg(filename)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Load CDT failure fixtures from JSONL and test that plane-projected CDT
+    /// or contour CDT succeeds for each case.
+    ///
+    /// This exercises the CDT on real-world inputs extracted from STEP tessellation.
+    /// Not all cases are expected to succeed (some have genuinely self-intersecting
+    /// UV polygons), but tracking the pass rate helps catch regressions.
+    #[test]
+    fn test_cdt_failure_fixtures() {
+        let data = include_str!("../../../../../test/data/cdt_failures.jsonl");
+
+        let mut total = 0;
+        let mut cdt_pass = 0;
+        let mut boundary_pass = 0;
+        let mut by_surface: std::collections::HashMap<String, (usize, usize)> =
+            std::collections::HashMap::new();
+
+        for line in data.lines() {
+            let case: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let pts: Vec<(f64, f64)> = case["pts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    let arr = p.as_array().unwrap();
+                    (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
+                })
+                .collect();
+
+            let contours: Vec<Vec<usize>> = case["contours"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    c.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_u64().unwrap() as usize)
+                        .collect()
+                })
+                .collect();
+
+            let surface_type = case["surface_type"].as_str().unwrap_or("unknown").to_string();
+            total += 1;
+
+            let entry = by_surface.entry(surface_type).or_insert((0, 0));
+            entry.0 += 1;
+
+            // Try CDT
+            match triangulate_contours(&pts, &contours) {
+                Ok(tris) => {
+                    cdt_pass += 1;
+                    // Also check boundary preservation
+                    let tri_edges: HashSet<(usize, usize)> = tris
+                        .iter()
+                        .flat_map(|&(a, b, c)| {
+                            [(a.min(b), a.max(b)), (b.min(c), b.max(c)), (c.min(a), c.max(a))]
+                        })
+                        .collect();
+
+                    let all_present = contours.iter().all(|contour| {
+                        contour.windows(2).all(|w| {
+                            let edge = (w[0].min(w[1]), w[0].max(w[1]));
+                            tri_edges.contains(&edge)
+                        })
+                    });
+
+                    if all_present {
+                        boundary_pass += 1;
+                        entry.1 += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        eprintln!("\nCDT fixture results: {total} cases, {cdt_pass} CDT pass, {boundary_pass} boundary pass");
+        for (surface, (total, pass)) in &by_surface {
+            eprintln!("  {surface}: {pass}/{total} boundary pass");
+        }
+    }
+}

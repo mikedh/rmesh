@@ -34,6 +34,8 @@ pub use step_file::{FromEntity, StepFile};
 
 use std::collections::{HashMap, HashSet};
 
+use rayon::prelude::*;
+
 use nalgebra::{Matrix4, Point3, Vector3};
 
 use super::faces::{Cone, Cylinder, Sphere, SurfaceBSpline, SurfacePlane, Torus};
@@ -307,14 +309,25 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
 
     let to_mesh = graph.collect_instances(step);
 
+    // Convert solids in parallel — each is independent with its own local BrepModel.
+    let entries: Vec<_> = to_mesh.iter().collect();
+    let results: Vec<_> = entries
+        .par_iter()
+        .filter_map(|(msb_id, (name, transforms))| {
+            if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[**msb_id]
+                && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
+            {
+                brep.length_scale = length_scale;
+                Some((name.clone(), Geometry::Brep(Box::new(brep)), transforms.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     let mut scene = Scene::new();
-    for (msb_id, (name, transforms)) in &to_mesh {
-        if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[*msb_id]
-            && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
-        {
-            brep.length_scale = length_scale;
-            scene.add(name, Geometry::Brep(Box::new(brep)), Some(transforms));
-        }
+    for (name, geom, transforms) in results {
+        scene.add(&name, geom, Some(&transforms));
     }
 
     Ok(scene)
@@ -322,29 +335,35 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
 
 /// Flat fallback for single-body STEP files with no representation relationships.
 fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>, length_scale: f64) -> Result<Scene, StepError> {
-    let mut scene = Scene::new();
-
+    // Collect all (name, msb) pairs to convert in parallel.
+    let mut work: Vec<(String, &ap214::ManifoldSolidBrep_<'a>)> = Vec::new();
     for (id, entity) in step.entities.iter().enumerate() {
-        if let ap214::Entity::ManifoldSolidBrep(msb) = entity
-            && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
-        {
-            brep.length_scale = length_scale;
-            scene.add(&format!("brep_{id}"), Geometry::Brep(Box::new(brep)), None);
+        if let ap214::Entity::ManifoldSolidBrep(msb) = entity {
+            work.push((format!("brep_{id}"), msb));
         }
         if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
             let name = absr.name.0.to_string();
             for item_id in &absr.items {
-                let idx = item_id.index();
-                if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[idx]
-                    && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
-                {
-                    brep.length_scale = length_scale;
-                    scene.add(&name, Geometry::Brep(Box::new(brep)), None);
+                if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[item_id.index()] {
+                    work.push((name.clone(), msb));
                 }
             }
         }
     }
 
+    let results: Vec<_> = work
+        .par_iter()
+        .filter_map(|(name, msb)| {
+            let mut brep = convert_manifold_solid_brep(step, msb).ok()?;
+            brep.length_scale = length_scale;
+            Some((name.clone(), Geometry::Brep(Box::new(brep))))
+        })
+        .collect();
+
+    let mut scene = Scene::new();
+    for (name, geom) in results {
+        scene.add(&name, geom, None);
+    }
     Ok(scene)
 }
 
@@ -770,13 +789,105 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
                 control_points,
                 &knot_values,
                 &multiplicities,
+                None,
             )))
+        }
+        ap214::Entity::ComplexEntity(subs) => {
+            convert_complex_curve(step, curve_id, subs)
         }
         _ => Err(StepError::UnsupportedEntity(format!(
             "Unsupported curve type at #{}",
             curve_id
         ))),
     }
+}
+
+/// Convert a complex entity containing rational B-spline curve sub-entities.
+///
+/// A rational B-spline curve in AP214 is encoded as a ComplexEntity with sub-entities:
+/// `(BOUNDED_CURVE B_SPLINE_CURVE B_SPLINE_CURVE_WITH_KNOTS CURVE
+///   GEOMETRIC_REPRESENTATION_ITEM RATIONAL_B_SPLINE_CURVE REPRESENTATION_ITEM)`
+fn convert_complex_curve(
+    step: &StepFile<'_>,
+    entity_id: usize,
+    subs: &[ap214::Entity<'_>],
+) -> Result<Curve, StepError> {
+    // Find the BSplineCurveWithKnots sub-entity (has knots + multiplicities)
+    let bspline_knots = subs
+        .iter()
+        .find_map(|e| {
+            if let ap214::Entity::BSplineCurveWithKnots(b) = e {
+                Some(b)
+            } else {
+                None
+            }
+        });
+
+    // Find the BSplineCurve sub-entity (has degree + control points)
+    let bspline_base = subs
+        .iter()
+        .find_map(|e| {
+            if let ap214::Entity::BSplineCurve(b) = e {
+                Some(b)
+            } else {
+                None
+            }
+        });
+
+    // Find optional RationalBSplineCurve sub-entity (has weights)
+    let rational = subs
+        .iter()
+        .find_map(|e| {
+            if let ap214::Entity::RationalBSplineCurve(r) = e {
+                Some(r)
+            } else {
+                None
+            }
+        });
+
+    // We need either the WithKnots variant (which has everything) or both base + knots
+    let (degree, control_point_ids, knot_values, multiplicities) =
+        if let Some(bk) = bspline_knots {
+            let degree = bk.degree as usize;
+            let knot_values: Vec<f64> = bk.knots.iter().map(|k| k.0).collect();
+            let multiplicities: Vec<usize> =
+                bk.knot_multiplicities.iter().map(|&m| m as usize).collect();
+            (degree, &bk.control_points_list, knot_values, multiplicities)
+        } else {
+            return Err(StepError::UnsupportedEntity(format!(
+                "Complex curve at #{entity_id} missing BSplineCurveWithKnots"
+            )));
+        };
+
+    // Use control points from the WithKnots entity (it inherits them from BSplineCurve)
+    // but if BSplineCurve has them and WithKnots doesn't, fall back
+    let cp_ids = if !control_point_ids.is_empty() {
+        control_point_ids
+    } else if let Some(base) = bspline_base {
+        &base.control_points_list
+    } else {
+        return Err(StepError::UnsupportedEntity(format!(
+            "Complex curve at #{entity_id} has no control points"
+        )));
+    };
+
+    let control_points: Result<Vec<Point3<f64>>, StepError> = cp_ids
+        .iter()
+        .map(|cp_id| convert_cartesian_point(step, cp_id.index()))
+        .collect();
+    let control_points = control_points?;
+
+    validate_bspline_knots(entity_id, degree, control_points.len(), &knot_values, &multiplicities)?;
+
+    let weights = rational.map(|r| r.weights_data.clone());
+
+    Ok(Curve::BSpline(CurveBSpline::from_multiplicities(
+        degree,
+        control_points,
+        &knot_values,
+        &multiplicities,
+        weights,
+    )))
 }
 
 /// Convert a surface entity to Surface enum
@@ -818,7 +929,10 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
                 torus.minor_radius.0.0.0,
             )))
         }
-        ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf),
+        ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf, None),
+        ap214::Entity::ComplexEntity(subs) => {
+            convert_complex_surface(step, surface_id, subs)
+        }
         _ => Err(StepError::UnsupportedEntity(format!(
             "Unsupported surface type at #{}",
             surface_id
@@ -826,10 +940,54 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
     }
 }
 
+/// Convert a complex entity containing rational B-spline surface sub-entities.
+///
+/// A rational B-spline surface in AP214 is encoded as a ComplexEntity with sub-entities:
+/// `(BOUNDED_SURFACE B_SPLINE_SURFACE B_SPLINE_SURFACE_WITH_KNOTS
+///   GEOMETRIC_REPRESENTATION_ITEM RATIONAL_B_SPLINE_SURFACE
+///   REPRESENTATION_ITEM SURFACE)`
+fn convert_complex_surface(
+    step: &StepFile<'_>,
+    entity_id: usize,
+    subs: &[ap214::Entity<'_>],
+) -> Result<Surface, StepError> {
+    // Find the BSplineSurfaceWithKnots sub-entity
+    let bspline_knots = subs
+        .iter()
+        .find_map(|e| {
+            if let ap214::Entity::BSplineSurfaceWithKnots(b) = e {
+                Some(b)
+            } else {
+                None
+            }
+        });
+
+    // Find optional RationalBSplineSurface sub-entity (has weights)
+    let rational = subs
+        .iter()
+        .find_map(|e| {
+            if let ap214::Entity::RationalBSplineSurface(r) = e {
+                Some(r)
+            } else {
+                None
+            }
+        });
+
+    if let Some(bk) = bspline_knots {
+        let weights = rational.map(|r| r.weights_data.clone());
+        convert_bspline_surface(step, bk, weights)
+    } else {
+        Err(StepError::UnsupportedEntity(format!(
+            "Complex surface at #{entity_id} missing BSplineSurfaceWithKnots"
+        )))
+    }
+}
+
 /// Convert a B_SPLINE_SURFACE_WITH_KNOTS to SurfaceBSpline
 fn convert_bspline_surface(
     step: &StepFile<'_>,
     bsurf: &ap214::BSplineSurfaceWithKnots_<'_>,
+    weights: Option<Vec<Vec<f64>>>,
 ) -> Result<Surface, StepError> {
     let u_degree = bsurf.u_degree as usize;
     let v_degree = bsurf.v_degree as usize;
@@ -861,6 +1019,7 @@ fn convert_bspline_surface(
         &u_multiplicities,
         &v_knot_values,
         &v_multiplicities,
+        weights,
     );
 
     Ok(Surface::BSpline(surface))
@@ -1500,7 +1659,8 @@ mod tests {
             brep_faces: usize,
             verts: usize,
             tris: usize,
-            watertight: bool,
+            wt_pass: usize,
+            wt_total: usize,
         }
 
         let files: &[(&str, &[u8])] = &[
@@ -1550,12 +1710,13 @@ mod tests {
             let mut total_faces = 0;
             let mut total_verts = 0;
             let mut total_tris = 0;
-            let mut all_watertight = true;
+            let mut wt_pass = 0;
+            let wt_total = tess_results.len();
             for &(f, v, t, w) in &tess_results {
                 total_faces += f;
                 total_verts += v;
                 total_tris += t;
-                all_watertight &= w;
+                if w { wt_pass += 1; }
             }
             let tess_us = t.elapsed().as_micros();
 
@@ -1569,7 +1730,8 @@ mod tests {
                 brep_faces: total_faces,
                 verts: total_verts,
                 tris: total_tris,
-                watertight: all_watertight,
+                wt_pass,
+                wt_total,
             });
         }
 
@@ -1594,13 +1756,13 @@ mod tests {
                 r.brep_faces,
                 r.verts,
                 r.tris,
-                r.watertight,
+                format!("{}/{}", r.wt_pass, r.wt_total),
             );
         }
         println!();
 
         for r in &results {
-            assert!(r.watertight, "'{}' must be watertight", r.name);
+            assert_eq!(r.wt_pass, r.wt_total, "'{}': {}/{} watertight", r.name, r.wt_pass, r.wt_total);
         }
     }
 
@@ -1646,7 +1808,8 @@ mod tests {
             faces: usize,
             verts: usize,
             tris: usize,
-            watertight: bool,
+            wt_pass: usize,
+            wt_total: usize,
             ref_verts: usize,
             ref_tris: usize,
             error: Option<String>,
@@ -1677,7 +1840,8 @@ mod tests {
                         faces: 0,
                         verts: 0,
                         tris: 0,
-                        watertight: false,
+                        wt_pass: 0,
+                        wt_total: 0,
                         ref_verts: 0,
                         ref_tris: 0,
                         error: Some(format!("convert: {e}")),
@@ -1729,7 +1893,8 @@ mod tests {
             let mut total_faces = 0;
             let mut total_verts = 0;
             let mut total_tris = 0;
-            let mut all_watertight = true;
+            let mut wt_pass = 0;
+            let mut wt_total = 0;
             let mut tess_error = None;
 
             for r in &tess_results {
@@ -1738,10 +1903,12 @@ mod tests {
                         total_faces += f;
                         total_verts += v;
                         total_tris += t;
-                        all_watertight &= w;
+                        wt_total += 1;
+                        if *w { wt_pass += 1; }
                     }
                     Err((f, msg)) => {
                         total_faces += f;
+                        wt_total += 1;
                         tess_error = Some(msg.clone());
                     }
                 }
@@ -1786,7 +1953,8 @@ mod tests {
                 faces: total_faces,
                 verts: total_verts,
                 tris: total_tris,
-                watertight: all_watertight && tess_error.is_none(),
+                wt_pass,
+                wt_total,
                 ref_verts,
                 ref_tris,
                 error: tess_error,
@@ -1796,23 +1964,23 @@ mod tests {
         // Print results
         println!();
         println!(
-            "  {:<20} {:>6} {:>7} {:>7} {:>7} {:>5} {:>7} {:>7} {:>3} {:>7} {:>7}  {}",
-            "file", "KB", "parse", "convert", "tess", "face", "verts", "tris", "wt",
+            "  {:<20} {:>7} {:>7} {:>8} {:>5} {:>8} {:>8}  {:<7} {:>8} {:>8}  {}",
+            "file", "parse", "convert", "tess", "face", "verts", "tris", "wt",
             "r_verts", "r_tris", "error"
         );
-        println!("  {}", "-".repeat(120));
+        println!("  {}", "-".repeat(110));
         for r in &results {
+            let total_ms = r.parse_ms + r.convert_ms + r.tess_ms;
             println!(
-                "  {:<20} {:>6} {:>5.1}ms {:>5.1}ms {:>5.1}ms {:>5} {:>7} {:>7} {:>3} {:>7} {:>7}  {}",
+                "  {:<20} {:>5.0}ms {:>5.0}ms {:>6.0}ms {:>5} {:>8} {:>8}  {:<7} {:>8} {:>8}  {}",
                 r.name,
-                r.bytes / 1024,
                 r.parse_ms,
                 r.convert_ms,
                 r.tess_ms,
                 r.faces,
                 r.verts,
                 r.tris,
-                if r.watertight { "Y" } else { "N" },
+                format!("{}/{}", r.wt_pass, r.wt_total),
                 r.ref_verts,
                 r.ref_tris,
                 r.error.as_deref().unwrap_or(""),

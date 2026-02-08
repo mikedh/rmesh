@@ -97,6 +97,9 @@ struct FaceTriangulation {
     /// Set of local edge pairs that lie on BREP boundaries (edges shared between faces)
     /// Stored as (min_local_idx, max_local_idx) for canonical ordering
     boundary_edges: HashSet<(usize, usize)>,
+    /// Edge-to-triangle adjacency: canonical edge (min,max) → triangle indices.
+    /// Built at Phase 3 start and maintained incrementally during splits.
+    edge_tris: HashMap<(usize, usize), Vec<usize>>,
 }
 
 impl FaceTriangulation {
@@ -107,6 +110,7 @@ impl FaceTriangulation {
             local_to_pool: Vec::new(),
             pool_to_local: HashMap::new(),
             boundary_edges: HashSet::new(),
+            edge_tris: HashMap::new(),
         }
     }
 
@@ -143,6 +147,85 @@ impl FaceTriangulation {
             (local_b, local_a)
         };
         self.boundary_edges.contains(&edge)
+    }
+
+    /// Build the edge→triangle adjacency map from current triangles.
+    fn build_edge_tris(&mut self) {
+        self.edge_tris.clear();
+        for (tri_idx, tri) in self.triangles.iter().enumerate() {
+            for i in 0..3 {
+                let a = tri[i];
+                let b = tri[(i + 1) % 3];
+                let key = (a.min(b), a.max(b));
+                self.edge_tris.entry(key).or_default().push(tri_idx);
+            }
+        }
+    }
+
+    /// Split all triangles sharing edge (local_a, local_b) by inserting local_mid.
+    /// Uses edge_tris for O(1) lookup instead of scanning all triangles.
+    /// Returns true if any triangles were split.
+    fn split_triangles_at_edge(
+        &mut self,
+        local_a: usize,
+        local_b: usize,
+        local_mid: usize,
+    ) -> bool {
+        let key = (local_a.min(local_b), local_a.max(local_b));
+        let tri_indices = match self.edge_tris.remove(&key) {
+            Some(v) if !v.is_empty() => v,
+            _ => return false,
+        };
+
+        for &tri_idx in &tri_indices {
+            let tri = self.triangles[tri_idx];
+            // Find the opposite vertex
+            let v_opp = if (tri[0] == local_a && tri[1] == local_b)
+                || (tri[0] == local_b && tri[1] == local_a)
+            {
+                tri[2]
+            } else if (tri[1] == local_a && tri[2] == local_b)
+                || (tri[1] == local_b && tri[2] == local_a)
+            {
+                tri[0]
+            } else {
+                tri[1]
+            };
+
+            // Split: replace original with [local_a, local_mid, v_opp],
+            //         append [local_mid, local_b, v_opp]
+            let half_a = [local_a, local_mid, v_opp];
+            let half_b = [local_mid, local_b, v_opp];
+
+            // Remove old triangle's edges from the map
+            for i in 0..3 {
+                let ea = tri[i];
+                let eb = tri[(i + 1) % 3];
+                let ekey = (ea.min(eb), ea.max(eb));
+                if ekey != key
+                    && let Some(list) = self.edge_tris.get_mut(&ekey)
+                {
+                    list.retain(|&idx| idx != tri_idx);
+                }
+            }
+
+            // Replace in-place
+            self.triangles[tri_idx] = half_a;
+            let new_idx = self.triangles.len();
+            self.triangles.push(half_b);
+
+            // Add new edges to the map
+            for (idx, half) in [(tri_idx, &half_a), (new_idx, &half_b)] {
+                for i in 0..3 {
+                    let ea = half[i];
+                    let eb = half[(i + 1) % 3];
+                    let ekey = (ea.min(eb), ea.max(eb));
+                    self.edge_tris.entry(ekey).or_default().push(idx);
+                }
+            }
+        }
+
+        true
     }
 }
 
@@ -453,31 +536,55 @@ impl Surface {
 ///
 /// This function adjusts the u coordinate to be continuous by adding/subtracting 2π
 /// when consecutive vertices jump across the ±π boundary.
-fn unwrap_angular_coords(uvs: &mut [Point2<f64>]) {
-    use std::f64::consts::TAU;
+/// Unwrap a single angular coordinate sequence to remove ±π discontinuities.
+fn unwrap_angular_sequence(values: impl Iterator<Item = f64>, out: &mut [f64]) {
+    use std::f64::consts::{PI, TAU};
 
+    let mut offset = 0.0;
+    let mut prev = None;
+
+    for (i, val) in values.enumerate() {
+        let curr = val + offset;
+        if let Some(p) = prev {
+            let diff = curr - p;
+            if diff > PI {
+                offset -= TAU;
+            } else if diff < -PI {
+                offset += TAU;
+            }
+        }
+        out[i] = val + offset;
+        prev = Some(out[i]);
+    }
+}
+
+fn unwrap_angular_coords(uvs: &mut [Point2<f64>]) {
     if uvs.len() < 2 {
         return;
     }
 
-    // Track cumulative offset for the u coordinate
-    let mut offset = 0.0;
+    // Unwrap the u coordinate (first angular coordinate)
+    let mut u_vals: Vec<f64> = vec![0.0; uvs.len()];
+    unwrap_angular_sequence(uvs.iter().map(|p| p.x), &mut u_vals);
+    for (i, uv) in uvs.iter_mut().enumerate() {
+        uv.x = u_vals[i];
+    }
+}
 
-    for i in 1..uvs.len() {
-        let prev_u = uvs[i - 1].x;
-        let curr_u = uvs[i].x + offset;
+/// Unwrap both u and v angular coordinates for surfaces where both are angular
+/// (e.g. torus where both major and minor angles can have ±π discontinuities).
+fn unwrap_angular_coords_both(uvs: &mut [Point2<f64>]) {
+    if uvs.len() < 2 {
+        return;
+    }
 
-        // Check if we crossed the ±π boundary
-        let diff = curr_u - prev_u;
-        if diff > std::f64::consts::PI {
-            // Jumped from positive to negative (e.g., π to -π)
-            offset -= TAU;
-        } else if diff < -std::f64::consts::PI {
-            // Jumped from negative to positive (e.g., -π to π)
-            offset += TAU;
-        }
-
-        uvs[i].x += offset;
+    let mut u_vals: Vec<f64> = vec![0.0; uvs.len()];
+    let mut v_vals: Vec<f64> = vec![0.0; uvs.len()];
+    unwrap_angular_sequence(uvs.iter().map(|p| p.x), &mut u_vals);
+    unwrap_angular_sequence(uvs.iter().map(|p| p.y), &mut v_vals);
+    for (i, uv) in uvs.iter_mut().enumerate() {
+        uv.x = u_vals[i];
+        uv.y = v_vals[i];
     }
 }
 
@@ -607,6 +714,46 @@ fn merge_near_vertices(
 // ============================================================================
 // Fallbacks for self-intersecting UV boundaries
 // ============================================================================
+
+/// Log a CDT failure case to `/tmp/cdt_failures.jsonl` for diagnosis.
+///
+/// Each line is a JSON object with the face index, surface type, hole count,
+/// error description, 2D points, and contour indices. These can be loaded into
+/// unit tests for fast CDT iteration without needing STEP files.
+#[cfg(test)]
+fn log_cdt_failure(
+    face_idx: usize,
+    surface_type: &str,
+    holes: usize,
+    error: &str,
+    pts: &[(f64, f64)],
+    contours: &[Vec<usize>],
+) {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    static LOG_FILE: Mutex<()> = Mutex::new(());
+
+    let pts_vec: Vec<[f64; 2]> = pts.iter().map(|&(x, y)| [x, y]).collect();
+    let contours_vec: Vec<Vec<usize>> = contours.to_vec();
+    let case = serde_json::json!({
+        "face": format!("face_{}", face_idx),
+        "surface_type": surface_type,
+        "holes": holes,
+        "error": error,
+        "pts": pts_vec,
+        "contours": contours_vec,
+    });
+    let line = format!("{}\n", case);
+    let _guard = LOG_FILE.lock().unwrap();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/cdt_failures.jsonl")
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
 
 /// Check if all edges from all contours (outer + holes) are present in the triangulation.
 ///
@@ -1195,18 +1342,10 @@ impl<'a> ShellTessellator<'a> {
     ) -> usize {
         let mut max_kappa = 0.0_f64;
 
-        for face in &self.model.faces {
-            let outer_loop = &self.model.loops[face.outer_loop];
-            let uses_edge = outer_loop.edges.iter().any(|oe| oe.edge == edge_idx);
-
-            let in_inner = face.inner_loops.iter().any(|&inner_idx| {
-                self.model.loops[inner_idx]
-                    .edges
-                    .iter()
-                    .any(|oe| oe.edge == edge_idx)
-            });
-
-            if uses_edge || in_inner {
+        // Use edge_adjacency HashMap for O(1) lookup instead of scanning all faces.
+        if let Some(uses) = self.edge_adjacency.get(&edge_idx) {
+            for eu in uses {
+                let face = &self.model.faces[eu.face_idx];
                 let surface = &self.model.face_surfaces[face.surface];
                 let t_mid = (edge.t_start + edge.t_end) / 2.0;
                 let p_mid = curve.evaluate(t_mid);
@@ -1283,10 +1422,14 @@ impl<'a> ShellTessellator<'a> {
             .map(|&pool_idx| surface.to_parametric(&self.vertices[pool_idx]))
             .collect();
 
-        // Unwrap angular coordinates (u/theta) to avoid discontinuities at ±π
-        // This is necessary for cylindrical, conical, spherical, and toroidal surfaces
-        // where the first parametric coordinate is an angle
-        unwrap_angular_coords(&mut raw_uvs);
+        // Unwrap angular coordinates to avoid discontinuities at ±π.
+        // Torus has two angular coordinates (major, minor) that both need unwrapping.
+        // Cylinder, cone, sphere only have one angular coordinate (u/theta/longitude).
+        if surface.is_doubly_angular() {
+            unwrap_angular_coords_both(&mut raw_uvs);
+        } else {
+            unwrap_angular_coords(&mut raw_uvs);
+        }
 
         for (i, &pool_idx) in outer_pool_indices.iter().enumerate() {
             state.add_vertex(raw_uvs[i], pool_idx);
@@ -1329,7 +1472,11 @@ impl<'a> ShellTessellator<'a> {
                 .iter()
                 .map(|&pool_idx| surface.to_parametric(&self.vertices[pool_idx]))
                 .collect();
-            unwrap_angular_coords(&mut inner_uvs);
+            if surface.is_doubly_angular() {
+                unwrap_angular_coords_both(&mut inner_uvs);
+            } else {
+                unwrap_angular_coords(&mut inner_uvs);
+            }
 
             for (i, &pool_idx) in loop_indices.iter().enumerate() {
                 state.add_vertex(inner_uvs[i], pool_idx);
@@ -1406,7 +1553,7 @@ impl<'a> ShellTessellator<'a> {
                     // Map triangles back to original indices using merged_to_original
                     // Use filter_map with bounds checking to avoid panics on invalid indices
                     // Also skip degenerate triangles where merging collapsed two vertices
-                    tris.iter()
+                    let filtered: Vec<[usize; 3]> = tris.iter()
                         .filter_map(|&(a, b, c)| {
                             let orig_a = *merge_result.merged_to_original.get(a)?;
                             let orig_b = *merge_result.merged_to_original.get(b)?;
@@ -1417,36 +1564,50 @@ impl<'a> ShellTessellator<'a> {
                             }
                             Some([orig_a, orig_b, orig_c])
                         })
-                        .collect()
-                }
-                Err(_cdt_err) => {
-                    // CDT failed - likely due to self-intersecting UV boundary
-                    // Fall back to plane projection triangulation using ONLY boundary points
-                    // (interior points cause issues with unconstrained Delaunay)
-                    let pts_3d: Vec<Point3<f64>> = state
-                        .local_to_pool
-                        .iter()
-                        .take(boundary_len) // Only boundary points
-                        .map(|&pool_idx| self.vertices[pool_idx])
                         .collect();
 
-                    // Rebuild contours to only reference boundary indices
-                    let boundary_contours: Vec<Vec<usize>> = contours.clone();
-
-                    if let Ok(tris) = triangulate_with_plane_projection(
-                        &pts_3d,
-                        &boundary_contours,
-                        self.params.merge_tolerance,
-                    ) {
-                        tris.iter().map(|&(a, b, c)| [a, b, c]).collect()
+                    // Validate all contour edges are present in the triangulation.
+                    // Merging may have collapsed boundary vertices, creating edges
+                    // that don't match their neighbors.
+                    let as_tuples: Vec<(usize, usize, usize)> = filtered.iter()
+                        .map(|t| (t[0], t[1], t[2])).collect();
+                    if check_all_contour_edges_present(&as_tuples, &contours) {
+                        filtered
                     } else {
-                        // Both UV and plane projection triangulation failed
-                        // Suppress unused variable warning
-                        let _ = face_idx;
+                        #[cfg(test)]
+                        log_cdt_failure(face_idx, surface.kind_name(), face.inner_loops.len(),
+                            "boundary_check_failed", &merged_pts_tuples, &merge_result.merged_contours);
+                        // CDT succeeded but boundary not preserved — fall through to fallback
                         Vec::new()
                     }
                 }
+                Err(_cdt_err) => {
+                    #[cfg(test)]
+                    log_cdt_failure(face_idx, surface.kind_name(), face.inner_loops.len(),
+                        &format!("{_cdt_err}"), &merged_pts_tuples, &merge_result.merged_contours);
+                    // CDT failed — fall through to recovery below
+                    Vec::new()
+                }
             };
+
+        // Recovery: if CDT produced no triangles (either CDT failed, or boundary
+        // validation failed), try plane projection then fan triangulation.
+        if state.triangles.is_empty() && boundary_len >= 3 {
+            // Try plane projection with all points (boundary + interior)
+            let pts_3d: Vec<Point3<f64>> = state
+                .local_to_pool
+                .iter()
+                .map(|&pool_idx| self.vertices[pool_idx])
+                .collect();
+
+            if let Ok(tris) = triangulate_with_plane_projection(
+                &pts_3d,
+                &contours,
+                self.params.merge_tolerance,
+            ) {
+                state.triangles = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
+            }
+        }
 
         state
     }
@@ -1478,7 +1639,14 @@ impl<'a> ShellTessellator<'a> {
             })
             .collect();
 
-        let mut prev_edge_count = usize::MAX;
+        // Build edge→triangle adjacency maps for Phase 3 refinement.
+        // Build for ALL faces, not just non-planar, because planar neighbors
+        // of curved faces also get split when sharing BREP boundary edges.
+        for state in &mut self.face_states {
+            state.build_edge_tris();
+        }
+
+        let mut prev_max_error = f64::MAX;
 
         for _iteration in 0..MAX_ITERATIONS {
             // Safety: bail if we've exceeded the vertex budget
@@ -1489,6 +1657,7 @@ impl<'a> ShellTessellator<'a> {
             // 3a. Collect all edges needing refinement from faces in the work set
             // Map: (pool_a, pool_b) -> first face_idx that requested it (for UV computation)
             let mut edges_to_refine: HashMap<(usize, usize), usize> = HashMap::new();
+            let mut iteration_max_error = 0.0_f64;
 
             for &face_idx in &faces_to_check {
                 let state = &self.face_states[face_idx];
@@ -1508,6 +1677,9 @@ impl<'a> ShellTessellator<'a> {
                     let error = self.check_triangle_error_state(face_idx, state, tri, &positions);
 
                     if error.needs_subdivision {
+                        iteration_max_error =
+                            iteration_max_error.max(error.max_edge_midpoint_error);
+
                         // Find the edge with maximum error
                         let (local_a, local_b) = match error.max_error_edge {
                             0 => (tri[0], tri[1]),
@@ -1529,12 +1701,11 @@ impl<'a> ShellTessellator<'a> {
                 break;
             }
 
-            // No-progress bail: if edges_to_refine count hasn't decreased, stop
-            let edge_count = edges_to_refine.len();
-            if edge_count >= prev_edge_count {
+            // Error-based bail: stop if max error didn't decrease by at least 50%
+            if iteration_max_error > prev_max_error * 0.5 {
                 break;
             }
-            prev_edge_count = edge_count;
+            prev_max_error = iteration_max_error;
 
             // Track which faces get modified for next iteration
             let mut modified_faces: HashSet<usize> = HashSet::new();
@@ -1595,10 +1766,20 @@ impl<'a> ShellTessellator<'a> {
                     }
                 }
 
+                // Verify all faces have both endpoints before splitting.
+                // If any face is missing an endpoint, skip this edge entirely
+                // to prevent T-junctions from partial splits.
+                let all_faces_have_edge = faces_to_update.iter().all(|&fi| {
+                    let s = &self.face_states[fi];
+                    s.get_local(pool_a).is_some() && s.get_local(pool_b).is_some()
+                });
+                if !all_faces_have_edge {
+                    continue;
+                }
+
                 // Split the edge in ALL faces that use it
                 for &face_idx in &faces_to_update {
                     let _success = self.split_edge_in_face(face_idx, pool_a, pool_b, pool_mid);
-                    // If split fails, the warning was already logged in split_edge_in_face
 
                     // Track modified faces for next iteration (only non-planar ones)
                     let face = &self.model.faces[face_idx];
@@ -1740,20 +1921,9 @@ impl<'a> ShellTessellator<'a> {
             state.mark_boundary_edge(local_mid, local_b);
         }
 
-        // Split triangles that use this edge
-        let mut new_triangles = Vec::new();
-        state.triangles.retain(|tri| {
-            if let Some(split_tris) = try_split_triangle(tri, local_a, local_b, local_mid) {
-                new_triangles.extend(split_tris);
-                false // Remove original triangle
-            } else {
-                true // Keep triangle
-            }
-        });
-        state.triangles.extend(new_triangles);
+        // Split triangles using edge_tris adjacency map (O(1) lookup, not O(T) scan).
+        state.split_triangles_at_edge(local_a, local_b, local_mid);
 
-        // Suppress unused variable warning
-        let _ = surface;
         true
     }
 
@@ -1770,11 +1940,13 @@ impl<'a> ShellTessellator<'a> {
             let face = &self.model.faces[face_idx];
             let surface = &self.model.face_surfaces[face.surface];
 
-            // Update normals for all vertices used by this face
+            // Accumulate normals from all contributing faces.
+            // Shared vertices get averaged normals for smooth shading across face boundaries.
             for (local_idx, uv) in state.vertices_uv.iter().enumerate() {
                 let pool_idx = state.local_to_pool[local_idx];
                 let n = surface.normal_at(uv.x, uv.y);
-                self.normals[pool_idx] = if face.same_sense { n } else { -n };
+                let signed_n = if face.same_sense { n } else { -n };
+                self.normals[pool_idx] += signed_n;
             }
 
             // Convert local triangles to pool indices
@@ -1795,6 +1967,14 @@ impl<'a> ShellTessellator<'a> {
                 };
                 self.triangles.push(pool_tri);
                 self.face_indices.push(face_idx);
+            }
+        }
+
+        // Normalize accumulated normals
+        for n in &mut self.normals {
+            let len = n.norm();
+            if len > 1e-12 {
+                *n /= len;
             }
         }
     }
@@ -1850,31 +2030,6 @@ impl<'a> ShellTessellator<'a> {
         )
         .expect("tessellation produced valid mesh")
     }
-}
-
-/// Try to split a triangle by inserting a midpoint on an edge.
-/// Returns Some(two new triangles) if the triangle uses the edge, None otherwise.
-fn try_split_triangle(
-    tri: &[usize; 3],
-    local_a: usize,
-    local_b: usize,
-    local_mid: usize,
-) -> Option<[[usize; 3]; 2]> {
-    // Check each edge of the triangle
-    for i in 0..3 {
-        let v0 = tri[i];
-        let v1 = tri[(i + 1) % 3];
-        let v_opposite = tri[(i + 2) % 3];
-
-        // Check if this edge matches (in either direction)
-        if (v0 == local_a && v1 == local_b) || (v0 == local_b && v1 == local_a) {
-            // Split the triangle into two
-            // Original: v0 -> v1 -> v_opposite
-            // New: v0 -> mid -> v_opposite, mid -> v1 -> v_opposite
-            return Some([[v0, local_mid, v_opposite], [local_mid, v1, v_opposite]]);
-        }
-    }
-    None
 }
 
 impl BrepModel {

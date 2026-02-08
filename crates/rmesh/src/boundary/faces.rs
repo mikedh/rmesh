@@ -368,8 +368,11 @@ impl Torus {
     }
 }
 
-/// A B-spline surface in 3D space.
+/// A B-spline surface in 3D space (optionally rational / NURBS).
 /// Uses De Boor's algorithm for evaluation (Algorithm A3.5 from "The NURBS Book").
+/// When `weights` is `Some`, the surface is rational (NURBS) and the
+/// evaluation uses the weighted formula:
+///   S(u,v) = Σ(w_ij * N_i(u) * M_j(v) * P_ij) / Σ(w_ij * N_i(u) * M_j(v))
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceBSpline {
     /// Polynomial degree in U direction
@@ -383,10 +386,15 @@ pub struct SurfaceBSpline {
     pub u_knots: Vec<f64>,
     /// Knot vector in V direction (length = control_points[0].len() + v_degree + 1)
     pub v_knots: Vec<f64>,
+    /// Optional weights grid for rational B-spline (NURBS).
+    /// When present, dimensions must match control_points.
+    pub weights: Option<Vec<Vec<f64>>>,
 }
 
 impl SurfaceBSpline {
     /// Create a B-spline surface from STEP-style multiplicities.
+    /// `weights` is `Some` for rational B-spline surfaces (NURBS).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_multiplicities(
         u_degree: usize,
         v_degree: usize,
@@ -395,6 +403,7 @@ impl SurfaceBSpline {
         u_multiplicities: &[usize],
         v_knot_values: &[f64],
         v_multiplicities: &[usize],
+        weights: Option<Vec<Vec<f64>>>,
     ) -> Self {
         let expand_knots = |values: &[f64], mults: &[usize]| -> Vec<f64> {
             values
@@ -410,6 +419,7 @@ impl SurfaceBSpline {
             control_points,
             u_knots: expand_knots(u_knot_values, u_multiplicities),
             v_knots: expand_knots(v_knot_values, v_multiplicities),
+            weights,
         }
     }
 
@@ -499,7 +509,7 @@ impl SurfaceBSpline {
     }
 
     /// Evaluate the surface at parameters (u, v).
-    /// Algorithm A3.5 from "The NURBS Book".
+    /// Algorithm A3.5 from "The NURBS Book" (extended for rational/NURBS).
     #[allow(clippy::needless_range_loop)]
     pub fn evaluate(&self, u: f64, v: f64) -> Point3<f64> {
         let uspan = self.find_u_span(u);
@@ -512,20 +522,35 @@ impl SurfaceBSpline {
         let q = self.v_degree;
         let uind = uspan - p;
 
-        let mut s = Point3::origin();
-        for l in 0..=q {
-            let mut temp = Vector3::zeros();
-            let vind = vspan - q + l;
-            for k in 0..=p {
-                temp += nu[k] * self.control_points[uind + k][vind].coords;
+        if let Some(ref weights) = self.weights {
+            let mut numerator = Vector3::zeros();
+            let mut denominator = 0.0;
+            for l in 0..=q {
+                let vind = vspan - q + l;
+                for k in 0..=p {
+                    let wn = weights[uind + k][vind] * nu[k] * nv[l];
+                    numerator += wn * self.control_points[uind + k][vind].coords;
+                    denominator += wn;
+                }
             }
-            s.coords += nv[l] * temp;
+            Point3::from(numerator / denominator)
+        } else {
+            let mut s = Point3::origin();
+            for l in 0..=q {
+                let mut temp = Vector3::zeros();
+                let vind = vspan - q + l;
+                for k in 0..=p {
+                    temp += nu[k] * self.control_points[uind + k][vind].coords;
+                }
+                s.coords += nv[l] * temp;
+            }
+            s
         }
-        s
     }
 
     /// Compute the partial derivatives at (u, v).
     /// Returns (dS/du, dS/dv) - the first partial derivatives.
+    /// For rational (NURBS) surfaces, uses the quotient rule.
     #[allow(clippy::needless_range_loop)]
     pub fn derivatives(&self, u: f64, v: f64) -> (Vector3<f64>, Vector3<f64>) {
         let uspan = self.find_u_span(u);
@@ -542,29 +567,67 @@ impl SurfaceBSpline {
         let q = self.v_degree;
         let uind = uspan - p;
 
-        // Compute dS/du
-        let mut du = Vector3::zeros();
-        for l in 0..=q {
-            let mut temp = Vector3::zeros();
-            let vind = vspan - q + l;
-            for k in 0..=p {
-                temp += nu_der[1][k] * self.control_points[uind + k][vind].coords;
-            }
-            du += nv[l] * temp;
-        }
+        if let Some(ref weights) = self.weights {
+            // For rational surfaces, we need: A(u,v) = Σ w_ij N_i M_j P_ij
+            //                                  w(u,v) = Σ w_ij N_i M_j
+            // S = A/w, dS/du = (dA/du - dw/du * S) / w
+            let mut a = Vector3::zeros();
+            let mut a_du = Vector3::zeros();
+            let mut a_dv = Vector3::zeros();
+            let mut w = 0.0;
+            let mut w_du = 0.0;
+            let mut w_dv = 0.0;
 
-        // Compute dS/dv
-        let mut dv = Vector3::zeros();
-        for l in 0..=q {
-            let mut temp = Vector3::zeros();
-            let vind = vspan - q + l;
-            for k in 0..=p {
-                temp += nu[k] * self.control_points[uind + k][vind].coords;
-            }
-            dv += nv_der[1][l] * temp;
-        }
+            for l in 0..=q {
+                let vind = vspan - q + l;
+                for k in 0..=p {
+                    let wt = weights[uind + k][vind];
+                    let pt = self.control_points[uind + k][vind].coords;
+                    let wpt = wt * pt;
 
-        (du, dv)
+                    let n0m0 = nu[k] * nv[l];
+                    let n1m0 = nu_der[1][k] * nv[l];
+                    let n0m1 = nu[k] * nv_der[1][l];
+
+                    a += n0m0 * wpt;
+                    a_du += n1m0 * wpt;
+                    a_dv += n0m1 * wpt;
+
+                    w += wt * n0m0;
+                    w_du += wt * n1m0;
+                    w_dv += wt * n0m1;
+                }
+            }
+
+            let s = a / w;
+            let du = (a_du - w_du * s) / w;
+            let dv = (a_dv - w_dv * s) / w;
+            (du, dv)
+        } else {
+            // Compute dS/du
+            let mut du = Vector3::zeros();
+            for l in 0..=q {
+                let mut temp = Vector3::zeros();
+                let vind = vspan - q + l;
+                for k in 0..=p {
+                    temp += nu_der[1][k] * self.control_points[uind + k][vind].coords;
+                }
+                du += nv[l] * temp;
+            }
+
+            // Compute dS/dv
+            let mut dv = Vector3::zeros();
+            for l in 0..=q {
+                let mut temp = Vector3::zeros();
+                let vind = vspan - q + l;
+                for k in 0..=p {
+                    temp += nu[k] * self.control_points[uind + k][vind].coords;
+                }
+                dv += nv_der[1][l] * temp;
+            }
+
+            (du, dv)
+        }
     }
 
     /// Compute basis function derivatives (Algorithm A2.3).
@@ -908,6 +971,14 @@ impl Surface {
         )
     }
 
+    /// Whether both parametric coordinates are angular (can have ±π discontinuities).
+    ///
+    /// Torus has (major_angle, minor_angle) — both are atan2 outputs in [-π, π].
+    /// Other angular surfaces only have one angular coordinate (u/theta).
+    pub fn is_doubly_angular(&self) -> bool {
+        matches!(self, Surface::Torus(_))
+    }
+
     /// Whether this is a planar surface (no subdivision needed).
     pub fn is_planar(&self) -> bool {
         matches!(self, Surface::Plane(_))
@@ -954,7 +1025,7 @@ impl Surface {
         let v_span = v_max - v_min;
 
         // Grid size bounds
-        const N_MIN: usize = 3; // Minimum for robustness (ensures CDT has 2D point cloud)
+        const N_MIN: usize = 1; // Curvature drives density; Phase 3 fills in as needed
         const N_MAX: usize = 8; // Maximum to avoid excessive triangles
 
         // Additional density from curvature for quality
@@ -969,6 +1040,8 @@ impl Surface {
             (0, 0)
         };
 
+        // N_MIN=1 lets curvature drive the grid — near-flat curved surfaces
+        // get fewer interior points, with Phase 3 refinement filling in as needed.
         let n_u = N_MIN.max(n_u_curv).min(N_MAX);
         let n_v = N_MIN.max(n_v_curv).min(N_MAX);
 
@@ -1140,6 +1213,7 @@ mod tests {
                 ],
                 u_knots: vec![0.0, 0.0, 1.0, 1.0],
                 v_knots: vec![0.0, 0.0, 1.0, 1.0],
+                weights: None,
             })
             .kind_name(),
             "BSpline"
@@ -1162,6 +1236,7 @@ mod tests {
             ],
             u_knots: vec![0.0, 0.0, 1.0, 1.0],
             v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            weights: None,
         };
 
         // Test corner points
@@ -1200,6 +1275,7 @@ mod tests {
             ],
             u_knots: vec![0.0, 0.0, 1.0, 1.0],
             v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            weights: None,
         };
 
         // Test that parameter_at inverts evaluate
@@ -1225,6 +1301,7 @@ mod tests {
             ],
             u_knots: vec![0.0, 0.0, 1.0, 1.0],
             v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            weights: None,
         };
 
         let normal = surface.normal_at(0.5, 0.5);
@@ -1365,6 +1442,7 @@ mod tests {
             ],
             u_knots: vec![0.0, 0.0, 1.0, 1.0],
             v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            weights: None,
         };
 
         // For a bilinear surface, the second derivatives are zero
