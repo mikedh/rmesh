@@ -45,6 +45,26 @@ use super::{
 use crate::geometry::Geometry;
 use crate::scene::Scene;
 
+/// Find a sub-entity of a given variant inside a complex entity's sub-entity slice.
+///
+/// Returns `Option<&T>` where `T` is the inner data of the matched `Entity` variant.
+///
+/// # Example
+/// ```ignore
+/// let knots = find_sub!(subs, BSplineCurveWithKnots);
+/// ```
+macro_rules! find_sub {
+    ($subs:expr, $variant:ident) => {
+        $subs.iter().find_map(|e| {
+            if let ap214::Entity::$variant(x) = e {
+                Some(x)
+            } else {
+                None
+            }
+        })
+    };
+}
+
 /// Error type for STEP file parsing and conversion.
 #[derive(Debug)]
 pub enum StepError {
@@ -112,29 +132,38 @@ impl RepGraph {
         let mut rrwt_pairs: HashSet<(usize, usize)> = HashSet::new();
         let mut geometry_for: HashMap<usize, Vec<usize>> = HashMap::new();
 
-        // Pass 1: collect RRWT edges (directed transform tree)
+        // Collect RRWT tree edges and SRR geometry links in a single pass.
+        // SRR candidates are deferred because the rrwt_pairs filter needs all
+        // RRWT edges first (an SRR may precede its matching RRWT in entity order).
+        let mut srr_candidates: Vec<(usize, usize)> = Vec::new();
+
         for entity in &step.entities {
-            if let ap214::Entity::RepresentationRelationshipWithTransformation(rrwt) = entity {
-                let parent = rrwt.rep_1.index();
-                let child = rrwt.rep_2.index();
-                let tf = item_defined_transform(step, rrwt.transformation_operator.index())
-                    .unwrap_or_else(|_| Matrix4::identity());
-                children.entry(parent).or_default().push((child, tf));
-                incoming.insert(child);
-                outgoing.insert(parent);
-                rrwt_pairs.insert((parent, child));
+            match entity {
+                ap214::Entity::RepresentationRelationshipWithTransformation(rrwt) => {
+                    let parent = rrwt.rep_1.index();
+                    let child = rrwt.rep_2.index();
+                    let tf = item_defined_transform(step, rrwt.transformation_operator.index())
+                        .unwrap_or_else(|e| {
+                            eprintln!("warning: transform extraction failed, using identity: {e}");
+                            Matrix4::identity()
+                        });
+                    children.entry(parent).or_default().push((child, tf));
+                    incoming.insert(child);
+                    outgoing.insert(parent);
+                    rrwt_pairs.insert((parent, child));
+                }
+                ap214::Entity::ShapeRepresentationRelationship(srr) => {
+                    srr_candidates.push((srr.rep_1.index(), srr.rep_2.index()));
+                }
+                _ => {}
             }
         }
 
-        // Pass 2: collect standalone SRR links (geometry lookup, not tree edges)
-        for entity in &step.entities {
-            if let ap214::Entity::ShapeRepresentationRelationship(srr) = entity {
-                let a = srr.rep_1.index();
-                let b = srr.rep_2.index();
-                if !rrwt_pairs.contains(&(a, b)) {
-                    geometry_for.entry(a).or_default().push(b);
-                    geometry_for.entry(b).or_default().push(a);
-                }
+        // Now filter SRR candidates against rrwt_pairs collected above
+        for (a, b) in srr_candidates {
+            if !rrwt_pairs.contains(&(a, b)) {
+                geometry_for.entry(a).or_default().push(b);
+                geometry_for.entry(b).or_default().push(a);
             }
         }
 
@@ -286,7 +315,7 @@ fn extract_length_scale(step: &StepFile<'_>) -> f64 {
                         return lm.0;
                     }
                     if let ap214::MeasureValue::PositiveLengthMeasure(plm) = &mwu.value_component {
-                        return (plm.0).0 .0;
+                        return (plm.0).0.0;
                     }
                 }
             }
@@ -318,7 +347,11 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
                 && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
             {
                 brep.length_scale = length_scale;
-                Some((name.clone(), Geometry::Brep(Box::new(brep)), transforms.clone()))
+                Some((
+                    name.clone(),
+                    Geometry::Brep(Box::new(brep)),
+                    transforms.clone(),
+                ))
             } else {
                 None
             }
@@ -334,7 +367,10 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
 }
 
 /// Flat fallback for single-body STEP files with no representation relationships.
-fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>, length_scale: f64) -> Result<Scene, StepError> {
+fn convert_to_scene_flat<'a>(
+    step: &'a StepFile<'a>,
+    length_scale: f64,
+) -> Result<Scene, StepError> {
     // Collect all (name, msb) pairs to convert in parallel.
     let mut work: Vec<(String, &ap214::ManifoldSolidBrep_<'a>)> = Vec::new();
     for (id, entity) in step.entities.iter().enumerate() {
@@ -377,8 +413,6 @@ fn convert_manifold_solid_brep<'a>(
     // Maps from STEP entity IDs to our indices
     let mut vertex_map: HashMap<usize, usize> = HashMap::new();
     let mut edge_map: HashMap<usize, usize> = HashMap::new();
-    let mut loop_map: HashMap<usize, usize> = HashMap::new();
-    let mut face_map: HashMap<usize, usize> = HashMap::new();
     let mut curve_map: HashMap<usize, usize> = HashMap::new();
     let mut surface_map: HashMap<usize, usize> = HashMap::new();
 
@@ -398,12 +432,10 @@ fn convert_manifold_solid_brep<'a>(
             face_id.index(),
             &mut vertex_map,
             &mut edge_map,
-            &mut loop_map,
             &mut curve_map,
             &mut surface_map,
         ) {
             Ok(face_idx) => {
-                face_map.insert(face_id.index(), face_idx);
                 face_indices.push(face_idx);
             }
             Err(StepError::UnsupportedEntity(_)) => {
@@ -428,7 +460,6 @@ fn convert_face<'a>(
     face_id: usize,
     vertex_map: &mut HashMap<usize, usize>,
     edge_map: &mut HashMap<usize, usize>,
-    loop_map: &mut HashMap<usize, usize>,
     curve_map: &mut HashMap<usize, usize>,
     surface_map: &mut HashMap<usize, usize>,
 ) -> Result<usize, StepError> {
@@ -464,7 +495,6 @@ fn convert_face<'a>(
         };
 
         let loop_idx = convert_loop(step, model, loop_id, vertex_map, edge_map, curve_map)?;
-        loop_map.insert(loop_id, loop_idx);
 
         if is_outer && outer_loop_idx.is_none() {
             outer_loop_idx = Some(loop_idx);
@@ -792,9 +822,7 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
                 None,
             )))
         }
-        ap214::Entity::ComplexEntity(subs) => {
-            convert_complex_curve(step, curve_id, subs)
-        }
+        ap214::Entity::ComplexEntity(subs) => convert_complex_curve(step, curve_id, subs),
         _ => Err(StepError::UnsupportedEntity(format!(
             "Unsupported curve type at #{}",
             curve_id
@@ -813,51 +841,26 @@ fn convert_complex_curve(
     subs: &[ap214::Entity<'_>],
 ) -> Result<Curve, StepError> {
     // Find the BSplineCurveWithKnots sub-entity (has knots + multiplicities)
-    let bspline_knots = subs
-        .iter()
-        .find_map(|e| {
-            if let ap214::Entity::BSplineCurveWithKnots(b) = e {
-                Some(b)
-            } else {
-                None
-            }
-        });
+    let bspline_knots = find_sub!(subs, BSplineCurveWithKnots);
 
     // Find the BSplineCurve sub-entity (has degree + control points)
-    let bspline_base = subs
-        .iter()
-        .find_map(|e| {
-            if let ap214::Entity::BSplineCurve(b) = e {
-                Some(b)
-            } else {
-                None
-            }
-        });
+    let bspline_base = find_sub!(subs, BSplineCurve);
 
     // Find optional RationalBSplineCurve sub-entity (has weights)
-    let rational = subs
-        .iter()
-        .find_map(|e| {
-            if let ap214::Entity::RationalBSplineCurve(r) = e {
-                Some(r)
-            } else {
-                None
-            }
-        });
+    let rational = find_sub!(subs, RationalBSplineCurve);
 
     // We need either the WithKnots variant (which has everything) or both base + knots
-    let (degree, control_point_ids, knot_values, multiplicities) =
-        if let Some(bk) = bspline_knots {
-            let degree = bk.degree as usize;
-            let knot_values: Vec<f64> = bk.knots.iter().map(|k| k.0).collect();
-            let multiplicities: Vec<usize> =
-                bk.knot_multiplicities.iter().map(|&m| m as usize).collect();
-            (degree, &bk.control_points_list, knot_values, multiplicities)
-        } else {
-            return Err(StepError::UnsupportedEntity(format!(
-                "Complex curve at #{entity_id} missing BSplineCurveWithKnots"
-            )));
-        };
+    let (degree, control_point_ids, knot_values, multiplicities) = if let Some(bk) = bspline_knots {
+        let degree = bk.degree as usize;
+        let knot_values: Vec<f64> = bk.knots.iter().map(|k| k.0).collect();
+        let multiplicities: Vec<usize> =
+            bk.knot_multiplicities.iter().map(|&m| m as usize).collect();
+        (degree, &bk.control_points_list, knot_values, multiplicities)
+    } else {
+        return Err(StepError::UnsupportedEntity(format!(
+            "Complex curve at #{entity_id} missing BSplineCurveWithKnots"
+        )));
+    };
 
     // Use control points from the WithKnots entity (it inherits them from BSplineCurve)
     // but if BSplineCurve has them and WithKnots doesn't, fall back
@@ -877,7 +880,13 @@ fn convert_complex_curve(
         .collect();
     let control_points = control_points?;
 
-    validate_bspline_knots(entity_id, degree, control_points.len(), &knot_values, &multiplicities)?;
+    validate_bspline_knots(
+        entity_id,
+        degree,
+        control_points.len(),
+        &knot_values,
+        &multiplicities,
+    )?;
 
     let weights = rational.map(|r| r.weights_data.clone());
 
@@ -895,7 +904,7 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
     match &step.entities[surface_id] {
         ap214::Entity::Plane(plane) => {
             let (origin, normal, _) = convert_axis2_placement_3d(step, plane.position.index())?;
-            Ok(Surface::Plane(SurfacePlane { origin, normal }))
+            Ok(Surface::Plane(SurfacePlane::new(origin, normal)))
         }
         ap214::Entity::CylindricalSurface(cyl) => {
             let (origin, axis, _) = convert_axis2_placement_3d(step, cyl.position.index())?;
@@ -907,11 +916,7 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
         }
         ap214::Entity::ConicalSurface(cone) => {
             let (apex, axis, _) = convert_axis2_placement_3d(step, cone.position.index())?;
-            Ok(Surface::Cone(Cone::new(
-                apex,
-                axis,
-                cone.semi_angle.0,
-            )))
+            Ok(Surface::Cone(Cone::new(apex, axis, cone.semi_angle.0)))
         }
         ap214::Entity::SphericalSurface(sphere) => {
             let (center, _, _) = convert_axis2_placement_3d(step, sphere.position.index())?;
@@ -930,9 +935,7 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
             )))
         }
         ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf, None),
-        ap214::Entity::ComplexEntity(subs) => {
-            convert_complex_surface(step, surface_id, subs)
-        }
+        ap214::Entity::ComplexEntity(subs) => convert_complex_surface(step, surface_id, subs),
         _ => Err(StepError::UnsupportedEntity(format!(
             "Unsupported surface type at #{}",
             surface_id
@@ -952,26 +955,10 @@ fn convert_complex_surface(
     subs: &[ap214::Entity<'_>],
 ) -> Result<Surface, StepError> {
     // Find the BSplineSurfaceWithKnots sub-entity
-    let bspline_knots = subs
-        .iter()
-        .find_map(|e| {
-            if let ap214::Entity::BSplineSurfaceWithKnots(b) = e {
-                Some(b)
-            } else {
-                None
-            }
-        });
+    let bspline_knots = find_sub!(subs, BSplineSurfaceWithKnots);
 
     // Find optional RationalBSplineSurface sub-entity (has weights)
-    let rational = subs
-        .iter()
-        .find_map(|e| {
-            if let ap214::Entity::RationalBSplineSurface(r) = e {
-                Some(r)
-            } else {
-                None
-            }
-        });
+    let rational = find_sub!(subs, RationalBSplineSurface);
 
     if let Some(bk) = bspline_knots {
         let weights = rational.map(|r| r.weights_data.clone());
@@ -1025,6 +1012,19 @@ fn convert_bspline_surface(
     Ok(Surface::BSpline(surface))
 }
 
+/// Compute a default X axis perpendicular to the given Z axis.
+///
+/// Picks a seed vector (`X` or `Y`) that is far from parallel to `z`,
+/// then uses a double cross-product to obtain a unit vector in the plane
+/// perpendicular to `z`.
+fn default_x_axis(z: &Vector3<f64>) -> Vector3<f64> {
+    if z.x.abs() < 0.9 {
+        z.cross(&Vector3::x()).cross(z).normalize()
+    } else {
+        z.cross(&Vector3::y()).cross(z).normalize()
+    }
+}
+
 /// Convert an AXIS2_PLACEMENT_3D to (origin, z_axis, x_axis)
 ///
 /// The z_axis and x_axis are guaranteed to be orthonormal after this conversion.
@@ -1063,21 +1063,13 @@ fn convert_axis2_placement_3d(
         let norm = x_orthogonal.norm();
         if norm < 1e-14 {
             // ref_direction is parallel to z_axis - fall back to default
-            if z_axis.x.abs() < 0.9 {
-                z_axis.cross(&Vector3::x()).cross(&z_axis).normalize()
-            } else {
-                z_axis.cross(&Vector3::y()).cross(&z_axis).normalize()
-            }
+            default_x_axis(&z_axis)
         } else {
             x_orthogonal / norm
         }
     } else {
         // Default X axis perpendicular to Z
-        if z_axis.x.abs() < 0.9 {
-            z_axis.cross(&Vector3::x()).cross(&z_axis).normalize()
-        } else {
-            z_axis.cross(&Vector3::y()).cross(&z_axis).normalize()
-        }
+        default_x_axis(&z_axis)
     };
 
     Ok((origin, z_axis, x_axis))
@@ -1108,10 +1100,8 @@ fn placement_to_matrix(step: &StepFile<'_>, id: usize) -> Result<Matrix4<f64>, S
     let (origin, z, x) = convert_axis2_placement_3d(step, id)?;
     let y = z.cross(&x);
     Ok(Matrix4::new(
-        x.x, y.x, z.x, origin.x,
-        x.y, y.y, z.y, origin.y,
-        x.z, y.z, z.z, origin.z,
-        0.0, 0.0, 0.0, 1.0,
+        x.x, y.x, z.x, origin.x, x.y, y.y, z.y, origin.y, x.z, y.z, z.z, origin.z, 0.0, 0.0, 0.0,
+        1.0,
     ))
 }
 
@@ -1130,7 +1120,11 @@ fn item_defined_transform(step: &StepFile<'_>, idt_id: usize) -> Result<Matrix4<
     };
     let t1 = placement_to_matrix(step, idt.transform_item_1.index())?;
     let t2 = placement_to_matrix(step, idt.transform_item_2.index())?;
-    Ok(t2 * t1.try_inverse().unwrap_or_else(Matrix4::identity))
+    Ok(t2
+        * t1.try_inverse().unwrap_or_else(|| {
+            eprintln!("warning: singular placement matrix at #{idt_id}, using identity");
+            Matrix4::identity()
+        }))
 }
 
 #[cfg(test)]
@@ -1432,8 +1426,8 @@ mod tests {
     #[test]
     fn test_rosetta_featuretype_via_load_pipeline() {
         use crate::boundary::tesselate::TesselationParams;
-        use crate::exchange::{FileType, load};
         use crate::exchange::gltf::GltfLoader;
+        use crate::exchange::{FileType, load};
         use crate::mesh::Trimesh;
 
         let step_data = include_bytes!("../../../../../test/data/featuretype.STEP");
@@ -1471,7 +1465,10 @@ mod tests {
         let tess_mesh = brep.tesselate(&params);
 
         // Must be watertight
-        assert!(tess_mesh.is_watertight(), "Mesh from load pipeline must be watertight");
+        assert!(
+            tess_mesh.is_watertight(),
+            "Mesh from load pipeline must be watertight"
+        );
 
         // Load reference GLB and compare
         let glb_data = include_bytes!("../../../../../test/data/featuretype.glb");
@@ -1503,8 +1500,8 @@ mod tests {
         let (tess_min, tess_max) = tess_mesh.bounds().expect("tessellated mesh has no bounds");
         let (ref_min, ref_max) = reference.bounds().expect("reference mesh has no bounds");
 
-        let tess_size = (tess_max.x - tess_min.x)
-            .max((tess_max.y - tess_min.y).max(tess_max.z - tess_min.z));
+        let tess_size =
+            (tess_max.x - tess_min.x).max((tess_max.y - tess_min.y).max(tess_max.z - tess_min.z));
         let ref_size =
             (ref_max.x - ref_min.x).max((ref_max.y - ref_min.y).max(ref_max.z - ref_min.z));
         let scale = ref_size / tess_size;
@@ -1576,9 +1573,7 @@ mod tests {
         );
 
         // At least some instance nodes should have non-identity transforms
-        let has_transforms = scene.graph.nodes[1..]
-            .iter()
-            .any(|n| n.transform.is_some());
+        let has_transforms = scene.graph.nodes[1..].iter().any(|n| n.transform.is_some());
         assert!(has_transforms, "Instance nodes should have transforms");
 
         println!("\n=== box_sides assembly test passed ===");
@@ -1615,11 +1610,7 @@ mod tests {
                     mesh.faces.len(),
                     mesh.is_watertight(),
                 );
-                assert!(
-                    mesh.is_watertight(),
-                    "Mesh '{}' must be watertight",
-                    name
-                );
+                assert!(mesh.is_watertight(), "Mesh '{}' must be watertight", name);
                 total_verts += mesh.vertices.len();
                 total_tris += mesh.faces.len();
             }
@@ -1704,7 +1695,12 @@ mod tests {
                 .par_iter()
                 .map(|brep| {
                     let mesh = brep.tesselate(&params);
-                    (brep.faces.len(), mesh.vertices.len(), mesh.faces.len(), mesh.is_watertight())
+                    (
+                        brep.faces.len(),
+                        mesh.vertices.len(),
+                        mesh.faces.len(),
+                        mesh.is_watertight(),
+                    )
                 })
                 .collect();
             let mut total_faces = 0;
@@ -1716,7 +1712,9 @@ mod tests {
                 total_faces += f;
                 total_verts += v;
                 total_tris += t;
-                if w { wt_pass += 1; }
+                if w {
+                    wt_pass += 1;
+                }
             }
             let tess_us = t.elapsed().as_micros();
 
@@ -1739,7 +1737,17 @@ mod tests {
         println!();
         println!(
             "  {:<15} {:>8} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} {:>7} {:>5}",
-            "file", "bytes", "preproc", "parse", "convert", "tess", "total", "faces", "verts", "tris", "wt"
+            "file",
+            "bytes",
+            "preproc",
+            "parse",
+            "convert",
+            "tess",
+            "total",
+            "faces",
+            "verts",
+            "tris",
+            "wt"
         );
         println!("  {}", "-".repeat(103));
         for r in &results {
@@ -1762,7 +1770,11 @@ mod tests {
         println!();
 
         for r in &results {
-            assert_eq!(r.wt_pass, r.wt_total, "'{}': {}/{} watertight", r.name, r.wt_pass, r.wt_total);
+            assert_eq!(
+                r.wt_pass, r.wt_total,
+                "'{}': {}/{} watertight",
+                r.name, r.wt_pass, r.wt_total
+            );
         }
     }
 
@@ -1812,7 +1824,6 @@ mod tests {
             wt_total: usize,
             ref_verts: usize,
             ref_tris: usize,
-            error: Option<String>,
         }
 
         let mut results = Vec::new();
@@ -1844,7 +1855,6 @@ mod tests {
                         wt_total: 0,
                         ref_verts: 0,
                         ref_tris: 0,
-                        error: Some(format!("convert: {e}")),
                     });
                     continue;
                 }
@@ -1863,30 +1873,16 @@ mod tests {
                     }
                 })
                 .collect();
-            let tess_results: Vec<Result<(usize, usize, usize, bool), (usize, String)>> = breps
+            let tess_results: Vec<(usize, usize, usize, bool)> = breps
                 .par_iter()
                 .map(|brep| {
-                    let result = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| brep.tesselate(&params)),
-                    );
-                    match result {
-                        Ok(mesh) => Ok((
-                            brep.faces.len(),
-                            mesh.vertices.len(),
-                            mesh.faces.len(),
-                            mesh.is_watertight(),
-                        )),
-                        Err(e) => {
-                            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                                s.clone()
-                            } else if let Some(s) = e.downcast_ref::<&str>() {
-                                s.to_string()
-                            } else {
-                                "unknown panic".to_string()
-                            };
-                            Err((brep.faces.len(), format!("PANIC: {msg}")))
-                        }
-                    }
+                    let mesh = brep.tesselate(&params);
+                    (
+                        brep.faces.len(),
+                        mesh.vertices.len(),
+                        mesh.faces.len(),
+                        mesh.is_watertight(),
+                    )
                 })
                 .collect();
 
@@ -1894,23 +1890,14 @@ mod tests {
             let mut total_verts = 0;
             let mut total_tris = 0;
             let mut wt_pass = 0;
-            let mut wt_total = 0;
-            let mut tess_error = None;
+            let wt_total = tess_results.len();
 
-            for r in &tess_results {
-                match r {
-                    Ok((f, v, t, w)) => {
-                        total_faces += f;
-                        total_verts += v;
-                        total_tris += t;
-                        wt_total += 1;
-                        if *w { wt_pass += 1; }
-                    }
-                    Err((f, msg)) => {
-                        total_faces += f;
-                        wt_total += 1;
-                        tess_error = Some(msg.clone());
-                    }
+            for &(f, v, t, w) in &tess_results {
+                total_faces += f;
+                total_verts += v;
+                total_tris += t;
+                if w {
+                    wt_pass += 1;
                 }
             }
             let tess_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -1919,9 +1906,7 @@ mod tests {
             let glb_path = path.with_extension("STEP.glb");
             let (ref_verts, ref_tris) = if glb_path.exists() {
                 let glb_data = std::fs::read(&glb_path).unwrap();
-                match GltfLoader::from_glb(&glb_data)
-                    .and_then(|loader| loader.to_scene())
-                {
+                match GltfLoader::from_glb(&glb_data).and_then(|loader| loader.to_scene()) {
                     Ok(ref_scene) => {
                         let ref_meshes: Vec<&Trimesh> = ref_scene
                             .geometry
@@ -1957,7 +1942,6 @@ mod tests {
                 wt_total,
                 ref_verts,
                 ref_tris,
-                error: tess_error,
             });
         }
 
@@ -1976,23 +1960,18 @@ mod tests {
             total_wt_total += r.wt_total;
             println!(
                 "  {:<24} {:>5}/{:<5} {:>7.0}ms {:>10}",
-                r.name,
-                r.wt_pass,
-                r.wt_total,
-                total_ms,
-                r.tris,
+                r.name, r.wt_pass, r.wt_total, total_ms, r.tris,
             );
         }
         println!("  {}", "-".repeat(58));
         let total_tris: usize = results.iter().map(|r| r.tris).sum();
-        let total_ms: f64 = results.iter().map(|r| r.parse_ms + r.convert_ms + r.tess_ms).sum();
+        let total_ms: f64 = results
+            .iter()
+            .map(|r| r.parse_ms + r.convert_ms + r.tess_ms)
+            .sum();
         println!(
             "  {:<24} {:>5}/{:<5} {:>7.0}ms {:>10}",
-            "TOTAL",
-            total_wt_pass,
-            total_wt_total,
-            total_ms,
-            total_tris,
+            "TOTAL", total_wt_pass, total_wt_total, total_ms, total_tris,
         );
         println!();
     }

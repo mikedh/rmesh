@@ -4,7 +4,7 @@ use rayon::prelude::*;
 
 use super::ap214::Entity;
 use super::id::Id;
-use super::parse::{find_data_section, into_blocks, strip_flatten};
+use super::parse::{find_data_section, into_blocks};
 
 /// A parsed STEP file containing a vector of entities indexed by ID.
 #[derive(Debug)]
@@ -39,26 +39,6 @@ impl<'a> StepFile<'a> {
 
         Self { entities: out }
     }
-
-    /// Preprocess a STEP file (remove comments/whitespace).
-    pub fn preprocess(raw_data: &[u8]) -> Vec<u8> {
-        strip_flatten(raw_data)
-    }
-
-    /// Get an entity by ID, attempting to cast it to type T.
-    pub fn entity<T: FromEntity<'a>>(&'a self, i: Id<T>) -> Option<&'a T> {
-        T::try_from_entity(&self.entities[i.0])
-    }
-
-    /// Get the number of entities in the file.
-    pub fn len(&self) -> usize {
-        self.entities.len()
-    }
-
-    /// Check if the file is empty.
-    pub fn is_empty(&self) -> bool {
-        self.entities.is_empty()
-    }
 }
 
 impl<'a, T> std::ops::Index<Id<T>> for StepFile<'a> {
@@ -70,6 +50,7 @@ impl<'a, T> std::ops::Index<Id<T>> for StepFile<'a> {
 }
 
 /// Trait for extracting a specific entity type from the generic Entity enum.
+/// Used by auto-generated ap214 entity code.
 pub trait FromEntity<'a> {
     fn try_from_entity(e: &'a Entity<'a>) -> Option<&'a Self>;
 }

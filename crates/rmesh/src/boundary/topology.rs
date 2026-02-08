@@ -297,17 +297,6 @@ impl CurveBSpline {
         (self.knots[p], self.knots[self.knots.len() - 1 - p])
     }
 
-    /// Compute first derivative at parameter u.
-    #[allow(clippy::needless_range_loop)]
-    pub fn derivative(&self, u: f64) -> Vector3<f64> {
-        self.evaluate_with_derivatives(u, 1)[1]
-    }
-
-    /// Compute second derivative at parameter u.
-    pub fn second_derivative(&self, u: f64) -> Vector3<f64> {
-        self.evaluate_with_derivatives(u, 2)[2]
-    }
-
     /// Evaluate C(u) and derivatives C'(u), C''(u), ... up to order `n_ders`
     /// in a single find_span + basis_funs_ders pass (Algorithm A2.3).
     /// For rational (NURBS) curves, uses Algorithm A4.2 from "The NURBS Book".
@@ -478,40 +467,6 @@ impl Curve {
         match self {
             Curve::Line(_) | Curve::BSpline(_) => false,
             Curve::Circle(_) | Curve::Ellipse(_) => true,
-        }
-    }
-
-    /// Compute the first derivative at parameter t.
-    pub fn derivative(&self, t: f64) -> Vector3<f64> {
-        match self {
-            Curve::Line(line) => line.direction,
-            Curve::Circle(circle) => {
-                let y_axis = circle.axis.cross(&circle.x_axis);
-                circle.radius * (-t.sin() * circle.x_axis + t.cos() * y_axis)
-            }
-            Curve::Ellipse(ellipse) => {
-                let y_axis = ellipse.axis.cross(&ellipse.x_axis);
-                -ellipse.semi_major * t.sin() * ellipse.x_axis
-                    + ellipse.semi_minor * t.cos() * y_axis
-            }
-            Curve::BSpline(bspline) => bspline.derivative(t),
-        }
-    }
-
-    /// Compute the second derivative at parameter t.
-    pub fn second_derivative(&self, t: f64) -> Vector3<f64> {
-        match self {
-            Curve::Line(_) => Vector3::zeros(),
-            Curve::Circle(circle) => {
-                let y_axis = circle.axis.cross(&circle.x_axis);
-                -circle.radius * (t.cos() * circle.x_axis + t.sin() * y_axis)
-            }
-            Curve::Ellipse(ellipse) => {
-                let y_axis = ellipse.axis.cross(&ellipse.x_axis);
-                -ellipse.semi_major * t.cos() * ellipse.x_axis
-                    - ellipse.semi_minor * t.sin() * y_axis
-            }
-            Curve::BSpline(bspline) => bspline.second_derivative(t),
         }
     }
 
@@ -976,48 +931,15 @@ impl BrepModel {
     ///
     /// This is a prerequisite for producing a watertight mesh from tessellation.
     pub fn validate_edge_sharing(&self) -> Vec<BrepError> {
-        use std::collections::HashMap;
-
+        let adjacency = self.build_edge_adjacency();
         let mut errors = Vec::new();
 
-        // Count forward and reverse uses of each edge
-        // (edge_idx) -> (forward_count, reverse_count)
-        let mut edge_usage: HashMap<usize, (usize, usize)> = HashMap::new();
-
-        // Collect all oriented edges from all face loops
-        for face in &self.faces {
-            // Outer loop
-            if face.outer_loop < self.loops.len() {
-                for oe in &self.loops[face.outer_loop].edges {
-                    let entry = edge_usage.entry(oe.edge).or_insert((0, 0));
-                    if oe.same_sense {
-                        entry.0 += 1;
-                    } else {
-                        entry.1 += 1;
-                    }
-                }
-            }
-
-            // Inner loops (holes)
-            for &inner_loop_idx in &face.inner_loops {
-                if inner_loop_idx < self.loops.len() {
-                    for oe in &self.loops[inner_loop_idx].edges {
-                        let entry = edge_usage.entry(oe.edge).or_insert((0, 0));
-                        if oe.same_sense {
-                            entry.0 += 1;
-                        } else {
-                            entry.1 += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check each edge is used exactly once forward and once reverse
-        for (edge_idx, (forward, reverse)) in edge_usage {
+        for (edge_idx, uses) in &adjacency {
+            let forward = uses.iter().filter(|u| u.same_sense).count();
+            let reverse = uses.len() - forward;
             if forward != 1 || reverse != 1 {
                 errors.push(BrepError::EdgeSharingInvalid {
-                    edge: edge_idx,
+                    edge: *edge_idx,
                     forward_uses: forward,
                     reverse_uses: reverse,
                 });
@@ -1517,10 +1439,10 @@ mod tests {
             same_sense: true,
         }]);
 
-        model.add_surface(Surface::Plane(SurfacePlane {
-            origin: Point3::origin(),
-            normal: Vector3::z(),
-        }));
+        model.add_surface(Surface::Plane(SurfacePlane::new(
+            Point3::origin(),
+            Vector3::z(),
+        )));
         model.add_face(0, 0, vec![], true);
         model.add_shell(vec![0]);
         model.add_solid(0, vec![]);

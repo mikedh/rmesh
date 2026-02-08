@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Constrained Delaunay Triangulation (CDT).
 //!
 //! This module is adapted from the foxtrot CDT crate:
@@ -165,7 +166,10 @@ mod tests {
                 })
                 .collect();
 
-            let surface_type = case["surface_type"].as_str().unwrap_or("unknown").to_string();
+            let surface_type = case["surface_type"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
             total += 1;
 
             let entry = by_surface.entry(surface_type).or_insert((0, 0));
@@ -179,7 +183,11 @@ mod tests {
                     let tri_edges: HashSet<(usize, usize)> = tris
                         .iter()
                         .flat_map(|&(a, b, c)| {
-                            [(a.min(b), a.max(b)), (b.min(c), b.max(c)), (c.min(a), c.max(a))]
+                            [
+                                (a.min(b), a.max(b)),
+                                (b.min(c), b.max(c)),
+                                (c.min(a), c.max(a)),
+                            ]
                         })
                         .collect();
 
@@ -199,7 +207,9 @@ mod tests {
             }
         }
 
-        eprintln!("\nCDT fixture results: {total} cases, {cdt_pass} CDT pass, {boundary_pass} boundary pass");
+        eprintln!(
+            "\nCDT fixture results: {total} cases, {cdt_pass} CDT pass, {boundary_pass} boundary pass"
+        );
         for (surface, (total, pass)) in &by_surface {
             eprintln!("  {surface}: {pass}/{total} boundary pass");
         }
@@ -226,8 +236,8 @@ mod tests {
 
         // Two closed contours: outer CCW, inner CW
         let contours = vec![
-            vec![0, 1, 2, 3, 0],       // outer
-            vec![4, 7, 6, 5, 4],       // inner (CW = hole)
+            vec![0, 1, 2, 3, 0], // outer
+            vec![4, 7, 6, 5, 4], // inner (CW = hole)
         ];
 
         let tris = triangulate_contours(&pts, &contours).expect("donut CDT should succeed");
@@ -243,7 +253,11 @@ mod tests {
         let tri_edges: HashSet<(usize, usize)> = tris
             .iter()
             .flat_map(|&(a, b, c)| {
-                [(a.min(b), a.max(b)), (b.min(c), b.max(c)), (c.min(a), c.max(a))]
+                [
+                    (a.min(b), a.max(b)),
+                    (b.min(c), b.max(c)),
+                    (c.min(a), c.max(a)),
+                ]
             })
             .collect();
 

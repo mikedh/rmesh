@@ -1,4 +1,5 @@
 use super::{
+    Error,
     indexes::{
         ContourIndex, ContourVec, EMPTY_CONTOUR, EMPTY_EDGE, EdgeIndex, HullIndex, PointIndex,
     },
@@ -107,7 +108,7 @@ impl Contour {
         t: &mut Triangulation,
         point: PointIndex,
         data: ContourData,
-    ) -> Option<EdgeIndex> {
+    ) -> Result<Option<EdgeIndex>, Error> {
         let i = self.pts.push(Node {
             point,
             data,
@@ -119,18 +120,18 @@ impl Contour {
         self.end = i;
 
         let mut out = None;
-        while let Some(e) = self.try_clip(t) {
+        while let Some(e) = self.try_clip(t)? {
             out = Some(e);
         }
         // Advance to the end of the triangulation
         self.index = self.pts[self.index].next;
         assert!(self.pts[self.index].next == EMPTY_CONTOUR);
-        out
+        Ok(out)
     }
 
     /// Attempts to clip the ear with tip self.index.
     /// Returns the new edge and retreats self.index on success.
-    fn try_clip(&mut self, t: &mut Triangulation) -> Option<EdgeIndex> {
+    fn try_clip(&mut self, t: &mut Triangulation) -> Result<Option<EdgeIndex>, Error> {
         let c = self.pts[self.index];
         // If we're at the start of the list, we can't triangulate, and
         // the caller will shuffle self.index forward.  We're not allowed
@@ -138,7 +139,7 @@ impl Contour {
         // after push() extends the list without moving self.index
         assert!(c.next != EMPTY_CONTOUR);
         if c.prev == EMPTY_CONTOUR {
-            return None;
+            return Ok(None);
         }
 
         let new_edge = if self.sign {
@@ -160,7 +161,7 @@ impl Contour {
 
             // If the ear isn't strictly convex, then return immediately
             if t.orient2d(a.point, b.point, c.point) <= 0.0 {
-                return None;
+                return Ok(None);
             }
 
             // Insert the new triangle
@@ -177,7 +178,7 @@ impl Contour {
                     t.hull.update(hull_index, e_ca);
                     t.half.set_sign(e_ca, sign);
                 }
-                ContourData::Buddy(b) => t.half.link_new(b, e_ca),
+                ContourData::Buddy(b) => t.half.link_new(b, e_ca)?,
             }
             match c.data {
                 ContourData::None => (),
@@ -185,7 +186,7 @@ impl Contour {
                     t.hull.update(hull_index, e_bc);
                     t.half.set_sign(e_bc, sign);
                 }
-                ContourData::Buddy(b) => t.half.link_new(b, e_bc),
+                ContourData::Buddy(b) => t.half.link_new(b, e_bc)?,
             }
 
             e_ab
@@ -211,7 +212,7 @@ impl Contour {
 
             // If the ear isn't strictly convex, then return immediately
             if t.orient2d(a.point, c.point, b.point) <= 0.0 {
-                return None;
+                return Ok(None);
             }
 
             // Insert the new triangle
@@ -228,7 +229,7 @@ impl Contour {
                     t.hull.update(hull_index, e_ac);
                     t.half.set_sign(e_ac, sign);
                 }
-                ContourData::Buddy(b) => t.half.link_new(b, e_ac),
+                ContourData::Buddy(b) => t.half.link_new(b, e_ac)?,
             }
             match c.data {
                 ContourData::None => (),
@@ -236,7 +237,7 @@ impl Contour {
                     t.hull.update(hull_index, e_cb);
                     t.half.set_sign(e_cb, sign);
                 }
-                ContourData::Buddy(b) => t.half.link_new(b, e_cb),
+                ContourData::Buddy(b) => t.half.link_new(b, e_cb)?,
             }
             e_ba
         };
@@ -266,6 +267,6 @@ impl Contour {
         // ear convex as well)
         self.index = c.prev;
 
-        Some(new_edge)
+        Ok(Some(new_edge))
     }
 }

@@ -1,4 +1,4 @@
-pub mod cdt;
+pub(crate) mod cdt;
 pub mod faces;
 pub mod step;
 pub mod tesselate;

@@ -1,3 +1,4 @@
+use super::Error;
 use super::indexes::{EMPTY_EDGE, EdgeIndex, EdgeVec, PointIndex};
 
 /// Represents a directed edge in a triangle graph.
@@ -149,8 +150,7 @@ impl Half {
     }
 
     pub fn iter_edges(&self) -> impl Iterator<Item = (PointIndex, PointIndex, bool)> + '_ {
-        self
-            .edges
+        self.edges
             .iter()
             .filter(|e| e.next != EMPTY_EDGE)
             .map(|e| (e.src, e.dst, e.fixed()))
@@ -382,28 +382,26 @@ impl Half {
     ///
     /// The `old` and `new` edges must have compatible `src` and `dst` values
     /// and no pre-existing buddies.
-    ///
-    /// # Panics
-    /// Panics if the edges are not compatible or already have buddies.
-    pub fn link_new(&mut self, old: EdgeIndex, new: EdgeIndex) {
+    pub fn link_new(&mut self, old: EdgeIndex, new: EdgeIndex) -> Result<(), Error> {
         self.edges[new].sign = self.edges[old].sign;
-        self.link(old, new);
+        self.link(old, new)
     }
 
     /// Sets a pair of edges as each others buddies.  They must have compatible
     /// `src`/`dst` values, no pre-existing buddies, and the same value for
-    /// `fixed`; otherwise, it will panic.
-    ///
-    /// # Panics
-    /// Panics if the edges are not compatible or already have buddies.
-    pub fn link(&mut self, a: EdgeIndex, b: EdgeIndex) {
-        assert!(self.edges[a].buddy == EMPTY_EDGE);
-        assert!(self.edges[b].buddy == EMPTY_EDGE);
-        assert!(self.edges[a].fixed() == self.edges[b].fixed());
-        assert!(self.edges[a].src == self.edges[b].dst);
-        assert!(self.edges[a].dst == self.edges[b].src);
+    /// `fixed`; otherwise, returns an error.
+    pub fn link(&mut self, a: EdgeIndex, b: EdgeIndex) -> Result<(), Error> {
+        if self.edges[a].buddy != EMPTY_EDGE
+            || self.edges[b].buddy != EMPTY_EDGE
+            || self.edges[a].fixed() != self.edges[b].fixed()
+            || self.edges[a].src != self.edges[b].dst
+            || self.edges[a].dst != self.edges[b].src
+        {
+            return Err(Error::WedgeEscape);
+        }
 
         self.edges[a].buddy = b;
         self.edges[b].buddy = a;
+        Ok(())
     }
 }

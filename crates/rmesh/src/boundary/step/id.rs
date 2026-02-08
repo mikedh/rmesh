@@ -16,10 +16,6 @@ impl<T> Id<T> {
         Id::new(0)
     }
 
-    pub fn cast<V>(&self) -> Id<V> {
-        Id::new(self.0)
-    }
-
     pub fn index(&self) -> usize {
         self.0
     }

@@ -82,28 +82,20 @@ impl From<BrepFace> for Surface {
     fn from(face: BrepFace) -> Self {
         match face {
             BrepFace::Plane { origin, normal, .. } => {
-                Surface::Plane(SurfacePlane { origin, normal })
+                Surface::Plane(SurfacePlane::new(origin, normal))
             }
             BrepFace::Cylinder {
                 origin,
                 axis,
                 radius,
                 ..
-            } => Surface::Cylinder(Cylinder::new(
-                origin,
-                axis,
-                radius,
-            )),
+            } => Surface::Cylinder(Cylinder::new(origin, axis, radius)),
             BrepFace::Cone {
                 apex,
                 axis,
                 semi_angle,
                 ..
-            } => Surface::Cone(Cone::new(
-                apex,
-                axis,
-                semi_angle,
-            )),
+            } => Surface::Cone(Cone::new(apex, axis, semi_angle)),
             BrepFace::Sphere { center, radius, .. } => Surface::Sphere(Sphere { center, radius }),
             BrepFace::Torus {
                 center,
@@ -111,12 +103,7 @@ impl From<BrepFace> for Surface {
                 major_radius,
                 minor_radius,
                 ..
-            } => Surface::Torus(Torus::new(
-                center,
-                axis,
-                major_radius,
-                minor_radius,
-            )),
+            } => Surface::Torus(Torus::new(center, axis, major_radius, minor_radius)),
         }
     }
 }

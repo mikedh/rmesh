@@ -224,15 +224,21 @@ impl Triangulation {
         // Sanity-check that our three target points are at the head of the
         // list, as expected.
         assert!(
-            u8::from(scratch[0].0 == pa) + u8::from(scratch[1].0 == pa) + u8::from(scratch[2].0 == pa)
+            u8::from(scratch[0].0 == pa)
+                + u8::from(scratch[1].0 == pa)
+                + u8::from(scratch[2].0 == pa)
                 == 1
         );
         assert!(
-            u8::from(scratch[0].0 == pb) + u8::from(scratch[1].0 == pb) + u8::from(scratch[2].0 == pb)
+            u8::from(scratch[0].0 == pb)
+                + u8::from(scratch[1].0 == pb)
+                + u8::from(scratch[2].0 == pb)
                 == 1
         );
         assert!(
-            u8::from(scratch[0].0 == pc) + u8::from(scratch[1].0 == pc) + u8::from(scratch[2].0 == pc)
+            u8::from(scratch[0].0 == pc)
+                + u8::from(scratch[1].0 == pc)
+                + u8::from(scratch[2].0 == pc)
                 == 1
         );
 
@@ -421,9 +427,10 @@ impl Triangulation {
             // Check if contour is closed (first vertex equals last edge's end vertex)
             if let Some(last) = edges.last()
                 && let Some(start) = edges.get(next)
-                    && start.0 != last.1 {
-                        return Err(Error::OpenContour);
-                    }
+                && start.0 != last.1
+            {
+                return Err(Error::OpenContour);
+            }
         }
         Self::new_with_edges(pts, &edges)
     }
@@ -992,7 +999,7 @@ impl Triangulation {
             } else {
                 ContourData::Buddy(edge_cb.buddy)
             },
-        );
+        )?;
         steps_right.push(
             self,
             edge_ba.dst,
@@ -1003,7 +1010,7 @@ impl Triangulation {
             } else {
                 ContourData::Buddy(edge_ac.buddy)
             },
-        );
+        )?;
 
         // Exit this triangle, either onto the hull or continuing inside
         // the triangulation.
@@ -1052,8 +1059,8 @@ impl Triangulation {
                         } else {
                             ContourData::Buddy(edge_bc.buddy)
                         },
-                    )
-                    .expect("Failed to create fixed edge");
+                    )?
+                    .ok_or(Error::WedgeEscape)?;
 
                 // This better have terminated the triangulation of
                 // the upper contour with a dst-src edge
@@ -1071,10 +1078,12 @@ impl Triangulation {
                 } else {
                     ContourData::Buddy(edge_ca.buddy)
                 };
-                let e_src_dst_opt = steps_right.push(self, c, right_data);
+                let e_src_dst_opt = steps_right.push(self, c, right_data)?;
 
                 // Handle case where contour push returns None
-                let e_src_dst = if let Some(e) = e_src_dst_opt { e } else {
+                let e_src_dst = if let Some(e) = e_src_dst_opt {
+                    e
+                } else {
                     // The contour couldn't produce an edge. This can happen when
                     // the geometry is degenerate (e.g., collinear points).
                     // Fall back to finding the edge directly.
@@ -1092,7 +1101,7 @@ impl Triangulation {
                 assert!(self.half.edge(e_src_dst).src == src);
                 assert!(self.half.edge(e_src_dst).dst == dst);
 
-                self.half.link(e_src_dst, e_dst_src);
+                self.half.link(e_src_dst, e_dst_src)?;
                 self.half.toggle_lock_sign(e_src_dst); // locks both sides
 
                 return Ok(EdgeResult::Done);
@@ -1112,14 +1121,16 @@ impl Triangulation {
                     } else {
                         ContourData::Buddy(edge_ca.buddy)
                     },
-                );
+                )?;
 
                 // Exit the triangle, either onto the hull or staying
                 // in the triangulation
                 if edge_bc.fixed() {
                     return Err(Error::CrossingFixedEdge);
                 }
-                assert!(edge_bc.buddy != EMPTY_EDGE);
+                if edge_bc.buddy == EMPTY_EDGE {
+                    return Err(Error::WedgeEscape);
+                }
                 edge_bc.buddy
             } else if o_psc < 0.0 {
                 /*         src
@@ -1145,12 +1156,14 @@ impl Triangulation {
                     } else {
                         ContourData::Buddy(edge_bc.buddy)
                     },
-                );
+                )?;
 
                 if edge_ca.fixed() {
                     return Err(Error::CrossingFixedEdge);
                 }
-                assert!(edge_ca.buddy != EMPTY_EDGE);
+                if edge_ca.buddy == EMPTY_EDGE {
+                    return Err(Error::WedgeEscape);
+                }
                 edge_ca.buddy
             } else {
                 // c is exactly on the src->dst line - intermediate vertex found mid-walk.
@@ -1166,8 +1179,8 @@ impl Triangulation {
                         } else {
                             ContourData::Buddy(edge_bc.buddy)
                         },
-                    )
-                    .expect("Failed to create edge to intermediate");
+                    )?
+                    .ok_or(Error::WedgeEscape)?;
 
                 let e_src_c = steps_right.push(
                     self,
@@ -1178,11 +1191,11 @@ impl Triangulation {
                     } else {
                         ContourData::Buddy(edge_ca.buddy)
                     },
-                );
+                )?;
 
                 // Link and lock the partial edge
                 if let Some(e_src_c) = e_src_c {
-                    self.half.link(e_src_c, e_c_src);
+                    self.half.link(e_src_c, e_c_src)?;
                     self.half.toggle_lock_sign(e_src_c);
                 }
 
@@ -1226,7 +1239,9 @@ impl Triangulation {
 
         loop {
             let edge = self.half.edge(e);
-            assert!(edge.src == src);
+            if edge.src != src {
+                return Err(Error::WedgeEscape);
+            }
 
             // Check if dst is directly connected
             if edge.dst == dst {
@@ -2010,8 +2025,13 @@ mod tests {
             (3.3820000000000019e0, 1.4707499999999991e0),
         ];
         let contours: Vec<Vec<usize>> = vec![
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 0],
-            vec![36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 36],
+            vec![
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 0,
+            ],
+            vec![
+                36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 36,
+            ],
             vec![56, 57, 58, 59, 56],
             vec![60, 61, 62, 63, 60],
         ];
@@ -2046,7 +2066,9 @@ mod tests {
     /// Simple ray-casting point-in-polygon for f64 tuples.
     fn point_in_polygon_f64(px: f64, py: f64, polygon: &[(f64, f64)]) -> bool {
         let n = polygon.len();
-        if n < 3 { return false; }
+        if n < 3 {
+            return false;
+        }
         let mut inside = false;
         let mut j = n - 1;
         for i in 0..n {

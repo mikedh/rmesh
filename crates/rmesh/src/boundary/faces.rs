@@ -34,6 +34,18 @@ pub const KNOT_TOL: f64 = 1e-14;
 /// Tolerance for detecting degenerate metric tensors (first fundamental form).
 pub const METRIC_TOL: f64 = 1e-14;
 
+/// Compute an orthonormal basis from an axis direction.
+///
+/// Returns `(axis_unit, x_basis, y_basis)` where `axis_unit` is the normalized
+/// axis, and `x_basis`/`y_basis` form an orthonormal frame perpendicular to it.
+/// Used by [`Cylinder`], [`Cone`], and [`Torus`] constructors.
+fn compute_axis_basis(axis: &Vector3<f64>) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
+    let axis_unit = axis.normalize();
+    let x_basis = perpendicular(&axis_unit);
+    let y_basis = axis_unit.cross(&x_basis);
+    (axis_unit, x_basis, y_basis)
+}
+
 // ============================================================================
 // Surface Curvature
 // ============================================================================
@@ -105,13 +117,62 @@ pub enum Surface {
     BSpline(SurfaceBSpline),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(into = "SurfacePlaneSerde")]
 pub struct SurfacePlane {
     pub origin: Point3<f64>,
     pub normal: Vector3<f64>,
+    // Precomputed orthonormal basis in the plane
+    x_basis: Vector3<f64>,
+    y_basis: Vector3<f64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SurfacePlaneSerde {
+    origin: Point3<f64>,
+    normal: Vector3<f64>,
+}
+
+impl From<SurfacePlaneSerde> for SurfacePlane {
+    fn from(s: SurfacePlaneSerde) -> Self {
+        Self::new(s.origin, s.normal)
+    }
+}
+
+impl From<SurfacePlane> for SurfacePlaneSerde {
+    fn from(p: SurfacePlane) -> Self {
+        Self {
+            origin: p.origin,
+            normal: p.normal,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SurfacePlane {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SurfacePlaneSerde::deserialize(deserializer).map(Into::into)
+    }
 }
 
 impl SurfacePlane {
+    pub fn new(origin: Point3<f64>, normal: Vector3<f64>) -> Self {
+        let n = normal.normalize();
+        let x_basis = perpendicular(&n).normalize();
+        let y_basis = n.cross(&x_basis);
+        Self {
+            origin,
+            normal,
+            x_basis,
+            y_basis,
+        }
+    }
+
+    /// Precomputed orthonormal basis in the plane.
+    #[inline]
+    pub fn basis(&self) -> (Vector3<f64>, Vector3<f64>) {
+        (self.x_basis, self.y_basis)
+    }
+
     /// Curvature at any point on a plane is zero.
     pub fn curvature_at(&self, _u: f64, _v: f64) -> SurfaceCurvature {
         SurfaceCurvature::zero()
@@ -145,7 +206,11 @@ impl From<CylinderSerde> for Cylinder {
 
 impl From<Cylinder> for CylinderSerde {
     fn from(c: Cylinder) -> Self {
-        Self { origin: c.origin, axis: c.axis, radius: c.radius }
+        Self {
+            origin: c.origin,
+            axis: c.axis,
+            radius: c.radius,
+        }
     }
 }
 
@@ -157,10 +222,15 @@ impl<'de> Deserialize<'de> for Cylinder {
 
 impl Cylinder {
     pub fn new(origin: Point3<f64>, axis: Vector3<f64>, radius: f64) -> Self {
-        let axis_unit = axis.normalize();
-        let x_basis = perpendicular(&axis_unit).normalize();
-        let y_basis = axis_unit.cross(&x_basis);
-        Self { origin, axis, radius, axis_unit, x_basis, y_basis }
+        let (axis_unit, x_basis, y_basis) = compute_axis_basis(&axis);
+        Self {
+            origin,
+            axis,
+            radius,
+            axis_unit,
+            x_basis,
+            y_basis,
+        }
     }
 
     /// Precomputed orthonormal basis perpendicular to axis.
@@ -208,7 +278,11 @@ impl From<ConeSerde> for Cone {
 
 impl From<Cone> for ConeSerde {
     fn from(c: Cone) -> Self {
-        Self { apex: c.apex, axis: c.axis, half_angle: c.half_angle }
+        Self {
+            apex: c.apex,
+            axis: c.axis,
+            half_angle: c.half_angle,
+        }
     }
 }
 
@@ -220,10 +294,15 @@ impl<'de> Deserialize<'de> for Cone {
 
 impl Cone {
     pub fn new(apex: Point3<f64>, axis: Vector3<f64>, half_angle: f64) -> Self {
-        let axis_unit = axis.normalize();
-        let x_basis = perpendicular(&axis_unit).normalize();
-        let y_basis = axis_unit.cross(&x_basis);
-        Self { apex, axis, half_angle, axis_unit, x_basis, y_basis }
+        let (axis_unit, x_basis, y_basis) = compute_axis_basis(&axis);
+        Self {
+            apex,
+            axis,
+            half_angle,
+            axis_unit,
+            x_basis,
+            y_basis,
+        }
     }
 
     /// Precomputed orthonormal basis perpendicular to axis.
@@ -302,7 +381,12 @@ impl From<TorusSerde> for Torus {
 
 impl From<Torus> for TorusSerde {
     fn from(t: Torus) -> Self {
-        Self { center: t.center, axis: t.axis, major_radius: t.major_radius, minor_radius: t.minor_radius }
+        Self {
+            center: t.center,
+            axis: t.axis,
+            major_radius: t.major_radius,
+            minor_radius: t.minor_radius,
+        }
     }
 }
 
@@ -313,11 +397,22 @@ impl<'de> Deserialize<'de> for Torus {
 }
 
 impl Torus {
-    pub fn new(center: Point3<f64>, axis: Vector3<f64>, major_radius: f64, minor_radius: f64) -> Self {
-        let axis_unit = axis.normalize();
-        let x_basis = perpendicular(&axis_unit).normalize();
-        let y_basis = axis_unit.cross(&x_basis);
-        Self { center, axis, major_radius, minor_radius, axis_unit, x_basis, y_basis }
+    pub fn new(
+        center: Point3<f64>,
+        axis: Vector3<f64>,
+        major_radius: f64,
+        minor_radius: f64,
+    ) -> Self {
+        let (axis_unit, x_basis, y_basis) = compute_axis_basis(&axis);
+        Self {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+            axis_unit,
+            x_basis,
+            y_basis,
+        }
     }
 
     /// Precomputed orthonormal basis perpendicular to axis.
@@ -750,7 +845,6 @@ impl SurfaceBSpline {
 
         // Newton-Raphson iteration
         const MAX_ITER: usize = 20;
-        const TOL: f64 = 1e-10;
 
         for _ in 0..MAX_ITER {
             let s = self.evaluate(u, v);
@@ -759,7 +853,7 @@ impl SurfaceBSpline {
             let delta = s - point;
 
             // Check convergence
-            if delta.norm_squared() < TOL * TOL {
+            if delta.norm_squared() < NEWTON_TOL * NEWTON_TOL {
                 break;
             }
 
@@ -1030,7 +1124,7 @@ impl Surface {
 
         // Additional density from curvature for quality
         let max_kappa = self.estimate_max_curvature(u_min, u_max, v_min, v_max);
-        let (n_u_curv, n_v_curv) = if max_kappa > 1e-12 {
+        let (n_u_curv, n_v_curv) = if max_kappa > CURVATURE_TOL {
             let step = (8.0 * tolerance / max_kappa).sqrt();
             (
                 (u_span / step).ceil() as usize,
@@ -1065,10 +1159,9 @@ impl Surface {
     pub fn project_as_circle(&self, plane: &Plane) -> Option<(Point2<f64>, f64)> {
         match self {
             Surface::Cylinder(c) => {
-                let axis_norm = c.axis.normalize();
                 // Cylinder axis must be ~parallel to the plane normal
                 const AXIS_PARALLEL_TOL: f64 = 1e-6;
-                if axis_norm.dot(&plane.normal).abs() > 1.0 - AXIS_PARALLEL_TOL {
+                if c.axis_unit().dot(&plane.normal).abs() > 1.0 - AXIS_PARALLEL_TOL {
                     let center_2d = plane.to_2d(&[c.origin]);
                     Some((center_2d[0], c.radius))
                 } else {
@@ -1137,10 +1230,7 @@ mod tests {
 
     #[test]
     fn test_plane_surface_no_circle() {
-        let prim = Surface::Plane(SurfacePlane {
-            origin: Point3::origin(),
-            normal: Vector3::z(),
-        });
+        let prim = Surface::Plane(SurfacePlane::new(Point3::origin(), Vector3::z()));
         let plane = Plane::new(Vector3::z(), Point3::origin());
         assert!(prim.project_as_circle(&plane).is_none());
     }
@@ -1160,29 +1250,15 @@ mod tests {
     #[test]
     fn test_kind_name() {
         assert_eq!(
-            Surface::Plane(SurfacePlane {
-                origin: Point3::origin(),
-                normal: Vector3::z(),
-            })
-            .kind_name(),
+            Surface::Plane(SurfacePlane::new(Point3::origin(), Vector3::z(),)).kind_name(),
             "Plane"
         );
         assert_eq!(
-            Surface::Cylinder(Cylinder::new(
-                Point3::origin(),
-                Vector3::z(),
-                1.0,
-            ))
-            .kind_name(),
+            Surface::Cylinder(Cylinder::new(Point3::origin(), Vector3::z(), 1.0,)).kind_name(),
             "Cylinder"
         );
         assert_eq!(
-            Surface::Cone(Cone::new(
-                Point3::origin(),
-                Vector3::z(),
-                0.5,
-            ))
-            .kind_name(),
+            Surface::Cone(Cone::new(Point3::origin(), Vector3::z(), 0.5,)).kind_name(),
             "Cone"
         );
         assert_eq!(
@@ -1194,13 +1270,7 @@ mod tests {
             "Sphere"
         );
         assert_eq!(
-            Surface::Torus(Torus::new(
-                Point3::origin(),
-                Vector3::z(),
-                2.0,
-                0.5,
-            ))
-            .kind_name(),
+            Surface::Torus(Torus::new(Point3::origin(), Vector3::z(), 2.0, 0.5,)).kind_name(),
             "Torus"
         );
         assert_eq!(
@@ -1315,10 +1385,7 @@ mod tests {
     #[test]
     fn test_curvature_plane_zero() {
         // A plane has zero curvature everywhere
-        let plane = SurfacePlane {
-            origin: Point3::origin(),
-            normal: Vector3::z(),
-        };
+        let plane = SurfacePlane::new(Point3::origin(), Vector3::z());
 
         let curvature = plane.curvature_at(0.0, 0.0);
         assert_relative_eq!(curvature.kappa_1, 0.0, epsilon = 1e-10);
@@ -1475,10 +1542,7 @@ mod tests {
     fn test_surface_enum_curvature_dispatch() {
         // Test that Surface enum dispatches to correct surface type
         let surfaces: Vec<Surface> = vec![
-            Surface::Plane(SurfacePlane {
-                origin: Point3::origin(),
-                normal: Vector3::z(),
-            }),
+            Surface::Plane(SurfacePlane::new(Point3::origin(), Vector3::z())),
             Surface::Cylinder(Cylinder::new(Point3::origin(), Vector3::z(), 2.0)),
             Surface::Sphere(Sphere {
                 center: Point3::origin(),
