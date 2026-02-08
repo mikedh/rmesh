@@ -14,10 +14,6 @@
 //! let triangles = cdt::triangulate_points(&pts).unwrap();
 //! ```
 
-#![allow(clippy::pedantic)]
-#![allow(clippy::all)]
-#![allow(dead_code)]
-
 mod contour;
 mod half;
 mod hull;
@@ -87,7 +83,7 @@ pub enum Error {
 /// into the original points list.  The resulting triangulation has a convex
 /// hull.
 pub fn triangulate_points(pts: &[Point]) -> Result<Vec<(usize, usize, usize)>, Error> {
-    let t = Triangulation::build(&pts)?;
+    let t = Triangulation::build(pts)?;
     Ok(t.triangles().collect())
 }
 
@@ -101,7 +97,7 @@ pub fn triangulate_contours<V>(
 where
     for<'b> &'b V: IntoIterator<Item = &'b usize>,
 {
-    let t = Triangulation::build_from_contours(&pts, contours)?;
+    let t = Triangulation::build_from_contours(pts, contours)?;
     Ok(t.triangles().collect())
 }
 
@@ -115,12 +111,13 @@ pub fn triangulate_with_edges<'a, E>(
 where
     E: IntoIterator<Item = &'a (usize, usize)> + Copy + Clone,
 {
-    let t = Triangulation::build_with_edges(&pts, edges)?;
+    let t = Triangulation::build_with_edges(pts, edges)?;
     Ok(t.triangles().collect())
 }
 
 /// Given a set of points and edges which are known to panic, figures out the
 /// max number of save steps, then saves an SVG right before the panic occurs
+#[allow(dead_code)]
 pub fn save_debug_panic<'a, E>(pts: &[Point], edges: E, filename: &str) -> std::io::Result<()>
 where
     E: IntoIterator<Item = &'a (usize, usize)> + Copy + Clone + std::panic::UnwindSafe,

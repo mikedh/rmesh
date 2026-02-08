@@ -168,8 +168,8 @@ impl Triangulation {
         // Start by picking a center which is at the center of the bbox
         let (x_bounds, y_bounds) = Self::bbox(points);
         let mut center = (
-            (x_bounds.0 + x_bounds.1) / 2.0,
-            (y_bounds.0 + y_bounds.1) / 2.0,
+            f64::midpoint(x_bounds.0, x_bounds.1),
+            f64::midpoint(y_bounds.0, y_bounds.1),
         );
 
         // The scratch buffer contains our points, their indexes, and a distance
@@ -180,7 +180,7 @@ impl Triangulation {
             .collect();
 
         // Find the three closest points (returns error if all collinear/duplicate)
-        let arr = min3(&scratch, &points)?;
+        let arr = min3(&scratch, points)?;
 
         // Pick out the triangle points, ensuring that they're clockwise
         let pa = arr[0];
@@ -224,15 +224,15 @@ impl Triangulation {
         // Sanity-check that our three target points are at the head of the
         // list, as expected.
         assert!(
-            (scratch[0].0 == pa) as u8 + (scratch[1].0 == pa) as u8 + (scratch[2].0 == pa) as u8
+            u8::from(scratch[0].0 == pa) + u8::from(scratch[1].0 == pa) + u8::from(scratch[2].0 == pa)
                 == 1
         );
         assert!(
-            (scratch[0].0 == pb) as u8 + (scratch[1].0 == pb) as u8 + (scratch[2].0 == pb) as u8
+            u8::from(scratch[0].0 == pb) + u8::from(scratch[1].0 == pb) + u8::from(scratch[2].0 == pb)
                 == 1
         );
         assert!(
-            (scratch[0].0 == pc) as u8 + (scratch[1].0 == pc) as u8 + (scratch[2].0 == pc) as u8
+            u8::from(scratch[0].0 == pc) + u8::from(scratch[1].0 == pc) + u8::from(scratch[2].0 == pc)
                 == 1
         );
 
@@ -263,12 +263,14 @@ impl Triangulation {
                 for j in &[i - 1, 0, 1, 2] {
                     let pa = points[scratch[*j].0];
                     let pb = points[p.0];
-                    if (pa.0 - pb.0).abs() < f64::EPSILON && (pa.1 - pb.1).abs() < f64::EPSILON {
+                    let scale = (pa.0.abs() + pa.1.abs() + pb.0.abs() + pb.1.abs()).max(1.0);
+                    let eps = scale * 1e-12;
+                    if (pa.0 - pb.0).abs() < eps && (pa.1 - pb.1).abs() < eps {
                         dupe = Some(scratch[*j].0);
                         break;
                     }
                 }
-            };
+            }
             map_forward[p.0] = match dupe {
                 None => {
                     sorted_points.push(points[p.0]);
@@ -417,13 +419,11 @@ impl Triangulation {
                 edges.push((*window[0], *window[1]));
             }
             // Check if contour is closed (first vertex equals last edge's end vertex)
-            if let Some(last) = edges.last() {
-                if let Some(start) = edges.get(next) {
-                    if start.0 != last.1 {
+            if let Some(last) = edges.last()
+                && let Some(start) = edges.get(next)
+                    && start.0 != last.1 {
                         return Err(Error::OpenContour);
                     }
-                }
-            }
         }
         Self::new_with_edges(pts, &edges)
     }
@@ -639,13 +639,8 @@ impl Triangulation {
             // Replaces the previous item in the hull
             self.hull.update(h_ab, self.half.prev(f));
 
-            let h_p = if self.angles[a] != self.angles[p] {
-                // Insert the new edge into the hull, using the previous
-                // HullIndex as a hint to avoid searching for its position.
-                let h_ap = self.hull.insert(h_ab, self.angles[p], p, self.half.next(f));
-                self.legalize(f);
-                h_ap
-            } else {
+            #[allow(clippy::float_cmp)] // intentional: exact pseudo-angle match
+            let h_p = if self.angles[a] == self.angles[p] {
                 /*  Rare case when p and a are in a perfect vertical line:
                  *
                  *  We already inserted the left triangle and attached p-b to
@@ -679,6 +674,12 @@ impl Triangulation {
                 self.legalize(f);
                 self.legalize(g);
                 h_ca
+            } else {
+                // Insert the new edge into the hull, using the previous
+                // HullIndex as a hint to avoid searching for its position.
+                let h_ap = self.hull.insert(h_ab, self.angles[p], p, self.half.next(f));
+                self.legalize(f);
+                h_ap
             };
 
             // Check and fill acute angles
@@ -984,23 +985,23 @@ impl Triangulation {
         steps_left.push(
             self,
             edge_ba.src,
-            if edge_cb.buddy != EMPTY_EDGE {
-                ContourData::Buddy(edge_cb.buddy)
-            } else {
+            if edge_cb.buddy == EMPTY_EDGE {
                 let hl = self.hull.index_of(edge_cb.dst);
                 assert!(self.hull.edge(hl) == e_cb);
                 ContourData::Hull(hl, edge_cb.sign)
+            } else {
+                ContourData::Buddy(edge_cb.buddy)
             },
         );
         steps_right.push(
             self,
             edge_ba.dst,
-            if edge_ac.buddy != EMPTY_EDGE {
-                ContourData::Buddy(edge_ac.buddy)
-            } else {
+            if edge_ac.buddy == EMPTY_EDGE {
                 let hr = self.hull.index_of(edge_ac.dst);
                 assert!(self.hull.edge(hr) == e_ac);
                 ContourData::Hull(hr, edge_ac.sign)
+            } else {
+                ContourData::Buddy(edge_ac.buddy)
             },
         );
 
@@ -1073,21 +1074,17 @@ impl Triangulation {
                 let e_src_dst_opt = steps_right.push(self, c, right_data);
 
                 // Handle case where contour push returns None
-                let e_src_dst = match e_src_dst_opt {
-                    Some(e) => e,
-                    None => {
-                        // The contour couldn't produce an edge. This can happen when
-                        // the geometry is degenerate (e.g., collinear points).
-                        // Fall back to finding the edge directly.
-                        // For now, use the left contour's edge buddy
-                        let buddy = self.half.edge(e_dst_src).buddy;
-                        if buddy != EMPTY_EDGE {
-                            buddy
-                        } else {
-                            // Last resort: the edges should already be linked
-                            return Err(Error::WedgeEscape);
-                        }
+                let e_src_dst = if let Some(e) = e_src_dst_opt { e } else {
+                    // The contour couldn't produce an edge. This can happen when
+                    // the geometry is degenerate (e.g., collinear points).
+                    // Fall back to finding the edge directly.
+                    // For now, use the left contour's edge buddy
+                    let buddy = self.half.edge(e_dst_src).buddy;
+                    if buddy == EMPTY_EDGE {
+                        // Last resort: the edges should already be linked
+                        return Err(Error::WedgeEscape);
                     }
+                    buddy
                 };
 
                 // Similarly, this better have terminated the
@@ -1469,8 +1466,8 @@ impl Triangulation {
 
     /// Calculates a bounding box, returning `((xmin, xmax), (ymin, ymax))`
     pub(super) fn bbox(points: &[Point]) -> ((f64, f64), (f64, f64)) {
-        let (mut xmin, mut xmax) = (std::f64::INFINITY, -std::f64::INFINITY);
-        let (mut ymin, mut ymax) = (std::f64::INFINITY, -std::f64::INFINITY);
+        let (mut xmin, mut xmax) = (f64::INFINITY, -f64::INFINITY);
+        let (mut ymin, mut ymax) = (f64::INFINITY, -f64::INFINITY);
         for (px, py) in points.iter() {
             xmin = px.min(xmin);
             ymin = py.min(ymin);
@@ -1514,6 +1511,7 @@ impl Triangulation {
     /// Converts the current state of the triangulation to an SVG.  When `debug`
     /// is true, includes the upper hull and to-be-fixed edges; otherwise, just
     /// shows points, triangles, and fixed edges from the half-edge graph.
+    #[allow(clippy::format_push_string)]
     pub fn to_svg(&self, debug: bool) -> String {
         let (x_bounds, y_bounds) = Self::bbox(&self.points);
         let scale = 800.0 / (x_bounds.1 - x_bounds.0).max(y_bounds.1 - y_bounds.0);
@@ -1573,7 +1571,7 @@ impl Triangulation {
                     "stroke:rgb(255,0,0)"
                 },
                 line_width
-            ))
+            ));
         }
 
         if debug {
@@ -1592,7 +1590,7 @@ impl Triangulation {
                     dy(self.points[pb].1),
                     line_width,
                     line_width * 2.0
-                ))
+                ));
             }
         }
 
@@ -1622,7 +1620,7 @@ fn min3(buf: &[(usize, f64)], points: &[(f64, f64)]) -> Result<[usize; 3], Error
         return Err(Error::TooFewPoints);
     }
 
-    let mut array = [(0, std::f64::INFINITY); 3];
+    let mut array = [(0, f64::INFINITY); 3];
 
     // Find the closest point (p0)
     for &(p, score) in buf.iter() {
@@ -1934,5 +1932,134 @@ mod tests {
             result.is_ok(),
             "Should handle constraint through hull vertex"
         );
+    }
+
+    /// Reproduce the side_short_B face 0 CDT flood-fill bug.
+    /// The CDT produces 62 triangles but 24 of them are inside holes
+    /// or outside the outer contour.
+    #[test]
+    fn test_side_short_b_face0() {
+        // Regression test: this geometry (from side_short_B face 0 of
+        // box_sides.STEP) previously produced 24 bad triangles due to a
+        // bug in contour.rs where a hull edge's fixed sign was applied
+        // to the wrong edge during positive-contour re-triangulation.
+        let pts: Vec<(f64, f64)> = vec![
+            (1.3799999999999994e0, 2.1270000000000011e0),
+            (3.6999999999999933e-1, 2.1270000000000011e0),
+            (3.6999999999999905e-1, 2.2500000000000009e0),
+            (1.2300000000000062e-1, 2.2499999999999996e0),
+            (1.2300000000000062e-1, 1.4999999999999998e0),
+            (6.3743119852166132e-16, 1.4999999999999998e0),
+            (2.7318479936642632e-16, 5.0000000000000000e-1),
+            (1.2300000000000026e-1, 5.0000000000000000e-1),
+            (1.2300000000000026e-1, -5.0000000000000000e-1),
+            (2.7318479936642632e-16, -5.0000000000000000e-1),
+            (-6.6344879846132087e-16, -1.4999999999999998e0),
+            (1.2299999999999933e-1, -1.4999999999999998e0),
+            (1.2299999999999933e-1, -2.2500000000000009e0),
+            (3.6999999999999905e-1, -2.2500000000000009e0),
+            (3.6999999999999933e-1, -2.1270000000000011e0),
+            (1.3799999999999994e0, -2.1270000000000011e0),
+            (1.3799999999999994e0, -2.2500000000000009e0),
+            (2.3699999999999992e0, -2.2500000000000009e0),
+            (2.3699999999999992e0, -2.1270000000000011e0),
+            (3.3799999999999994e0, -2.1270000000000011e0),
+            (3.3799999999999994e0, -2.2500000000000009e0),
+            (3.6270000000000002e0, -2.2500000000000009e0),
+            (3.6270000000000002e0, -1.4999999999999998e0),
+            (3.7500000000000009e0, -1.4999999999999998e0),
+            (3.7499999999999991e0, -5.0000000000000011e-1),
+            (3.6269999999999993e0, -5.0000000000000011e-1),
+            (3.6269999999999993e0, 4.9999999999999983e-1),
+            (3.7499999999999996e0, 4.9999999999999983e-1),
+            (3.7499999999999978e0, 1.4999999999999998e0),
+            (3.6269999999999980e0, 1.4999999999999998e0),
+            (3.6269999999999980e0, 2.2499999999999996e0),
+            (3.3799999999999994e0, 2.2499999999999996e0),
+            (3.3799999999999994e0, 2.1270000000000011e0),
+            (2.3699999999999992e0, 2.1270000000000011e0),
+            (2.3699999999999992e0, 2.2500000000000009e0),
+            (1.3800000000000001e0, 2.2499999999999996e0),
+            (1.1761683168316832e0, 1.7199999999999991e0),
+            (1.1951984337038619e0, 1.8156708580912717e0),
+            (1.2493916215350467e0, 1.8967766952966365e0),
+            (1.3304974587404115e0, 1.9509698831278213e0),
+            (1.4261683168316841e0, 1.9699999999999995e0),
+            (2.8961683168316825e0, 1.9699999999999989e0),
+            (2.9918391749229549e0, 1.9509698831278206e0),
+            (3.0729450121283195e0, 1.8967766952966358e0),
+            (3.1271381999595040e0, 1.8156708580912715e0),
+            (3.1461683168316821e0, 1.7199999999999991e0),
+            (3.1461683168316821e0, -1.7200000000000013e0),
+            (3.1271381999595036e0, -1.8156708580912742e0),
+            (3.0729450121283186e0, -1.8967766952966389e0),
+            (2.9918391749229540e0, -1.9509698831278239e0),
+            (2.8961683168316812e0, -1.9700000000000017e0),
+            (1.4261683168316830e0, -1.9700000000000017e0),
+            (1.3304974587404104e0, -1.9509698831278233e0),
+            (1.2493916215350458e0, -1.8967766952966385e0),
+            (1.1951984337038610e0, -1.8156708580912739e0),
+            (1.1761683168316832e0, -1.7200000000000013e0),
+            (3.3820000000000019e0, -1.7932500000000009e0),
+            (3.2540000000000013e0, -1.7932500000000009e0),
+            (3.2540000000000027e0, -1.4707500000000024e0),
+            (3.3820000000000006e0, -1.4707500000000024e0),
+            (3.2540000000000027e0, 1.4707499999999991e0),
+            (3.2540000000000027e0, 1.7932499999999976e0),
+            (3.3820000000000019e0, 1.7932499999999976e0),
+            (3.3820000000000019e0, 1.4707499999999991e0),
+        ];
+        let contours: Vec<Vec<usize>> = vec![
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 0],
+            vec![36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 36],
+            vec![56, 57, 58, 59, 56],
+            vec![60, 61, 62, 63, 60],
+        ];
+
+        let t = Triangulation::build_from_contours(&pts, &contours).unwrap();
+
+        // Verify no triangle centroid is inside any hole or outside the outer contour
+        let hole1 = &pts[36..56];
+        let hole2 = &pts[56..60];
+        let hole3 = &pts[60..64];
+        let outer = &pts[0..36];
+
+        let mut bad_triangles = 0;
+        for (a, b, c) in t.triangles() {
+            let cx = (pts[a].0 + pts[b].0 + pts[c].0) / 3.0;
+            let cy = (pts[a].1 + pts[b].1 + pts[c].1) / 3.0;
+            if point_in_polygon_f64(cx, cy, hole1)
+                || point_in_polygon_f64(cx, cy, hole2)
+                || point_in_polygon_f64(cx, cy, hole3)
+                || !point_in_polygon_f64(cx, cy, outer)
+            {
+                bad_triangles += 1;
+            }
+        }
+        assert!(
+            bad_triangles == 0,
+            "CDT produced {} triangles inside holes or outside outer contour",
+            bad_triangles
+        );
+    }
+
+    /// Simple ray-casting point-in-polygon for f64 tuples.
+    fn point_in_polygon_f64(px: f64, py: f64, polygon: &[(f64, f64)]) -> bool {
+        let n = polygon.len();
+        if n < 3 { return false; }
+        let mut inside = false;
+        let mut j = n - 1;
+        for i in 0..n {
+            let (xi, yi) = polygon[i];
+            let (xj, yj) = polygon[j];
+            if (yi > py) != (yj > py) {
+                let x_intersect = xi + (py - yi) / (yj - yi) * (xj - xi);
+                if px < x_intersect {
+                    inside = !inside;
+                }
+            }
+            j = i;
+        }
+        inside
     }
 }

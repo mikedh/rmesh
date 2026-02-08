@@ -235,13 +235,74 @@ impl RepGraph {
     }
 }
 
+/// Extract the length unit scale factor from a STEP file.
+///
+/// STEP files declare their length unit as a complex entity combining
+/// `LENGTH_UNIT`, `NAMED_UNIT`, and either `SI_UNIT` (with optional prefix)
+/// or `CONVERSION_BASED_UNIT` (with a numeric conversion factor).
+///
+/// Returns a scale factor from model units to meters:
+/// - 0.001  for millimetres (`SI_UNIT(.MILLI.,.METRE.)`)
+/// - 1.0    for metres (`SI_UNIT($,.METRE.)`)
+/// - 0.0254 for inches (`CONVERSION_BASED_UNIT('INCH', ...)`)
+/// - 1.0    as fallback if no length unit is found
+fn extract_length_scale(step: &StepFile<'_>) -> f64 {
+    for entity in &step.entities {
+        let ap214::Entity::ComplexEntity(subs) = entity else {
+            continue;
+        };
+
+        // A length-unit complex entity must contain a LengthUnit sub-entity.
+        let has_length_unit = subs
+            .iter()
+            .any(|e| matches!(e, ap214::Entity::LengthUnit(_)));
+        if !has_length_unit {
+            continue;
+        }
+
+        // Check for SI_UNIT with optional prefix
+        for sub in subs {
+            if let ap214::Entity::SiUnit(si) = sub
+                && matches!(si.name, ap214::SiUnitName::Metre)
+            {
+                return match &si.prefix {
+                    Some(ap214::SiPrefix::Milli) => 0.001,
+                    Some(ap214::SiPrefix::Centi) => 0.01,
+                    Some(ap214::SiPrefix::Micro) => 1e-6,
+                    Some(ap214::SiPrefix::Kilo) => 1000.0,
+                    _ => 1.0,
+                };
+            }
+        }
+
+        // Check for CONVERSION_BASED_UNIT — follow its conversion_factor ref
+        for sub in subs {
+            if let ap214::Entity::ConversionBasedUnit(cbu) = sub {
+                let mwu_id = cbu.conversion_factor.index();
+                if let ap214::Entity::MeasureWithUnit(mwu) = &step.entities[mwu_id] {
+                    if let ap214::MeasureValue::LengthMeasure(lm) = &mwu.value_component {
+                        return lm.0;
+                    }
+                    if let ap214::MeasureValue::PositiveLengthMeasure(plm) = &mwu.value_component {
+                        return (plm.0).0 .0;
+                    }
+                }
+            }
+        }
+    }
+
+    // No length unit found — assume metres
+    1.0
+}
+
 /// Convert a parsed STEP file to a Scene.
 fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
+    let length_scale = extract_length_scale(step);
     let graph = RepGraph::build(step);
 
     // If no RRWT edges exist this is a single-body file — fall back to flat scan.
     if graph.roots.is_empty() {
-        return convert_to_scene_flat(step);
+        return convert_to_scene_flat(step, length_scale);
     }
 
     let to_mesh = graph.collect_instances(step);
@@ -249,8 +310,9 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
     let mut scene = Scene::new();
     for (msb_id, (name, transforms)) in &to_mesh {
         if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[*msb_id]
-            && let Ok(brep) = convert_manifold_solid_brep(step, msb)
+            && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
         {
+            brep.length_scale = length_scale;
             scene.add(name, Geometry::Brep(Box::new(brep)), Some(transforms));
         }
     }
@@ -259,13 +321,14 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
 }
 
 /// Flat fallback for single-body STEP files with no representation relationships.
-fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
+fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>, length_scale: f64) -> Result<Scene, StepError> {
     let mut scene = Scene::new();
 
     for (id, entity) in step.entities.iter().enumerate() {
         if let ap214::Entity::ManifoldSolidBrep(msb) = entity
-            && let Ok(brep) = convert_manifold_solid_brep(step, msb)
+            && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
         {
+            brep.length_scale = length_scale;
             scene.add(&format!("brep_{id}"), Geometry::Brep(Box::new(brep)), None);
         }
         if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
@@ -273,8 +336,9 @@ fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError>
             for item_id in &absr.items {
                 let idx = item_id.index();
                 if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[idx]
-                    && let Ok(brep) = convert_manifold_solid_brep(step, msb)
+                    && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
                 {
+                    brep.length_scale = length_scale;
                     scene.add(&name, Geometry::Brep(Box::new(brep)), None);
                 }
             }
@@ -724,19 +788,19 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
         }
         ap214::Entity::CylindricalSurface(cyl) => {
             let (origin, axis, _) = convert_axis2_placement_3d(step, cyl.position.index())?;
-            Ok(Surface::Cylinder(Cylinder {
+            Ok(Surface::Cylinder(Cylinder::new(
                 origin,
                 axis,
-                radius: cyl.radius.0.0.0,
-            }))
+                cyl.radius.0.0.0,
+            )))
         }
         ap214::Entity::ConicalSurface(cone) => {
             let (apex, axis, _) = convert_axis2_placement_3d(step, cone.position.index())?;
-            Ok(Surface::Cone(Cone {
+            Ok(Surface::Cone(Cone::new(
                 apex,
                 axis,
-                half_angle: cone.semi_angle.0,
-            }))
+                cone.semi_angle.0,
+            )))
         }
         ap214::Entity::SphericalSurface(sphere) => {
             let (center, _, _) = convert_axis2_placement_3d(step, sphere.position.index())?;
@@ -747,12 +811,12 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
         }
         ap214::Entity::ToroidalSurface(torus) => {
             let (center, axis, _) = convert_axis2_placement_3d(step, torus.position.index())?;
-            Ok(Surface::Torus(Torus {
+            Ok(Surface::Torus(Torus::new(
                 center,
                 axis,
-                major_radius: torus.major_radius.0.0.0,
-                minor_radius: torus.minor_radius.0.0.0,
-            }))
+                torus.major_radius.0.0.0,
+                torus.minor_radius.0.0.0,
+            )))
         }
         ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf),
         _ => Err(StepError::UnsupportedEntity(format!(
@@ -1392,9 +1456,11 @@ mod tests {
                     mesh.faces.len(),
                     mesh.is_watertight(),
                 );
-                if !mesh.is_watertight() {
-                    println!("    WARNING: '{}' is not watertight", name);
-                }
+                assert!(
+                    mesh.is_watertight(),
+                    "Mesh '{}' must be watertight",
+                    name
+                );
                 total_verts += mesh.vertices.len();
                 total_tris += mesh.faces.len();
             }
@@ -1406,5 +1472,352 @@ mod tests {
         println!("  Tessellate: {}ms", tess_ms);
         println!("  Total: {}ms", parse_ms + tess_ms);
         println!("  Output: {} verts, {} tris", total_verts, total_tris);
+    }
+
+    /// Benchmark loading and tessellating both STEP test files with timing breakdown.
+    ///
+    /// Profiles each phase: preprocess → parse → convert → tessellate
+    #[test]
+    fn test_step_benchmark() {
+        use crate::boundary::tesselate::TesselationParams;
+        use rayon::prelude::*;
+        use std::time::Instant;
+
+        let params = TesselationParams {
+            tolerance: 0.1,
+            min_segments: 4,
+            max_segments: 64,
+            ..Default::default()
+        };
+
+        struct FileResult {
+            name: &'static str,
+            bytes: usize,
+            preprocess_us: u128,
+            parse_us: u128,
+            convert_us: u128,
+            tess_us: u128,
+            brep_faces: usize,
+            verts: usize,
+            tris: usize,
+            watertight: bool,
+        }
+
+        let files: &[(&str, &[u8])] = &[
+            (
+                "featuretype",
+                include_bytes!("../../../../../test/data/featuretype.STEP"),
+            ),
+            (
+                "box_sides",
+                include_bytes!("../../../../../test/data/box_sides.STEP"),
+            ),
+        ];
+
+        let mut results = Vec::new();
+        for &(name, data) in files {
+            let t = Instant::now();
+            let processed = strip_flatten(data);
+            let preprocess_us = t.elapsed().as_micros();
+
+            let t = Instant::now();
+            let step_file = StepFile::parse(&processed);
+            let parse_us = t.elapsed().as_micros();
+
+            let t = Instant::now();
+            let scene = convert_to_scene(&step_file).expect("convert failed");
+            let convert_us = t.elapsed().as_micros();
+
+            let t = Instant::now();
+            let breps: Vec<_> = scene
+                .geometry
+                .values()
+                .filter_map(|geom| {
+                    if let Geometry::Brep(brep) = geom {
+                        Some(brep.as_ref())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let tess_results: Vec<_> = breps
+                .par_iter()
+                .map(|brep| {
+                    let mesh = brep.tesselate(&params);
+                    (brep.faces.len(), mesh.vertices.len(), mesh.faces.len(), mesh.is_watertight())
+                })
+                .collect();
+            let mut total_faces = 0;
+            let mut total_verts = 0;
+            let mut total_tris = 0;
+            let mut all_watertight = true;
+            for &(f, v, t, w) in &tess_results {
+                total_faces += f;
+                total_verts += v;
+                total_tris += t;
+                all_watertight &= w;
+            }
+            let tess_us = t.elapsed().as_micros();
+
+            results.push(FileResult {
+                name,
+                bytes: data.len(),
+                preprocess_us,
+                parse_us,
+                convert_us,
+                tess_us,
+                brep_faces: total_faces,
+                verts: total_verts,
+                tris: total_tris,
+                watertight: all_watertight,
+            });
+        }
+
+        // Print results table
+        println!();
+        println!(
+            "  {:<15} {:>8} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} {:>7} {:>5}",
+            "file", "bytes", "preproc", "parse", "convert", "tess", "total", "faces", "verts", "tris", "wt"
+        );
+        println!("  {}", "-".repeat(103));
+        for r in &results {
+            let total = r.preprocess_us + r.parse_us + r.convert_us + r.tess_us;
+            println!(
+                "  {:<15} {:>7}K {:>7}us {:>5}us {:>5}us {:>5}us {:>5}us {:>6} {:>7} {:>7} {:>5}",
+                r.name,
+                r.bytes / 1024,
+                r.preprocess_us,
+                r.parse_us,
+                r.convert_us,
+                r.tess_us,
+                total,
+                r.brep_faces,
+                r.verts,
+                r.tris,
+                r.watertight,
+            );
+        }
+        println!();
+
+        for r in &results {
+            assert!(r.watertight, "'{}' must be watertight", r.name);
+        }
+    }
+
+    #[test]
+    fn test_rosetta_benchmark() {
+        use crate::boundary::tesselate::TesselationParams;
+        use crate::exchange::gltf::GltfLoader;
+        use crate::mesh::Trimesh;
+        use rayon::prelude::*;
+        use std::time::Instant;
+
+        let rosetta_dir = std::path::Path::new("/home/mikedh/dev/rmesh/feat_obj/reference/rosetta");
+        if !rosetta_dir.is_dir() {
+            eprintln!("Skipping: rosetta directory not found");
+            return;
+        }
+
+        let params = TesselationParams {
+            tolerance: 0.1,
+            min_segments: 4,
+            max_segments: 64,
+            ..Default::default()
+        };
+
+        // Collect all .STEP files
+        let mut step_files: Vec<_> = std::fs::read_dir(rosetta_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("step"))
+            })
+            .collect();
+        step_files.sort_by_key(|e| e.file_name());
+
+        struct FileResult {
+            name: String,
+            bytes: usize,
+            parse_ms: f64,
+            convert_ms: f64,
+            tess_ms: f64,
+            faces: usize,
+            verts: usize,
+            tris: usize,
+            watertight: bool,
+            ref_verts: usize,
+            ref_tris: usize,
+            error: Option<String>,
+        }
+
+        let mut results = Vec::new();
+        for entry in &step_files {
+            let path = entry.path();
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            let data = std::fs::read(&path).unwrap();
+            let bytes = data.len();
+
+            let t = Instant::now();
+            let processed = strip_flatten(&data);
+            let step_file = StepFile::parse(&processed);
+            let parse_ms = t.elapsed().as_secs_f64() * 1e3;
+
+            let t = Instant::now();
+            let scene = match convert_to_scene(&step_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    results.push(FileResult {
+                        name,
+                        bytes,
+                        parse_ms,
+                        convert_ms: 0.0,
+                        tess_ms: 0.0,
+                        faces: 0,
+                        verts: 0,
+                        tris: 0,
+                        watertight: false,
+                        ref_verts: 0,
+                        ref_tris: 0,
+                        error: Some(format!("convert: {e}")),
+                    });
+                    continue;
+                }
+            };
+            let convert_ms = t.elapsed().as_secs_f64() * 1e3;
+
+            let t = Instant::now();
+            let breps: Vec<_> = scene
+                .geometry
+                .values()
+                .filter_map(|geom| {
+                    if let Geometry::Brep(brep) = geom {
+                        Some(brep.as_ref())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let tess_results: Vec<Result<(usize, usize, usize, bool), (usize, String)>> = breps
+                .par_iter()
+                .map(|brep| {
+                    let result = std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| brep.tesselate(&params)),
+                    );
+                    match result {
+                        Ok(mesh) => Ok((
+                            brep.faces.len(),
+                            mesh.vertices.len(),
+                            mesh.faces.len(),
+                            mesh.is_watertight(),
+                        )),
+                        Err(e) => {
+                            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                                s.clone()
+                            } else if let Some(s) = e.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            Err((brep.faces.len(), format!("PANIC: {msg}")))
+                        }
+                    }
+                })
+                .collect();
+
+            let mut total_faces = 0;
+            let mut total_verts = 0;
+            let mut total_tris = 0;
+            let mut all_watertight = true;
+            let mut tess_error = None;
+
+            for r in &tess_results {
+                match r {
+                    Ok((f, v, t, w)) => {
+                        total_faces += f;
+                        total_verts += v;
+                        total_tris += t;
+                        all_watertight &= w;
+                    }
+                    Err((f, msg)) => {
+                        total_faces += f;
+                        tess_error = Some(msg.clone());
+                    }
+                }
+            }
+            let tess_ms = t.elapsed().as_secs_f64() * 1e3;
+
+            // Load reference GLB (cascade tessellation) and compare per-body
+            let glb_path = path.with_extension("STEP.glb");
+            let (ref_verts, ref_tris) = if glb_path.exists() {
+                let glb_data = std::fs::read(&glb_path).unwrap();
+                match GltfLoader::from_glb(&glb_data)
+                    .and_then(|loader| loader.to_scene())
+                {
+                    Ok(ref_scene) => {
+                        let ref_meshes: Vec<&Trimesh> = ref_scene
+                            .geometry
+                            .iter()
+                            .filter_map(|(_, geom)| {
+                                if let Geometry::Mesh(mesh) = geom {
+                                    Some(mesh.as_ref())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let rv: usize = ref_meshes.iter().map(|m| m.vertices.len()).sum();
+                        let rt: usize = ref_meshes.iter().map(|m| m.faces.len()).sum();
+                        (rv, rt)
+                    }
+                    Err(_) => (0, 0),
+                }
+            } else {
+                (0, 0)
+            };
+
+            results.push(FileResult {
+                name,
+                bytes,
+                parse_ms,
+                convert_ms,
+                tess_ms,
+                faces: total_faces,
+                verts: total_verts,
+                tris: total_tris,
+                watertight: all_watertight && tess_error.is_none(),
+                ref_verts,
+                ref_tris,
+                error: tess_error,
+            });
+        }
+
+        // Print results
+        println!();
+        println!(
+            "  {:<20} {:>6} {:>7} {:>7} {:>7} {:>5} {:>7} {:>7} {:>3} {:>7} {:>7}  {}",
+            "file", "KB", "parse", "convert", "tess", "face", "verts", "tris", "wt",
+            "r_verts", "r_tris", "error"
+        );
+        println!("  {}", "-".repeat(120));
+        for r in &results {
+            println!(
+                "  {:<20} {:>6} {:>5.1}ms {:>5.1}ms {:>5.1}ms {:>5} {:>7} {:>7} {:>3} {:>7} {:>7}  {}",
+                r.name,
+                r.bytes / 1024,
+                r.parse_ms,
+                r.convert_ms,
+                r.tess_ms,
+                r.faces,
+                r.verts,
+                r.tris,
+                if r.watertight { "Y" } else { "N" },
+                r.ref_verts,
+                r.ref_tris,
+                r.error.as_deref().unwrap_or(""),
+            );
+        }
+        println!();
     }
 }

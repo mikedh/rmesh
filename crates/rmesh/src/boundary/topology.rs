@@ -519,7 +519,7 @@ pub struct EdgeUse {
 // ============================================================================
 
 /// A complete BREP model containing all topology and geometry.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrepModel {
     pub curves: Vec<Curve>,
     pub vertices: Vec<BrepVertex>,
@@ -529,6 +529,25 @@ pub struct BrepModel {
     pub faces: Vec<BrepFace>,
     pub shells: Vec<BrepShell>,
     pub solids: Vec<BrepSolid>,
+    /// Scale factor from model units to meters (e.g. 0.001 for mm, 0.0254 for inches).
+    /// Used to compute effective tessellation tolerance.
+    pub length_scale: f64,
+}
+
+impl Default for BrepModel {
+    fn default() -> Self {
+        Self {
+            curves: Vec::new(),
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            loops: Vec::new(),
+            face_surfaces: Vec::new(),
+            faces: Vec::new(),
+            shells: Vec::new(),
+            solids: Vec::new(),
+            length_scale: 1.0,
+        }
+    }
 }
 
 /// Errors found during BREP model validation.
@@ -924,6 +943,17 @@ impl BrepModel {
         }
 
         adjacency
+    }
+
+    /// Compute the bounding-box diagonal length in model units.
+    ///
+    /// Used as the characteristic length for relative tolerance computation.
+    /// Returns 0.0 if the model has no vertices.
+    pub fn characteristic_length(&self) -> f64 {
+        match self.bounds() {
+            Some((min, max)) => (max - min).norm(),
+            None => 0.0,
+        }
     }
 
     /// Compute the axis-aligned bounding box of all vertices.

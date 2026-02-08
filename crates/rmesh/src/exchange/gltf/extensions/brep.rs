@@ -89,21 +89,21 @@ impl From<BrepFace> for Surface {
                 axis,
                 radius,
                 ..
-            } => Surface::Cylinder(Cylinder {
+            } => Surface::Cylinder(Cylinder::new(
                 origin,
                 axis,
                 radius,
-            }),
+            )),
             BrepFace::Cone {
                 apex,
                 axis,
                 semi_angle,
                 ..
-            } => Surface::Cone(Cone {
+            } => Surface::Cone(Cone::new(
                 apex,
                 axis,
-                half_angle: semi_angle,
-            }),
+                semi_angle,
+            )),
             BrepFace::Sphere { center, radius, .. } => Surface::Sphere(Sphere { center, radius }),
             BrepFace::Torus {
                 center,
@@ -111,12 +111,12 @@ impl From<BrepFace> for Surface {
                 major_radius,
                 minor_radius,
                 ..
-            } => Surface::Torus(Torus {
+            } => Surface::Torus(Torus::new(
                 center,
                 axis,
                 major_radius,
                 minor_radius,
-            }),
+            )),
         }
     }
 }

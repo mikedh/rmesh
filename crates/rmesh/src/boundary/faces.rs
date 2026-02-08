@@ -8,7 +8,7 @@
 use nalgebra::{Point2, Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
-use crate::creation::Plane;
+use crate::creation::{Plane, perpendicular};
 
 // ============================================================================
 // Tolerance Constants
@@ -118,28 +118,126 @@ impl SurfacePlane {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(into = "CylinderSerde")]
 pub struct Cylinder {
     pub origin: Point3<f64>,
     pub axis: Vector3<f64>,
     pub radius: f64,
+    // Precomputed orthonormal basis perpendicular to axis
+    axis_unit: Vector3<f64>,
+    x_basis: Vector3<f64>,
+    y_basis: Vector3<f64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CylinderSerde {
+    origin: Point3<f64>,
+    axis: Vector3<f64>,
+    radius: f64,
+}
+
+impl From<CylinderSerde> for Cylinder {
+    fn from(s: CylinderSerde) -> Self {
+        Self::new(s.origin, s.axis, s.radius)
+    }
+}
+
+impl From<Cylinder> for CylinderSerde {
+    fn from(c: Cylinder) -> Self {
+        Self { origin: c.origin, axis: c.axis, radius: c.radius }
+    }
+}
+
+impl<'de> Deserialize<'de> for Cylinder {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        CylinderSerde::deserialize(deserializer).map(Into::into)
+    }
 }
 
 impl Cylinder {
+    pub fn new(origin: Point3<f64>, axis: Vector3<f64>, radius: f64) -> Self {
+        let axis_unit = axis.normalize();
+        let x_basis = perpendicular(&axis_unit).normalize();
+        let y_basis = axis_unit.cross(&x_basis);
+        Self { origin, axis, radius, axis_unit, x_basis, y_basis }
+    }
+
+    /// Precomputed orthonormal basis perpendicular to axis.
+    #[inline]
+    pub fn basis(&self) -> (Vector3<f64>, Vector3<f64>) {
+        (self.x_basis, self.y_basis)
+    }
+
+    /// Precomputed unit axis direction.
+    #[inline]
+    pub fn axis_unit(&self) -> Vector3<f64> {
+        self.axis_unit
+    }
+
     /// Curvature of a cylinder is constant: κ₁ = 1/r around the circumference, κ₂ = 0 along the axis.
     pub fn curvature_at(&self, _theta: f64, _h: f64) -> SurfaceCurvature {
         SurfaceCurvature::from_principal(1.0 / self.radius, 0.0)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(into = "ConeSerde")]
 pub struct Cone {
     pub apex: Point3<f64>,
     pub axis: Vector3<f64>,
     pub half_angle: f64,
+    // Precomputed orthonormal basis perpendicular to axis
+    axis_unit: Vector3<f64>,
+    x_basis: Vector3<f64>,
+    y_basis: Vector3<f64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConeSerde {
+    apex: Point3<f64>,
+    axis: Vector3<f64>,
+    half_angle: f64,
+}
+
+impl From<ConeSerde> for Cone {
+    fn from(s: ConeSerde) -> Self {
+        Self::new(s.apex, s.axis, s.half_angle)
+    }
+}
+
+impl From<Cone> for ConeSerde {
+    fn from(c: Cone) -> Self {
+        Self { apex: c.apex, axis: c.axis, half_angle: c.half_angle }
+    }
+}
+
+impl<'de> Deserialize<'de> for Cone {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ConeSerde::deserialize(deserializer).map(Into::into)
+    }
 }
 
 impl Cone {
+    pub fn new(apex: Point3<f64>, axis: Vector3<f64>, half_angle: f64) -> Self {
+        let axis_unit = axis.normalize();
+        let x_basis = perpendicular(&axis_unit).normalize();
+        let y_basis = axis_unit.cross(&x_basis);
+        Self { apex, axis, half_angle, axis_unit, x_basis, y_basis }
+    }
+
+    /// Precomputed orthonormal basis perpendicular to axis.
+    #[inline]
+    pub fn basis(&self) -> (Vector3<f64>, Vector3<f64>) {
+        (self.x_basis, self.y_basis)
+    }
+
+    /// Precomputed unit axis direction.
+    #[inline]
+    pub fn axis_unit(&self) -> Vector3<f64> {
+        self.axis_unit
+    }
+
     /// Curvature of a cone varies with distance from apex.
     ///
     /// At distance d from the apex:
@@ -175,15 +273,65 @@ impl Sphere {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(into = "TorusSerde")]
 pub struct Torus {
     pub center: Point3<f64>,
     pub axis: Vector3<f64>,
     pub major_radius: f64,
     pub minor_radius: f64,
+    // Precomputed orthonormal basis perpendicular to axis
+    axis_unit: Vector3<f64>,
+    x_basis: Vector3<f64>,
+    y_basis: Vector3<f64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TorusSerde {
+    center: Point3<f64>,
+    axis: Vector3<f64>,
+    major_radius: f64,
+    minor_radius: f64,
+}
+
+impl From<TorusSerde> for Torus {
+    fn from(s: TorusSerde) -> Self {
+        Self::new(s.center, s.axis, s.major_radius, s.minor_radius)
+    }
+}
+
+impl From<Torus> for TorusSerde {
+    fn from(t: Torus) -> Self {
+        Self { center: t.center, axis: t.axis, major_radius: t.major_radius, minor_radius: t.minor_radius }
+    }
+}
+
+impl<'de> Deserialize<'de> for Torus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        TorusSerde::deserialize(deserializer).map(Into::into)
+    }
 }
 
 impl Torus {
+    pub fn new(center: Point3<f64>, axis: Vector3<f64>, major_radius: f64, minor_radius: f64) -> Self {
+        let axis_unit = axis.normalize();
+        let x_basis = perpendicular(&axis_unit).normalize();
+        let y_basis = axis_unit.cross(&x_basis);
+        Self { center, axis, major_radius, minor_radius, axis_unit, x_basis, y_basis }
+    }
+
+    /// Precomputed orthonormal basis perpendicular to axis.
+    #[inline]
+    pub fn basis(&self) -> (Vector3<f64>, Vector3<f64>) {
+        (self.x_basis, self.y_basis)
+    }
+
+    /// Precomputed unit axis direction.
+    #[inline]
+    pub fn axis_unit(&self) -> Vector3<f64> {
+        self.axis_unit
+    }
+
     /// Curvature of a torus varies around the tube.
     ///
     /// At tube angle φ (minor angle):
@@ -891,11 +1039,11 @@ mod tests {
 
     #[test]
     fn test_cylinder_project_as_circle_aligned() {
-        let cyl = Surface::Cylinder(Cylinder {
-            origin: Point3::new(1.0, 2.0, 0.0),
-            axis: Vector3::new(0.0, 0.0, 1.0),
-            radius: 5.0,
-        });
+        let cyl = Surface::Cylinder(Cylinder::new(
+            Point3::new(1.0, 2.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            5.0,
+        ));
         let plane = Plane::new(Vector3::new(0.0, 0.0, 1.0), Point3::origin());
         let (center, radius) = cyl.project_as_circle(&plane).unwrap();
         assert_relative_eq!(radius, 5.0, epsilon = 1e-10);
@@ -905,11 +1053,11 @@ mod tests {
 
     #[test]
     fn test_cylinder_project_as_circle_misaligned() {
-        let cyl = Surface::Cylinder(Cylinder {
-            origin: Point3::new(0.0, 0.0, 0.0),
-            axis: Vector3::new(1.0, 0.0, 0.0),
-            radius: 5.0,
-        });
+        let cyl = Surface::Cylinder(Cylinder::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            5.0,
+        ));
         let plane = Plane::new(Vector3::new(0.0, 0.0, 1.0), Point3::origin());
         assert!(cyl.project_as_circle(&plane).is_none());
     }
@@ -926,11 +1074,11 @@ mod tests {
 
     #[test]
     fn test_serde_roundtrip() {
-        let cyl = Surface::Cylinder(Cylinder {
-            origin: Point3::new(1.0, 2.0, 3.0),
-            axis: Vector3::new(0.0, 0.0, 1.0),
-            radius: 5.0,
-        });
+        let cyl = Surface::Cylinder(Cylinder::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            5.0,
+        ));
         let json = serde_json::to_string(&cyl).unwrap();
         let deserialized: Surface = serde_json::from_str(&json).unwrap();
         assert_eq!(cyl, deserialized);
@@ -947,20 +1095,20 @@ mod tests {
             "Plane"
         );
         assert_eq!(
-            Surface::Cylinder(Cylinder {
-                origin: Point3::origin(),
-                axis: Vector3::z(),
-                radius: 1.0,
-            })
+            Surface::Cylinder(Cylinder::new(
+                Point3::origin(),
+                Vector3::z(),
+                1.0,
+            ))
             .kind_name(),
             "Cylinder"
         );
         assert_eq!(
-            Surface::Cone(Cone {
-                apex: Point3::origin(),
-                axis: Vector3::z(),
-                half_angle: 0.5,
-            })
+            Surface::Cone(Cone::new(
+                Point3::origin(),
+                Vector3::z(),
+                0.5,
+            ))
             .kind_name(),
             "Cone"
         );
@@ -973,12 +1121,12 @@ mod tests {
             "Sphere"
         );
         assert_eq!(
-            Surface::Torus(Torus {
-                center: Point3::origin(),
-                axis: Vector3::z(),
-                major_radius: 2.0,
-                minor_radius: 0.5,
-            })
+            Surface::Torus(Torus::new(
+                Point3::origin(),
+                Vector3::z(),
+                2.0,
+                0.5,
+            ))
             .kind_name(),
             "Torus"
         );
@@ -1107,11 +1255,7 @@ mod tests {
     fn test_curvature_cylinder() {
         // Cylinder with radius r has κ₁ = 1/r, κ₂ = 0
         let radius = 5.0;
-        let cyl = Cylinder {
-            origin: Point3::origin(),
-            axis: Vector3::z(),
-            radius,
-        };
+        let cyl = Cylinder::new(Point3::origin(), Vector3::z(), radius);
 
         // Curvature should be constant everywhere on the cylinder
         for theta in [0.0, 1.0, 2.0, 3.0] {
@@ -1162,12 +1306,7 @@ mod tests {
         // Torus: κ₁ = 1/r_minor (constant), κ₂ = cos(φ)/(R + r*cos(φ)) (varies)
         let major_r = 5.0;
         let minor_r = 1.0;
-        let torus = Torus {
-            center: Point3::origin(),
-            axis: Vector3::z(),
-            major_radius: major_r,
-            minor_radius: minor_r,
-        };
+        let torus = Torus::new(Point3::origin(), Vector3::z(), major_r, minor_r);
 
         // κ₁ should always be 1/r_minor
         let curvature_outer = torus.curvature_at(0.0, 0.0); // outer equator (φ = 0)
@@ -1196,11 +1335,7 @@ mod tests {
     fn test_curvature_cone_varies_with_distance() {
         // Cone: κ₁ = cos(α)/r(d) where r(d) = d*tan(α), κ₂ = 0
         let half_angle = std::f64::consts::FRAC_PI_6; // 30 degrees
-        let cone = Cone {
-            apex: Point3::origin(),
-            axis: Vector3::z(),
-            half_angle,
-        };
+        let cone = Cone::new(Point3::origin(), Vector3::z(), half_angle);
 
         // At distance d = 1: r = tan(30°) ≈ 0.577, κ₁ = cos(30°)/r
         let d = 1.0;
@@ -1244,11 +1379,7 @@ mod tests {
         let tolerance = 0.001;
 
         // For a unit cylinder (κ = 1)
-        let cyl = Cylinder {
-            origin: Point3::origin(),
-            axis: Vector3::z(),
-            radius: 1.0,
-        };
+        let cyl = Cylinder::new(Point3::origin(), Vector3::z(), 1.0);
         let curvature = cyl.curvature_at(0.0, 0.0);
         let l_max = curvature.max_edge_length(tolerance);
 
@@ -1270,11 +1401,7 @@ mod tests {
                 origin: Point3::origin(),
                 normal: Vector3::z(),
             }),
-            Surface::Cylinder(Cylinder {
-                origin: Point3::origin(),
-                axis: Vector3::z(),
-                radius: 2.0,
-            }),
+            Surface::Cylinder(Cylinder::new(Point3::origin(), Vector3::z(), 2.0)),
             Surface::Sphere(Sphere {
                 center: Point3::origin(),
                 radius: 3.0,

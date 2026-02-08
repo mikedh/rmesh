@@ -33,7 +33,7 @@ pub struct Contour {
 /// a buddy edge); when that point is triangulated, the hull or half-edge
 /// structure is updated accordingly.
 ///
-/// Triangulation is based on ["Triangulating Monotone Mountains"](http://www.ams.sunysb.edu/~jsbm/courses/345/13/triangulating-monotone-mountains.pdf)
+/// Triangulation is based on [`Triangulating Monotone Mountains`](http://www.ams.sunysb.edu/~jsbm/courses/345/13/triangulating-monotone-mountains.pdf)
 impl Contour {
     fn new(point: PointIndex, data: ContourData, sign: bool) -> Self {
         let n = Node {
@@ -175,10 +175,10 @@ impl Contour {
                 ContourData::None => (),
                 ContourData::Hull(hull_index, sign) => {
                     t.hull.update(hull_index, e_ca);
-                    t.half.set_sign(e_bc, sign);
+                    t.half.set_sign(e_ca, sign);
                 }
                 ContourData::Buddy(b) => t.half.link_new(b, e_ca),
-            };
+            }
             match c.data {
                 ContourData::None => (),
                 ContourData::Hull(hull_index, sign) => {
@@ -186,7 +186,7 @@ impl Contour {
                     t.half.set_sign(e_bc, sign);
                 }
                 ContourData::Buddy(b) => t.half.link_new(b, e_bc),
-            };
+            }
 
             e_ab
         } else {
@@ -229,7 +229,7 @@ impl Contour {
                     t.half.set_sign(e_ac, sign);
                 }
                 ContourData::Buddy(b) => t.half.link_new(b, e_ac),
-            };
+            }
             match c.data {
                 ContourData::None => (),
                 ContourData::Hull(hull_index, sign) => {
@@ -237,7 +237,7 @@ impl Contour {
                     t.half.set_sign(e_cb, sign);
                 }
                 ContourData::Buddy(b) => t.half.link_new(b, e_cb),
-            };
+            }
             e_ba
         };
 

@@ -169,13 +169,12 @@ impl Hull {
 
             if next == start {
                 break;
-            } else {
-                // Assert that position are increasing in the list
-                let my_position = self.data[index].angle;
-                let next_position = self.data[next].angle;
-                assert!(next_position >= my_position);
-                index = next;
             }
+            // Assert that position are increasing in the list
+            let my_position = self.data[index].angle;
+            let next_position = self.data[next].angle;
+            assert!(next_position >= my_position);
+            index = next;
         }
     }
 
@@ -334,6 +333,7 @@ impl Hull {
     }
 
     /// Looks up what bucket a given pseudo-angle will fall into.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn bucket(&self, angle: f64) -> usize {
         (angle * (self.buckets.len() as f64 - 1.0)).round() as usize
     }

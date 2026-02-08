@@ -149,11 +149,11 @@ impl Half {
     }
 
     pub fn iter_edges(&self) -> impl Iterator<Item = (PointIndex, PointIndex, bool)> + '_ {
-        return self
+        self
             .edges
             .iter()
             .filter(|e| e.next != EMPTY_EDGE)
-            .map(|e| (e.src, e.dst, e.fixed()));
+            .map(|e| (e.src, e.dst, e.fixed()))
     }
 
     /// Iterates over all valid edge indices
@@ -208,6 +208,7 @@ impl Half {
 
             let next = self.edge(edge.next);
             let prev = self.edge(edge.prev);
+
             todo.push((next.buddy, inside ^ (next.sign == Some(true))));
             todo.push((prev.buddy, inside ^ (prev.sign == Some(true))));
             if !inside {
@@ -362,7 +363,6 @@ impl Half {
             self.edges[e].prev = EMPTY_EDGE;
             self.edges[e].buddy = EMPTY_EDGE;
         }
-        // TODO: reuse edges once they're erased
     }
 
     /// Links a new edge in the triangulation, copying the value of `fixed`
@@ -376,7 +376,7 @@ impl Half {
     /// Panics if the edges are not compatible or already have buddies.
     pub fn link_new(&mut self, old: EdgeIndex, new: EdgeIndex) {
         self.edges[new].sign = self.edges[old].sign;
-        self.link(old, new)
+        self.link(old, new);
     }
 
     /// Sets a pair of edges as each others buddies.  They must have compatible

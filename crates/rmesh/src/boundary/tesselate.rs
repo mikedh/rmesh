@@ -29,8 +29,11 @@ use crate::mesh::Trimesh;
 /// Parameters controlling tesselation quality.
 #[derive(Debug, Clone)]
 pub struct TesselationParams {
-    /// Maximum chord error (distance from triangle to true surface)
+    /// Absolute chord error in meters.
     pub tolerance: f64,
+    /// Chord error as fraction of bounding-box diagonal.
+    /// Effective tolerance = max(tolerance / length_scale, tolerance_relative * char_length).
+    pub tolerance_relative: f64,
     /// Minimum segments per curved edge
     pub min_segments: usize,
     /// Maximum segments per curved edge
@@ -43,8 +46,9 @@ pub struct TesselationParams {
 impl Default for TesselationParams {
     fn default() -> Self {
         Self {
-            tolerance: 0.001,
-            min_segments: 4,
+            tolerance: 0.0005,     // 0.5mm absolute chord error
+            tolerance_relative: 0.001, // 0.1% of bounding-box diagonal
+            min_segments: 16,      // ensures circles always look circular
             max_segments: 256,
             merge_tolerance: 1e-8, // Small enough to not affect geometry
         }
@@ -62,17 +66,14 @@ pub struct TesselatedFace {
 /// Error analysis for a single triangle during adaptive subdivision.
 ///
 /// Multi-point error checking examines chord error at the centroid and all three
-/// edge midpoints, plus normal deviation. This ensures tolerance is maintained
-/// everywhere, not just at the centroid.
+/// edge midpoints. This ensures tolerance is maintained everywhere, not just
+/// at the centroid.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct TriangleError {
     /// Chord error at triangle centroid
     centroid_error: f64,
     /// Maximum chord error across all three edge midpoints
     max_edge_midpoint_error: f64,
-    /// Maximum angle between surface normal and triangle normal (radians)
-    max_normal_deviation: f64,
     /// Index of the edge with maximum error (0, 1, or 2)
     max_error_edge: usize,
     /// Whether this triangle needs subdivision
@@ -259,18 +260,10 @@ impl SurfacePlane {
 }
 
 impl Cylinder {
-    /// Get orthonormal basis vectors perpendicular to axis.
-    fn basis(&self) -> (Vector3<f64>, Vector3<f64>) {
-        let axis = self.axis.normalize();
-        let x = perpendicular(&axis).normalize();
-        let y = axis.cross(&x);
-        (x, y)
-    }
-
     /// Map 3D point to (theta, h) parameters.
     pub fn to_parametric(&self, point: &Point3<f64>) -> Point2<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
         let d = point - self.origin;
 
         let h = d.dot(&axis);
@@ -283,7 +276,7 @@ impl Cylinder {
     /// Evaluate (theta, h) to 3D point.
     pub fn evaluate(&self, theta: f64, h: f64) -> Point3<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
         let radial = theta.cos() * x_axis + theta.sin() * y_axis;
         self.origin + self.radius * radial + h * axis
     }
@@ -296,18 +289,10 @@ impl Cylinder {
 }
 
 impl Cone {
-    /// Get orthonormal basis vectors perpendicular to axis.
-    fn basis(&self) -> (Vector3<f64>, Vector3<f64>) {
-        let axis = self.axis.normalize();
-        let x = perpendicular(&axis).normalize();
-        let y = axis.cross(&x);
-        (x, y)
-    }
-
     /// Map 3D point to (theta, d) parameters where d is distance from apex.
     pub fn to_parametric(&self, point: &Point3<f64>) -> Point2<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
         let from_apex = point - self.apex;
 
         let d = from_apex.dot(&axis);
@@ -320,7 +305,7 @@ impl Cone {
     /// Evaluate (theta, d) to 3D point.
     pub fn evaluate(&self, theta: f64, d: f64) -> Point3<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
         let r = d * self.half_angle.tan();
         let radial = theta.cos() * x_axis + theta.sin() * y_axis;
         self.apex + d * axis + r * radial
@@ -329,7 +314,7 @@ impl Cone {
     /// Surface normal at (theta, d).
     pub fn normal_at(&self, theta: f64, _d: f64) -> Vector3<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
         let radial = theta.cos() * x_axis + theta.sin() * y_axis;
         // Normal is perpendicular to surface, pointing outward
         let cos_a = self.half_angle.cos();
@@ -374,18 +359,10 @@ impl Sphere {
 }
 
 impl Torus {
-    /// Get orthonormal basis vectors perpendicular to axis.
-    fn basis(&self) -> (Vector3<f64>, Vector3<f64>) {
-        let axis = self.axis.normalize();
-        let x = perpendicular(&axis).normalize();
-        let y = axis.cross(&x);
-        (x, y)
-    }
-
     /// Map 3D point to (major_angle, minor_angle) parameters.
     pub fn to_parametric(&self, point: &Point3<f64>) -> Point2<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
         let d = point - self.center;
 
         // Project onto the torus plane to find major angle
@@ -408,7 +385,7 @@ impl Torus {
     /// Evaluate (major_angle, minor_angle) to 3D point.
     pub fn evaluate(&self, major: f64, minor: f64) -> Point3<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
 
         let tube_center_dir = major.cos() * x_axis + major.sin() * y_axis;
         let tube_center = self.center + self.major_radius * tube_center_dir;
@@ -420,7 +397,7 @@ impl Torus {
     /// Surface normal at (major, minor).
     pub fn normal_at(&self, major: f64, minor: f64) -> Vector3<f64> {
         let (x_axis, y_axis) = self.basis();
-        let axis = self.axis.normalize();
+        let axis = self.axis_unit();
         let tube_center_dir = major.cos() * x_axis + major.sin() * y_axis;
         (minor.cos() * tube_center_dir + minor.sin() * axis).normalize()
     }
@@ -1048,6 +1025,8 @@ struct EdgeDiscretization {
 struct ShellTessellator<'a> {
     model: &'a BrepModel,
     params: &'a TesselationParams,
+    /// Effective tolerance in model units, computed from absolute + relative tolerances.
+    effective_tolerance: f64,
 
     // Phase 1 results
     /// Global vertex pool for the entire shell
@@ -1076,9 +1055,21 @@ struct ShellTessellator<'a> {
 
 impl<'a> ShellTessellator<'a> {
     fn new(model: &'a BrepModel, params: &'a TesselationParams) -> Self {
+        // Convert absolute tolerance from meters to model units, then take the
+        // max with the relative tolerance scaled by bounding-box diagonal.
+        let scale = if model.length_scale > 0.0 {
+            model.length_scale
+        } else {
+            1.0
+        };
+        let char_length = model.characteristic_length();
+        let effective_tolerance = (params.tolerance / scale)
+            .max(params.tolerance_relative * char_length);
+
         Self {
             model,
             params,
+            effective_tolerance,
             vertices: Vec::new(),
             brep_vertex_to_pool: HashMap::new(),
             edge_discretization: HashMap::new(),
@@ -1163,7 +1154,7 @@ impl<'a> ShellTessellator<'a> {
                 if angle <= f64::EPSILON {
                     return self.params.min_segments;
                 }
-                let max_step = (8.0 * self.params.tolerance / c.radius).sqrt();
+                let max_step = (8.0 * self.effective_tolerance / c.radius).sqrt();
                 let n = (angle / max_step).ceil() as usize;
                 n.clamp(self.params.min_segments, self.params.max_segments)
             }
@@ -1178,7 +1169,7 @@ impl<'a> ShellTessellator<'a> {
                 if angle <= f64::EPSILON {
                     return self.params.min_segments;
                 }
-                let max_step = (8.0 * self.params.tolerance / avg_r).sqrt();
+                let max_step = (8.0 * self.effective_tolerance / avg_r).sqrt();
                 let n = (angle / max_step).ceil() as usize;
                 n.clamp(self.params.min_segments, self.params.max_segments)
             }
@@ -1233,7 +1224,7 @@ impl<'a> ShellTessellator<'a> {
         let p_start = curve.evaluate(edge.t_start);
         let p_end = curve.evaluate(edge.t_end);
         let edge_length = (p_end - p_start).norm();
-        let l_max = (8.0 * self.params.tolerance / max_kappa).sqrt();
+        let l_max = (8.0 * self.effective_tolerance / max_kappa).sqrt();
         let n = (edge_length / l_max).ceil() as usize;
         n.clamp(1, self.params.max_segments)
     }
@@ -1385,7 +1376,7 @@ impl<'a> ShellTessellator<'a> {
 
         // Generate interior samples for non-planar surfaces
         let interior_uvs =
-            surface.generate_interior_samples(u_min, u_max, v_min, v_max, self.params.tolerance);
+            surface.generate_interior_samples(u_min, u_max, v_min, v_max, self.effective_tolerance);
 
         // Add interior points to vertex lists
         // Interior points are unconstrained - CDT will connect them appropriately
@@ -1414,12 +1405,17 @@ impl<'a> ShellTessellator<'a> {
                     // Convert CDT output (tuples) to arrays
                     // Map triangles back to original indices using merged_to_original
                     // Use filter_map with bounds checking to avoid panics on invalid indices
+                    // Also skip degenerate triangles where merging collapsed two vertices
                     tris.iter()
                         .filter_map(|&(a, b, c)| {
-                            let orig_a = merge_result.merged_to_original.get(a)?;
-                            let orig_b = merge_result.merged_to_original.get(b)?;
-                            let orig_c = merge_result.merged_to_original.get(c)?;
-                            Some([*orig_a, *orig_b, *orig_c])
+                            let orig_a = *merge_result.merged_to_original.get(a)?;
+                            let orig_b = *merge_result.merged_to_original.get(b)?;
+                            let orig_c = *merge_result.merged_to_original.get(c)?;
+                            // Skip degenerate triangles (two or more vertices collapsed)
+                            if orig_a == orig_b || orig_b == orig_c || orig_c == orig_a {
+                                return None;
+                            }
+                            Some([orig_a, orig_b, orig_c])
                         })
                         .collect()
                 }
@@ -1445,7 +1441,6 @@ impl<'a> ShellTessellator<'a> {
                         tris.iter().map(|&(a, b, c)| [a, b, c]).collect()
                     } else {
                         // Both UV and plane projection triangulation failed
-                        // This is rare and indicates a degenerate face
                         // Suppress unused variable warning
                         let _ = face_idx;
                         Vec::new()
@@ -1468,7 +1463,8 @@ impl<'a> ShellTessellator<'a> {
     /// Uses incremental tracking: only checks faces that were modified in the previous
     /// iteration, reducing complexity from O(F × T × I) to O(M × T_avg × I) where M << F.
     fn phase3_global_refinement(&mut self) {
-        const MAX_ITERATIONS: usize = 10;
+        const MAX_ITERATIONS: usize = 5;
+        const MAX_VERTICES: usize = 200_000;
 
         // Initially, all non-planar faces need checking
         let mut faces_to_check: HashSet<usize> = self
@@ -1482,16 +1478,34 @@ impl<'a> ShellTessellator<'a> {
             })
             .collect();
 
+        let mut prev_edge_count = usize::MAX;
+
         for _iteration in 0..MAX_ITERATIONS {
+            // Safety: bail if we've exceeded the vertex budget
+            if self.vertices.len() > MAX_VERTICES {
+                break;
+            }
+
             // 3a. Collect all edges needing refinement from faces in the work set
             // Map: (pool_a, pool_b) -> first face_idx that requested it (for UV computation)
             let mut edges_to_refine: HashMap<(usize, usize), usize> = HashMap::new();
 
             for &face_idx in &faces_to_check {
                 let state = &self.face_states[face_idx];
+                let face = &self.model.faces[face_idx];
+                let surface = &self.model.face_surfaces[face.surface];
+
+                // Pre-evaluate all vertex positions for this face (read-only phase).
+                // Each vertex is shared by ~5-6 triangles, so this avoids redundant
+                // surface.evaluate() calls.
+                let positions: Vec<Point3<f64>> = state
+                    .vertices_uv
+                    .iter()
+                    .map(|uv| surface.evaluate(uv.x, uv.y))
+                    .collect();
 
                 for tri in &state.triangles {
-                    let error = self.check_triangle_error_state(face_idx, state, tri);
+                    let error = self.check_triangle_error_state(face_idx, state, tri, &positions);
 
                     if error.needs_subdivision {
                         // Find the edge with maximum error
@@ -1514,6 +1528,13 @@ impl<'a> ShellTessellator<'a> {
             if edges_to_refine.is_empty() {
                 break;
             }
+
+            // No-progress bail: if edges_to_refine count hasn't decreased, stop
+            let edge_count = edges_to_refine.len();
+            if edge_count >= prev_edge_count {
+                break;
+            }
+            prev_edge_count = edge_count;
 
             // Track which faces get modified for next iteration
             let mut modified_faces: HashSet<usize> = HashSet::new();
@@ -1605,12 +1626,13 @@ impl<'a> ShellTessellator<'a> {
     // Phase 3.5: Merge Duplicate 3D Vertices
     // =========================================================================
 
-    /// Check triangle error using face state.
+    /// Check triangle error using face state and pre-evaluated vertex positions.
     fn check_triangle_error_state(
         &self,
         face_idx: usize,
         state: &FaceTriangulation,
         tri: &[usize; 3],
+        positions: &[Point3<f64>],
     ) -> TriangleError {
         let face = &self.model.faces[face_idx];
         let surface = &self.model.face_surfaces[face.surface];
@@ -1619,9 +1641,9 @@ impl<'a> ShellTessellator<'a> {
         let uv1 = state.vertices_uv[tri[1]];
         let uv2 = state.vertices_uv[tri[2]];
 
-        let p0 = surface.evaluate(uv0.x, uv0.y);
-        let p1 = surface.evaluate(uv1.x, uv1.y);
-        let p2 = surface.evaluate(uv2.x, uv2.y);
+        let p0 = positions[tri[0]];
+        let p1 = positions[tri[1]];
+        let p2 = positions[tri[2]];
 
         // Check centroid error
         let uv_center = Point2::from((uv0.coords + uv1.coords + uv2.coords) / 3.0);
@@ -1655,27 +1677,12 @@ impl<'a> ShellTessellator<'a> {
             }
         }
 
-        // Check normal deviation
-        let tri_normal = (p1 - p0).cross(&(p2 - p0));
-        let tri_normal_len = tri_normal.norm();
-        let normal_deviation = if tri_normal_len > GEOMETRY_TOL {
-            let tri_normal_unit = tri_normal / tri_normal_len;
-            let surface_normal = surface.normal_at(uv_center.x, uv_center.y);
-            let dot = tri_normal_unit.dot(&surface_normal).clamp(-1.0, 1.0);
-            dot.abs().acos()
-        } else {
-            0.0
-        };
-
         let max_error = centroid_error.max(max_edge_error);
-        // Only use chord error for subdivision criterion
-        // Normal deviation check was causing excessive refinement
-        let needs_subdivision = max_error > self.params.tolerance;
+        let needs_subdivision = max_error > self.effective_tolerance;
 
         TriangleError {
             centroid_error,
             max_edge_midpoint_error: max_edge_error,
-            max_normal_deviation: normal_deviation,
             max_error_edge,
             needs_subdivision,
         }
@@ -1794,20 +1801,35 @@ impl<'a> ShellTessellator<'a> {
 
     /// Tessellate all faces and return a Trimesh.
     fn tessellate(mut self) -> Trimesh {
+        let t = std::time::Instant::now();
+
         // Phase 1: Discretize all edges globally
         self.phase1_discretize_all_edges();
+        let p1 = t.elapsed();
 
         // Phase 2: Initial triangulation for each face (no subdivision)
         for face_idx in 0..self.model.faces.len() {
             let state = self.phase2_initial_triangulation(face_idx);
             self.face_states.push(state);
         }
+        let p2 = t.elapsed() - p1;
 
         // Phase 3: Global refinement loop
         self.phase3_global_refinement();
+        let p3 = t.elapsed() - p1 - p2;
 
         // Phase 4: Final assembly
         self.phase4_final_assembly();
+        let p4 = t.elapsed() - p1 - p2 - p3;
+
+        #[cfg(test)]
+        eprintln!(
+            "    tess phases: edge={:.1}ms CDT={:.1}ms refine={:.1}ms assemble={:.1}ms",
+            p1.as_secs_f64() * 1e3,
+            p2.as_secs_f64() * 1e3,
+            p3.as_secs_f64() * 1e3,
+            p4.as_secs_f64() * 1e3,
+        );
 
         // Build Trimesh with attributes
         let mut attrs_vertex = Attributes::default();
@@ -1953,11 +1975,7 @@ mod tests {
 
     #[test]
     fn test_cylinder_parametric_roundtrip() {
-        let cyl = Cylinder {
-            origin: Point3::origin(),
-            axis: Vector3::z(),
-            radius: 2.0,
-        };
+        let cyl = Cylinder::new(Point3::origin(), Vector3::z(), 2.0);
 
         // Test points on the cylinder
         for theta in [0.0, FRAC_PI_2, PI, -FRAC_PI_2] {
@@ -2413,11 +2431,11 @@ mod tests {
             },
         ]);
 
-        let cyl_surf = model.add_surface(Surface::Cylinder(Cylinder {
-            origin: Point3::origin(),
-            axis: Vector3::z(),
-            radius: 1.0,
-        }));
+        let cyl_surf = model.add_surface(Surface::Cylinder(Cylinder::new(
+            Point3::origin(),
+            Vector3::z(),
+            1.0,
+        )));
 
         model.add_face(cyl_surf, loop1, vec![], true);
 
@@ -2958,11 +2976,7 @@ mod tests {
         });
         assert!(!plane.is_angular());
 
-        let cylinder = Surface::Cylinder(Cylinder {
-            origin: Point3::origin(),
-            axis: Vector3::z(),
-            radius: 1.0,
-        });
+        let cylinder = Surface::Cylinder(Cylinder::new(Point3::origin(), Vector3::z(), 1.0));
         assert!(cylinder.is_angular());
 
         let sphere = Surface::Sphere(Sphere {
@@ -2971,19 +2985,10 @@ mod tests {
         });
         assert!(sphere.is_angular());
 
-        let cone = Surface::Cone(Cone {
-            apex: Point3::origin(),
-            axis: Vector3::z(),
-            half_angle: 0.5,
-        });
+        let cone = Surface::Cone(Cone::new(Point3::origin(), Vector3::z(), 0.5));
         assert!(cone.is_angular());
 
-        let torus = Surface::Torus(Torus {
-            center: Point3::origin(),
-            axis: Vector3::z(),
-            major_radius: 2.0,
-            minor_radius: 0.5,
-        });
+        let torus = Surface::Torus(Torus::new(Point3::origin(), Vector3::z(), 2.0, 0.5));
         assert!(torus.is_angular());
     }
 

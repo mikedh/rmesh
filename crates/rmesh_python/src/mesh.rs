@@ -1989,21 +1989,21 @@ fn parse_surface_dicts(
                 let origin: [f64; 3] = get_key!(dict, "origin")?.extract()?;
                 let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
                 let radius: f64 = get_key!(dict, "radius")?.extract()?;
-                rmesh::boundary::Surface::Cylinder(faces::Cylinder {
-                    origin: Point3::new(origin[0], origin[1], origin[2]),
-                    axis: Vector3::new(axis[0], axis[1], axis[2]),
+                rmesh::boundary::Surface::Cylinder(faces::Cylinder::new(
+                    Point3::new(origin[0], origin[1], origin[2]),
+                    Vector3::new(axis[0], axis[1], axis[2]),
                     radius,
-                })
+                ))
             }
             "Cone" => {
                 let apex: [f64; 3] = get_key!(dict, "apex")?.extract()?;
                 let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
                 let half_angle: f64 = get_key!(dict, "half_angle")?.extract()?;
-                rmesh::boundary::Surface::Cone(faces::Cone {
-                    apex: Point3::new(apex[0], apex[1], apex[2]),
-                    axis: Vector3::new(axis[0], axis[1], axis[2]),
+                rmesh::boundary::Surface::Cone(faces::Cone::new(
+                    Point3::new(apex[0], apex[1], apex[2]),
+                    Vector3::new(axis[0], axis[1], axis[2]),
                     half_angle,
-                })
+                ))
             }
             "Sphere" => {
                 let center: [f64; 3] = get_key!(dict, "center")?.extract()?;
@@ -2018,12 +2018,12 @@ fn parse_surface_dicts(
                 let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
                 let major_radius: f64 = get_key!(dict, "major_radius")?.extract()?;
                 let minor_radius: f64 = get_key!(dict, "minor_radius")?.extract()?;
-                rmesh::boundary::Surface::Torus(faces::Torus {
-                    center: Point3::new(center[0], center[1], center[2]),
-                    axis: Vector3::new(axis[0], axis[1], axis[2]),
+                rmesh::boundary::Surface::Torus(faces::Torus::new(
+                    Point3::new(center[0], center[1], center[2]),
+                    Vector3::new(axis[0], axis[1], axis[2]),
                     major_radius,
                     minor_radius,
-                })
+                ))
             }
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
