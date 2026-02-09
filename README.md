@@ -62,6 +62,14 @@ uv sync
 
 Then `cargo test` and `uv run pytest` work from anywhere in the workspace. The `uv sync` must happen first because `pyo3-build-config` (a dependency) builds before our code, and it needs `.venv/bin/python` to exist when it runs. If you are working entirely in the `crates/rmesh` in a rust-only project you shouldn't need UV.
 
+#### Build Profiles
+
+| Command | Profile | Use case |
+|---------|---------|----------|
+| `uv sync` | dev (debug) | Day-to-day development, fast rebuild |
+| `uv pip install .` | release (LTO) | Local release build for benchmarking |
+| `uv build` | release (LTO) | Build distributable wheel |
+
 ### Running Tests
 
 Run the trimesh test suite with rmesh compatibility comparison:

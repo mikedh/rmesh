@@ -12,6 +12,11 @@ starlark = "0.12"
 shaderloom = { git = "https://github.com/PyryM/shaderloom", rev = "b9646069e351cbc8164f7462adeb276b55e6ad9a" }
 wgpu = "28"
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
 [workspace.lints.rust]
 # Safety
 unsafe_code = "deny"

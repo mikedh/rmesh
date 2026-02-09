@@ -23,11 +23,15 @@ test = ["pytest", "trimesh"]
 manifest-path = "crates/rmesh_python/Cargo.toml"
 features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 python-source = "python"
+editable-profile = "dev"
 
-# [tool.uv]
-# Always rebuild the local Rust extension so `uv run` picks up source changes.
-# reinstall-package = ["rmesh"]
-
+[tool.uv]
+cache-keys = [
+    {file = "Cargo.toml"},
+    {file = "crates/**/Cargo.toml"},
+    {file = "crates/**/*.rs"},
+    {file = "crates/**/*.wgsl"},
+]
 
 [tool.uv.sources]
 trimesh = { path = "test/trimesh", editable = true }
