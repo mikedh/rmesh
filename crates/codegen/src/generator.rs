@@ -84,7 +84,10 @@ impl<'a> TypeMap<'a> {
         self.to_rtype(s)
     }
     fn is_entity(&self, s: &str) -> bool {
-        let t = self.0.get(s).expect(&format!("Could not get {:?}", s));
+        let t = self
+            .0
+            .get(s)
+            .unwrap_or_else(|| panic!("Could not get {s:?}"));
         match &t {
             Type::Entity { .. } => true,
             Type::Select(v) => v.iter().all(|s| self.is_entity(s)),
@@ -92,7 +95,10 @@ impl<'a> TypeMap<'a> {
         }
     }
     fn to_rtype(&self, s: &str) -> String {
-        let t = self.0.get(s).expect(&format!("Could not get {:?}", s));
+        let t = self
+            .0
+            .get(s)
+            .unwrap_or_else(|| panic!("Could not get {s:?}"));
         match &t {
             Type::Entity { .. }
             | Type::Redeclared(_)
@@ -259,7 +265,10 @@ impl<'a> TypeMap<'a> {
         if !self.0.contains_key(s) {
             self.build(s);
         }
-        let t = self.0.get(s).expect(&format!("Could not get {:?}", s));
+        let t = self
+            .0
+            .get(s)
+            .unwrap_or_else(|| panic!("Could not get {s:?}"));
         if let Type::Entity { attrs, .. } = &t {
             attrs.clone()
         } else {
@@ -960,7 +969,7 @@ impl<'a> SelectType<'a> {
                     t.disambiguate(entity_names);
                 }
             }
-            _ => panic!("Nope nope nope"),
+            _ => panic!("Unsupported SELECT extension type"),
         }
     }
 }

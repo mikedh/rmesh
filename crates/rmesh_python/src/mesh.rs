@@ -1980,10 +1980,10 @@ fn parse_surface_dicts(
             "Plane" => {
                 let origin: [f64; 3] = get_key!(dict, "origin")?.extract()?;
                 let normal: [f64; 3] = get_key!(dict, "normal")?.extract()?;
-                rmesh::boundary::Surface::Plane(faces::SurfacePlane {
-                    origin: Point3::new(origin[0], origin[1], origin[2]),
-                    normal: Vector3::new(normal[0], normal[1], normal[2]),
-                })
+                rmesh::boundary::Surface::Plane(faces::SurfacePlane::new(
+                    Point3::new(origin[0], origin[1], origin[2]),
+                    Vector3::new(normal[0], normal[1], normal[2]),
+                ))
             }
             "Cylinder" => {
                 let origin: [f64; 3] = get_key!(dict, "origin")?.extract()?;

@@ -1413,7 +1413,6 @@ impl<'a> ShellTessellator<'a> {
                 surface.unwrap_uvs(&mut outer_uvs);
 
                 // Collect all inner loop UV coordinates
-                let mut any_outside = false;
                 for &inner_loop_idx in &face.inner_loops {
                     let inner_loop = &self.model.loops[inner_loop_idx];
                     let inner_pool_indices = self.collect_loop_indices(inner_loop);
@@ -1427,7 +1426,6 @@ impl<'a> ShellTessellator<'a> {
                     // Check each inner vertex against the outer polygon
                     for inner_uv in &inner_uvs {
                         if !point_in_polygon(inner_uv, &outer_uvs) {
-                            any_outside = true;
                             // Find closest outer edge
                             let (edge_local_idx, _dist_sq) =
                                 closest_polygon_edge(inner_uv, &outer_uvs);
@@ -1440,13 +1438,8 @@ impl<'a> ShellTessellator<'a> {
                     }
                 }
 
-                if !any_outside {
-                    continue;
-                }
-
-                // Also log this for debugging
                 #[cfg(test)]
-                if _iteration == 0 {
+                if !edges_to_refine.is_empty() && _iteration == 0 {
                     eprintln!(
                         "    inner vertices outside outer polygon, refining {} edges",
                         edges_to_refine.len()
@@ -2141,37 +2134,36 @@ impl<'a> ShellTessellator<'a> {
 
     /// Tessellate all faces and return a Trimesh.
     fn tessellate(mut self) -> Trimesh {
-        let t = std::time::Instant::now();
+        let _t1 = std::time::Instant::now();
 
         // Phase 1: Discretize all edges globally
         self.phase1_discretize_all_edges();
 
         // Phase 1.5: Refine outer contours where inner loops escape the outer polygon
         self.phase1_5_refine_outer_contours();
-        let p1 = t.elapsed();
+        let _t2 = std::time::Instant::now();
 
         // Phase 2: Initial triangulation for each face (no subdivision)
         for face_idx in 0..self.model.faces.len() {
             let state = self.phase2_initial_triangulation(face_idx);
             self.face_states.push(state);
         }
-        let p2 = t.elapsed() - p1;
+        let _t3 = std::time::Instant::now();
 
         // Phase 3: Global refinement loop
         self.phase3_global_refinement();
-        let p3 = t.elapsed() - p1 - p2;
+        let _t4 = std::time::Instant::now();
 
         // Phase 4: Final assembly
         self.phase4_final_assembly();
-        let _p4 = t.elapsed() - p1 - p2 - p3;
 
         #[cfg(test)]
         eprintln!(
             "    tess phases: edge={:.1}ms CDT={:.1}ms refine={:.1}ms assemble={:.1}ms",
-            p1.as_secs_f64() * 1e3,
-            p2.as_secs_f64() * 1e3,
-            p3.as_secs_f64() * 1e3,
-            _p4.as_secs_f64() * 1e3,
+            (_t2 - _t1).as_secs_f64() * 1e3,
+            (_t3 - _t2).as_secs_f64() * 1e3,
+            (_t4 - _t3).as_secs_f64() * 1e3,
+            (std::time::Instant::now() - _t4).as_secs_f64() * 1e3,
         );
 
         // Build Trimesh with attributes
