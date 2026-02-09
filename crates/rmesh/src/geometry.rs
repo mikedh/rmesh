@@ -1,5 +1,6 @@
 use nalgebra::Point3;
 
+use crate::boundary::BrepModel;
 use crate::creation::feature::FeatureModel;
 use crate::mesh::Trimesh;
 use crate::path::{Path2D, Path3D};
@@ -48,6 +49,8 @@ pub enum Geometry {
     Feature(Box<FeatureModel>),
     /// A point cloud
     PointCloud(PointCloud),
+    /// A BREP (boundary representation) solid model
+    Brep(Box<BrepModel>),
 }
 
 impl Geometry {
@@ -67,6 +70,7 @@ impl Geometry {
             Geometry::Path3D(path) => path.bounds(),
             Geometry::PointCloud(pc) => pc.bounds(),
             Geometry::Feature(_) => None,
+            Geometry::Brep(brep) => brep.bounds(),
         }
     }
 }

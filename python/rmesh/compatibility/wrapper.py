@@ -12,17 +12,11 @@ def _cascadio_to_rmesh_surface(d):
     """Remap a cascadio surface dict to the format expected by rmesh.
 
     Cascadio uses ``"type"`` (lowercase) while rmesh expects ``"kind"``
-    (capitalized).  Extra keys like ``face_index`` and ``extent_*`` are
-    stripped since the Rust parser doesn't expect them.
+    (capitalized).  All other keys are passed through since the Rust
+    parser ignores unknown fields via ``serde(default)``.
     """
-    kind = d["type"].capitalize()
-    out = {"kind": kind}
-    # Copy geometry keys that rmesh expects
-    for key in ("origin", "normal", "axis", "radius",
-                "center", "apex", "half_angle",
-                "major_radius", "minor_radius"):
-        if key in d:
-            out[key] = d[key]
+    out = {k: v for k, v in d.items() if k != "type"}
+    out["kind"] = d["type"].capitalize()
     return out
 
 

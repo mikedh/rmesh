@@ -13,7 +13,6 @@ use pyo3::types::PyDict;
 use rmesh::attributes::{
     AlphaMode, Attributes, Grouping, GroupingKind, Material, SimpleMaterial, UNSET,
 };
-use rmesh::boundary::faces;
 use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
 use rmesh::geometry::Geometry;
 use rmesh::mesh::Trimesh;
@@ -1540,47 +1539,7 @@ impl PyTrimesh {
 
         let surfaces = pyo3::types::PyList::empty(py);
         for s in &self.data.face_surfaces {
-            let dict = PyDict::new(py);
-            match s {
-                rmesh::boundary::Surface::Plane(p) => {
-                    dict.set_item("kind", "Plane").unwrap();
-                    dict.set_item("origin", [p.origin.x, p.origin.y, p.origin.z])
-                        .unwrap();
-                    dict.set_item("normal", [p.normal.x, p.normal.y, p.normal.z])
-                        .unwrap();
-                }
-                rmesh::boundary::Surface::Cylinder(c) => {
-                    dict.set_item("kind", "Cylinder").unwrap();
-                    dict.set_item("origin", [c.origin.x, c.origin.y, c.origin.z])
-                        .unwrap();
-                    dict.set_item("axis", [c.axis.x, c.axis.y, c.axis.z])
-                        .unwrap();
-                    dict.set_item("radius", c.radius).unwrap();
-                }
-                rmesh::boundary::Surface::Cone(c) => {
-                    dict.set_item("kind", "Cone").unwrap();
-                    dict.set_item("apex", [c.apex.x, c.apex.y, c.apex.z])
-                        .unwrap();
-                    dict.set_item("axis", [c.axis.x, c.axis.y, c.axis.z])
-                        .unwrap();
-                    dict.set_item("half_angle", c.half_angle).unwrap();
-                }
-                rmesh::boundary::Surface::Sphere(s) => {
-                    dict.set_item("kind", "Sphere").unwrap();
-                    dict.set_item("center", [s.center.x, s.center.y, s.center.z])
-                        .unwrap();
-                    dict.set_item("radius", s.radius).unwrap();
-                }
-                rmesh::boundary::Surface::Torus(t) => {
-                    dict.set_item("kind", "Torus").unwrap();
-                    dict.set_item("center", [t.center.x, t.center.y, t.center.z])
-                        .unwrap();
-                    dict.set_item("axis", [t.axis.x, t.axis.y, t.axis.z])
-                        .unwrap();
-                    dict.set_item("major_radius", t.major_radius).unwrap();
-                    dict.set_item("minor_radius", t.minor_radius).unwrap();
-                }
-            }
+            let dict = value_to_pydict(py, &s.to_dict());
             surfaces.append(dict).unwrap();
         }
 
@@ -2019,6 +1978,68 @@ fn load_with_resolver(
     }
 }
 
+/// Convert a Python dict to a `serde_json::Value`.
+///
+/// Handles the subset of types used by surface dicts: strings, floats, and
+/// lists of floats. Unknown value types are silently skipped.
+fn pydict_to_value(dict: &Bound<'_, PyDict>) -> PyResult<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for (key, val) in dict.iter() {
+        let k: String = key.extract()?;
+        if let Ok(s) = val.extract::<String>() {
+            map.insert(k, serde_json::Value::String(s));
+        } else if let Ok(f) = val.extract::<f64>() {
+            let num = serde_json::Number::from_f64(f).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "surface field '{k}' has non-finite value {f}"
+                ))
+            })?;
+            map.insert(k, serde_json::Value::Number(num));
+        } else if let Ok(arr) = val.extract::<Vec<f64>>() {
+            let json_arr: Vec<serde_json::Value> = arr
+                .into_iter()
+                .map(|f| {
+                    serde_json::Number::from_f64(f)
+                        .map(serde_json::Value::Number)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "surface field '{k}' has non-finite value {f}"
+                            ))
+                        })
+                })
+                .collect::<PyResult<_>>()?;
+            map.insert(k, serde_json::Value::Array(json_arr));
+        }
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+/// Convert a `serde_json::Value` (object) to a Python dict.
+fn value_to_pydict<'py>(py: Python<'py>, value: &serde_json::Value) -> Bound<'py, PyDict> {
+    let dict = PyDict::new(py);
+    if let Some(obj) = value.as_object() {
+        for (k, v) in obj {
+            match v {
+                serde_json::Value::String(s) => {
+                    dict.set_item(k, s).unwrap();
+                }
+                serde_json::Value::Number(n) => {
+                    if let Some(f) = n.as_f64() {
+                        dict.set_item(k, f).unwrap();
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    let floats: Vec<f64> =
+                        arr.iter().filter_map(|v| v.as_f64()).collect();
+                    dict.set_item(k, floats).unwrap();
+                }
+                _ => {}
+            }
+        }
+    }
+    dict
+}
+
 /// Parse a list of Python dicts into `(Vec<Surface>, Vec<String>)`.
 fn parse_surface_dicts(
     dicts: &[Bound<'_, PyDict>],
@@ -2027,77 +2048,10 @@ fn parse_surface_dicts(
     let mut names = Vec::new();
 
     for dict in dicts {
-        let kind: String = dict
-            .get_item("kind")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'kind' key"))?
-            .extract()?;
-
-        macro_rules! get_key {
-            ($dict:expr, $key:expr) => {
-                $dict.get_item($key)?.ok_or_else(|| {
-                    pyo3::exceptions::PyKeyError::new_err(format!("surface missing '{}'", $key))
-                })
-            };
-        }
-
-        let surface = match kind.as_str() {
-            "Plane" => {
-                let origin: [f64; 3] = get_key!(dict, "origin")?.extract()?;
-                let normal: [f64; 3] = get_key!(dict, "normal")?.extract()?;
-                rmesh::boundary::Surface::Plane(faces::SurfacePlane {
-                    origin: Point3::new(origin[0], origin[1], origin[2]),
-                    normal: Vector3::new(normal[0], normal[1], normal[2]),
-                })
-            }
-            "Cylinder" => {
-                let origin: [f64; 3] = get_key!(dict, "origin")?.extract()?;
-                let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
-                let radius: f64 = get_key!(dict, "radius")?.extract()?;
-                rmesh::boundary::Surface::Cylinder(faces::Cylinder {
-                    origin: Point3::new(origin[0], origin[1], origin[2]),
-                    axis: Vector3::new(axis[0], axis[1], axis[2]),
-                    radius,
-                })
-            }
-            "Cone" => {
-                let apex: [f64; 3] = get_key!(dict, "apex")?.extract()?;
-                let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
-                let half_angle: f64 = get_key!(dict, "half_angle")?.extract()?;
-                rmesh::boundary::Surface::Cone(faces::Cone {
-                    apex: Point3::new(apex[0], apex[1], apex[2]),
-                    axis: Vector3::new(axis[0], axis[1], axis[2]),
-                    half_angle,
-                })
-            }
-            "Sphere" => {
-                let center: [f64; 3] = get_key!(dict, "center")?.extract()?;
-                let radius: f64 = get_key!(dict, "radius")?.extract()?;
-                rmesh::boundary::Surface::Sphere(faces::Sphere {
-                    center: Point3::new(center[0], center[1], center[2]),
-                    radius,
-                })
-            }
-            "Torus" => {
-                let center: [f64; 3] = get_key!(dict, "center")?.extract()?;
-                let axis: [f64; 3] = get_key!(dict, "axis")?.extract()?;
-                let major_radius: f64 = get_key!(dict, "major_radius")?.extract()?;
-                let minor_radius: f64 = get_key!(dict, "minor_radius")?.extract()?;
-                rmesh::boundary::Surface::Torus(faces::Torus {
-                    center: Point3::new(center[0], center[1], center[2]),
-                    axis: Vector3::new(axis[0], axis[1], axis[2]),
-                    major_radius,
-                    minor_radius,
-                })
-            }
-            other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Unknown surface kind: '{}'",
-                    other
-                )));
-            }
-        };
-
-        names.push(kind);
+        let value = pydict_to_value(dict)?;
+        let surface = rmesh::boundary::Surface::from_dict(value)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        names.push(surface.kind_name().to_string());
         surfaces.push(surface);
     }
 

@@ -4,13 +4,12 @@
 //! from the extension JSON and maps per-face surface indices via an accessor.
 
 use anyhow::{Context, Result};
-use nalgebra::{Point3, Vector3};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::attributes::{Grouping, GroupingKind, UNSET};
+use crate::boundary::faces::SurfaceDict;
 use crate::boundary::Surface;
-use crate::boundary::faces::{Cone, Cylinder, Sphere, SurfacePlane, Torus};
 
 use super::PrimitiveResult;
 
@@ -20,105 +19,7 @@ use super::PrimitiveResult;
 struct BrepFacesExt {
     face_indices: usize,
     #[serde(default)]
-    faces: Vec<Option<BrepFace>>,
-}
-
-/// A single BREP face surface definition, tagged by `"type"`.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-#[allow(dead_code)]
-enum BrepFace {
-    Plane {
-        origin: Point3<f64>,
-        normal: Vector3<f64>,
-        #[serde(default)]
-        x_dir: Option<Vector3<f64>>,
-        #[serde(default)]
-        extent_x: Option<[f64; 2]>,
-        #[serde(default)]
-        extent_y: Option<[f64; 2]>,
-    },
-    Cylinder {
-        origin: Point3<f64>,
-        axis: Vector3<f64>,
-        radius: f64,
-        #[serde(default)]
-        extent_angle: Option<[f64; 2]>,
-        #[serde(default)]
-        extent_height: Option<[f64; 2]>,
-    },
-    Cone {
-        apex: Point3<f64>,
-        axis: Vector3<f64>,
-        semi_angle: f64,
-        #[serde(default)]
-        ref_radius: Option<f64>,
-        #[serde(default)]
-        extent_angle: Option<[f64; 2]>,
-        #[serde(default)]
-        extent_distance: Option<[f64; 2]>,
-    },
-    Sphere {
-        center: Point3<f64>,
-        radius: f64,
-        #[serde(default)]
-        extent_longitude: Option<[f64; 2]>,
-        #[serde(default)]
-        extent_latitude: Option<[f64; 2]>,
-    },
-    Torus {
-        center: Point3<f64>,
-        axis: Vector3<f64>,
-        major_radius: f64,
-        minor_radius: f64,
-        #[serde(default)]
-        extent_major_angle: Option<[f64; 2]>,
-        #[serde(default)]
-        extent_minor_angle: Option<[f64; 2]>,
-    },
-}
-
-impl From<BrepFace> for Surface {
-    fn from(face: BrepFace) -> Self {
-        match face {
-            BrepFace::Plane { origin, normal, .. } => {
-                Surface::Plane(SurfacePlane { origin, normal })
-            }
-            BrepFace::Cylinder {
-                origin,
-                axis,
-                radius,
-                ..
-            } => Surface::Cylinder(Cylinder {
-                origin,
-                axis,
-                radius,
-            }),
-            BrepFace::Cone {
-                apex,
-                axis,
-                semi_angle,
-                ..
-            } => Surface::Cone(Cone {
-                apex,
-                axis,
-                half_angle: semi_angle,
-            }),
-            BrepFace::Sphere { center, radius, .. } => Surface::Sphere(Sphere { center, radius }),
-            BrepFace::Torus {
-                center,
-                axis,
-                major_radius,
-                minor_radius,
-                ..
-            } => Surface::Torus(Torus {
-                center,
-                axis,
-                major_radius,
-                minor_radius,
-            }),
-        }
-    }
+    faces: Vec<Option<SurfaceDict>>,
 }
 
 /// Handle the `TM_brep_faces` primitive extension.
@@ -126,23 +27,41 @@ impl From<BrepFace> for Surface {
 /// `face_surfaces` in the result is a compact lookup table of surfaces.
 /// `surface_grouping.indices` maps each triangle to a surface index, or
 /// [`UNSET`] for triangles whose BREP face is null.
+///
+/// Backward compatibility transforms applied before parsing:
+/// - `"type"` → `"kind"` key rename (old tag key)
+/// - Lowercase variant aliases (e.g. `"plane"`) via `SurfaceDict` serde
+/// - `"semi_angle"` → `"half_angle"` alias on `Cone` via `SurfaceDict` serde
 pub fn handle_brep_faces(
     data: &Value,
     accessor_reader: &dyn Fn(usize) -> Result<Vec<usize>>,
 ) -> Result<PrimitiveResult> {
+    // Backward compat: old files used "type" as tag key instead of "kind"
+    let mut data = data.clone();
+    if let Some(faces) = data.get_mut("faces").and_then(|f| f.as_array_mut()) {
+        for face in faces {
+            if let Some(obj) = face.as_object_mut()
+                && let Some(v) = obj.remove("type")
+            {
+                obj.entry("kind").or_insert(v);
+            }
+        }
+    }
+
     let ext: BrepFacesExt =
-        serde_json::from_value(data.clone()).context("failed to parse TM_brep_faces")?;
+        serde_json::from_value(data).context("failed to parse TM_brep_faces")?;
 
     // Read per-face surface indices from the accessor
     let raw_indices = accessor_reader(ext.face_indices)?;
 
     // Build compact surface list, remapping old→new indices.
-    let mut surfaces: Vec<Surface> = Vec::new();
+    let mut surfaces = Vec::new();
     let mut names: Vec<String> = Vec::new();
     let mut old_to_new: Vec<usize> = vec![UNSET; ext.faces.len()];
     for (old_idx, entry) in ext.faces.into_iter().enumerate() {
-        if let Some(face) = entry {
-            let surface = Surface::from(face);
+        if let Some(dict) = entry
+            && let Ok(surface) = Surface::try_from(dict)
+        {
             let new_idx = surfaces.len();
             names.push(surface.kind_name().to_string());
             surfaces.push(surface);
@@ -180,13 +99,13 @@ mod tests {
     use approx::assert_relative_eq;
 
     fn parse_face(json: serde_json::Value) -> Surface {
-        Surface::from(serde_json::from_value::<BrepFace>(json).unwrap())
+        Surface::from_dict(json).unwrap()
     }
 
     #[test]
     fn test_parse_plane() {
         let surface = parse_face(serde_json::json!({
-            "type": "plane",
+            "kind": "Plane",
             "origin": [1.0, 2.0, 3.0],
             "normal": [0.0, 0.0, 1.0]
         }));
@@ -204,7 +123,7 @@ mod tests {
     #[test]
     fn test_parse_cylinder() {
         let surface = parse_face(serde_json::json!({
-            "type": "cylinder",
+            "kind": "Cylinder",
             "origin": [0.0, 0.0, 0.0],
             "axis": [0.0, 1.0, 0.0],
             "radius": 0.005
@@ -221,10 +140,10 @@ mod tests {
     #[test]
     fn test_parse_cone() {
         let surface = parse_face(serde_json::json!({
-            "type": "cone",
+            "kind": "Cone",
             "apex": [0.0, 0.0, 5.0],
             "axis": [0.0, 0.0, 1.0],
-            "semi_angle": 0.3
+            "half_angle": 0.3
         }));
         match surface {
             Surface::Cone(c) => {
@@ -238,7 +157,7 @@ mod tests {
     #[test]
     fn test_parse_sphere() {
         let surface = parse_face(serde_json::json!({
-            "type": "sphere",
+            "kind": "Sphere",
             "center": [1.0, 2.0, 3.0],
             "radius": 1.0
         }));
@@ -254,7 +173,7 @@ mod tests {
     #[test]
     fn test_parse_torus() {
         let surface = parse_face(serde_json::json!({
-            "type": "torus",
+            "kind": "Torus",
             "center": [0.0, 0.0, 0.0],
             "axis": [0.0, 0.0, 1.0],
             "major_radius": 2.0,
@@ -271,8 +190,29 @@ mod tests {
 
     #[test]
     fn test_parse_unknown_type() {
-        let json = serde_json::json!({"type": "nurbs"});
-        assert!(serde_json::from_value::<BrepFace>(json).is_err());
+        let json = serde_json::json!({"kind": "nurbs"});
+        assert!(Surface::from_dict(json).is_err());
+    }
+
+    /// Backward compat: old GLBs use "type" + lowercase + "semi_angle"
+    #[test]
+    fn test_backward_compat_old_glb_format() {
+        let data = serde_json::json!({
+            "faceIndices": 0,
+            "faces": [
+                {"type": "plane", "origin": [0.0, 0.0, 0.0], "normal": [0.0, 1.0, 0.0]},
+                {"type": "cone", "apex": [0.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "semi_angle": 0.3}
+            ]
+        });
+
+        let mock_reader = |_idx: usize| -> Result<Vec<usize>> { Ok(vec![0, 1]) };
+        let result = handle_brep_faces(&data, &mock_reader).unwrap();
+        assert_eq!(result.face_surfaces.len(), 2);
+        assert!(matches!(result.face_surfaces[0], Surface::Plane(_)));
+        match &result.face_surfaces[1] {
+            Surface::Cone(c) => assert_relative_eq!(c.half_angle, 0.3),
+            _ => panic!("expected Cone"),
+        }
     }
 
     #[test]
@@ -280,8 +220,8 @@ mod tests {
         let data = serde_json::json!({
             "faceIndices": 0,
             "faces": [
-                {"type": "plane", "origin": [0.0, 0.0, 0.0], "normal": [0.0, 1.0, 0.0]},
-                {"type": "cylinder", "origin": [0.0, 0.0, 0.0], "axis": [0.0, 1.0, 0.0], "radius": 0.005}
+                {"kind": "Plane", "origin": [0.0, 0.0, 0.0], "normal": [0.0, 1.0, 0.0]},
+                {"kind": "Cylinder", "origin": [0.0, 0.0, 0.0], "axis": [0.0, 1.0, 0.0], "radius": 0.005}
             ]
         });
 
@@ -308,9 +248,9 @@ mod tests {
         let data = serde_json::json!({
             "faceIndices": 0,
             "faces": [
-                {"type": "plane", "origin": [0.0, 0.0, 0.0], "normal": [0.0, 1.0, 0.0]},
+                {"kind": "Plane", "origin": [0.0, 0.0, 0.0], "normal": [0.0, 1.0, 0.0]},
                 null,
-                {"type": "cylinder", "origin": [0.0, 0.0, 0.0], "axis": [0.0, 1.0, 0.0], "radius": 0.005}
+                {"kind": "Cylinder", "origin": [0.0, 0.0, 0.0], "axis": [0.0, 1.0, 0.0], "radius": 0.005}
             ]
         });
 

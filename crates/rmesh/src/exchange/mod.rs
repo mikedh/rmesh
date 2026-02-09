@@ -36,6 +36,8 @@ pub enum FileType {
     SLDPRT,
     /// rmesh CAD format (binary or JSON)
     RCAD,
+    /// STEP / ISO 10303-21 boundary representation
+    STEP,
 }
 
 impl FileType {
@@ -53,6 +55,7 @@ impl FileType {
             "glb" => Ok(FileType::GLB),
             "sldprt" => Ok(FileType::SLDPRT),
             "rcad" => Ok(FileType::RCAD),
+            "step" | "stp" => Ok(FileType::STEP),
             _ => Err(anyhow::anyhow!("Unsupported file type: `{}`", clean)),
         }
     }
@@ -93,6 +96,11 @@ impl FileType {
         // ASCII STL starts with "solid"
         if data.len() >= 5 && (data[0..5] == *b"solid" || data[0..5] == *b"SOLID") {
             return Some(FileType::STL);
+        }
+
+        // STEP / ISO 10303-21 starts with "ISO-10303-21;"
+        if data.len() >= 13 && &data[..13] == b"ISO-10303-21;" {
+            return Some(FileType::STEP);
         }
 
         // GLTF JSON starts with '{' (possibly with whitespace)
@@ -171,6 +179,9 @@ pub fn load(
             let model = FeatureModel::from_bytes(data)?;
             ("feature".to_string(), Geometry::Feature(Box::new(model)))
         }
+        FileType::STEP => {
+            return crate::boundary::step::from_step(data).map_err(|e| anyhow::anyhow!("{e}"));
+        }
     };
 
     let mut scene = Scene::new();
@@ -240,6 +251,13 @@ mod tests {
         assert_eq!(FileType::from_extension("RCAD").unwrap(), FileType::RCAD);
         assert_eq!(FileType::from_extension(".rcad").unwrap(), FileType::RCAD);
 
+        // STEP variations
+        assert_eq!(FileType::from_extension("step").unwrap(), FileType::STEP);
+        assert_eq!(FileType::from_extension("stp").unwrap(), FileType::STEP);
+        assert_eq!(FileType::from_extension(".STEP").unwrap(), FileType::STEP);
+        assert_eq!(FileType::from_extension(".STP").unwrap(), FileType::STEP);
+        assert_eq!(FileType::from_extension("  .StP ").unwrap(), FileType::STEP);
+
         // Unknown
         assert!(FileType::from_extension("foo").is_err());
     }
@@ -261,6 +279,10 @@ mod tests {
         // ASCII STL
         let ascii_stl = b"solid cube\nfacet normal 0 0 1\n";
         assert_eq!(FileType::from_bytes(ascii_stl), Some(FileType::STL));
+
+        // STEP header
+        let step_header = b"ISO-10303-21;\nHEADER;\n";
+        assert_eq!(FileType::from_bytes(step_header), Some(FileType::STEP));
 
         // Unknown
         let unknown = b"UNKNOWN";

@@ -37,6 +37,7 @@ cast_possible_wrap = "warn"
 cast_sign_loss = "warn"
 float_cmp = "warn"
 panic = "warn"
+disallowed_methods = "deny"
 
 # Relax overly pedantic or noisy lints
 missing_errors_doc = "allow"
