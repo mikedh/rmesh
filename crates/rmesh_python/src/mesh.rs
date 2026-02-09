@@ -1687,6 +1687,73 @@ impl PyTrimesh {
         })
     }
 
+    /// Split the mesh into sub-meshes.
+    ///
+    /// Parameters
+    /// ----------
+    /// on : str, optional
+    ///     If None (default), split by connected components.
+    ///     If a string, split by the named face grouping attribute:
+    ///     "material", "group", "smoothing", "object", or "surface".
+    ///
+    /// Returns
+    /// -------
+    /// list of Trimesh
+    ///     The sub-meshes. Empty list for empty meshes.
+    #[pyo3(signature = (*, on=None))]
+    fn split(&self, on: Option<&str>) -> PyResult<Vec<Self>> {
+        let kind = match on {
+            None => None,
+            Some(s) => {
+                let k = match s {
+                    "material" => GroupingKind::Material,
+                    "group" => GroupingKind::Group,
+                    "smoothing" => GroupingKind::Smoothing,
+                    "object" => GroupingKind::Object,
+                    "surface" => GroupingKind::Surface,
+                    other => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "Unknown grouping kind: '{}'. Use 'material', 'group', 'smoothing', 'object', or 'surface'",
+                            other
+                        )));
+                    }
+                };
+                Some(k)
+            }
+        };
+        Ok(self
+            .data
+            .split(kind.as_ref())
+            .into_iter()
+            .map(Self::new_from_trimesh)
+            .collect())
+    }
+
+    /// Directed boundary edges (edges shared by exactly one face).
+    ///
+    /// Shape (N, 2) where each row is a directed edge [v0, v1] preserving
+    /// the winding from the original face. Empty if the mesh is watertight.
+    #[getter]
+    fn edges_boundary(&self, py: Python<'_>) -> Py<PyArray2<i64>> {
+        let edges = self.data.edges_boundary();
+        let flat: Vec<i64> = edges
+            .iter()
+            .flat_map(|e| [e[0] as i64, e[1] as i64])
+            .collect();
+        let nd = Array2::from_shape_vec((edges.len(), 2), flat).unwrap();
+        let arr = PyArray2::from_array(py, &nd);
+        make_readonly(&arr);
+        arr.unbind()
+    }
+
+    /// Fill simple holes by fan-triangulating boundary loops.
+    ///
+    /// Returns a new mesh with additional faces closing each hole.
+    /// Check ``is_watertight`` on the result to see if all holes were filled.
+    fn fill_holes(&self) -> Self {
+        Self::new_from_trimesh(self.data.fill_holes())
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<rmesh.Trimesh vertices: ({}, 3) faces: ({}, 3)>",

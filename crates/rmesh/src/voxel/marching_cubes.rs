@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use nalgebra::Point3;
 use wgpu::util::DeviceExt;
 
-use super::{bgl_storage_ro, bgl_storage_rw, bgl_uniform, VoxelGrid};
+use super::{VoxelGrid, bgl_storage_ro, bgl_storage_rw, bgl_uniform};
 
 /// Standard marching cubes edge table (256 entries).
 /// Each entry is a 12-bit mask indicating which edges are intersected.
@@ -535,14 +535,9 @@ impl VoxelGrid {
             }
 
             let mut face = [0usize; 3];
-            for v in 0..3usize {
+            for (v, face_slot) in face.iter_mut().enumerate() {
                 let off = base + v * 4;
-                let eid = u32::from_le_bytes([
-                    raw[off],
-                    raw[off + 1],
-                    raw[off + 2],
-                    raw[off + 3],
-                ]);
+                let eid = u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
 
                 let idx = *edge_to_vertex.entry(eid).or_insert_with(|| {
                     let i = vertices.len();
@@ -567,7 +562,7 @@ impl VoxelGrid {
                     ));
                     i
                 });
-                face[v] = idx;
+                *face_slot = idx;
             }
 
             if face[0] != face[1] && face[1] != face[2] && face[0] != face[2] {

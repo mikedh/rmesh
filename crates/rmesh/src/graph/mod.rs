@@ -5,4 +5,4 @@
 
 pub mod adjacency;
 
-pub use adjacency::{EdgeGroups, ManifoldStatus, SortedEdge};
+pub use adjacency::{EdgeGroups, ManifoldStatus, SortedEdge, connected_components};

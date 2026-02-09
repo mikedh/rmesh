@@ -128,6 +128,7 @@ impl VoxelGrid {
         // Explicit zero-init: wgpu spec says buffers are zero-initialized, but
         // some backends may recycle memory. A stale voxel propagates through
         // flood-fill → region splitting → non-deterministic decomposition.
+        #[allow(clippy::cast_possible_truncation)]
         queue.write_buffer(&grid_buffer, 0, &vec![0u8; (total_voxels * 4) as usize]);
 
         let grid = Self {
@@ -172,6 +173,7 @@ impl VoxelGrid {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        #[allow(clippy::cast_possible_truncation)]
         queue.write_buffer(&grid_buffer, 0, &vec![0u8; (total_voxels * 4) as usize]);
 
         Self {
@@ -204,13 +206,7 @@ impl VoxelGrid {
         let dim = (extent / pitch).ceil() as u32 + 2;
         let dims = [dim.min(1023), dim.min(1023), dim.min(1023)];
 
-        let grid = Self::empty(
-            Arc::clone(&device),
-            Arc::clone(&queue),
-            dims,
-            origin,
-            pitch,
-        );
+        let grid = Self::empty(device, queue, dims, origin, pitch);
         // mode=0 (sphere), params=[radius, 0, 0, 0]
         grid.run_sdf_fill(0, center, [radius as f32, 0.0, 0.0, 0.0]);
         grid
@@ -241,13 +237,7 @@ impl VoxelGrid {
         ];
         let dims = [dims[0].min(1023), dims[1].min(1023), dims[2].min(1023)];
 
-        let grid = Self::empty(
-            Arc::clone(&device),
-            Arc::clone(&queue),
-            dims,
-            origin,
-            pitch,
-        );
+        let grid = Self::empty(device, queue, dims, origin, pitch);
         // mode=1 (box), params=[hx, hy, hz, 0]
         grid.run_sdf_fill(1, center, [hx as f32, hy as f32, hz as f32, 0.0]);
         grid
@@ -281,19 +271,9 @@ impl VoxelGrid {
         ];
         let dims = [dims[0].min(1023), dims[1].min(1023), dims[2].min(1023)];
 
-        let grid = Self::empty(
-            Arc::clone(&device),
-            Arc::clone(&queue),
-            dims,
-            origin,
-            pitch,
-        );
+        let grid = Self::empty(device, queue, dims, origin, pitch);
         // mode=2 (cylinder), params=[radius, half_height, axis, 0]
-        grid.run_sdf_fill(
-            2,
-            center,
-            [radius as f32, hh as f32, f32::from(axis), 0.0],
-        );
+        grid.run_sdf_fill(2, center, [radius as f32, hh as f32, f32::from(axis), 0.0]);
         grid
     }
 
@@ -423,6 +403,7 @@ impl VoxelGrid {
     /// A filled voxel is "shell" if at least one 6-neighbor is unfilled.
     /// Interior filled voxels become `Undefined` (0). The result is a
     /// GPU-resident grid — no readback occurs.
+    #[must_use]
     pub fn shell(&self) -> VoxelGrid {
         let total = self.total_voxels();
 
@@ -554,16 +535,19 @@ impl VoxelGrid {
     }
 
     /// Boolean union: combine two grids, keeping voxels from either.
+    #[must_use]
     pub fn union(&self, other: &VoxelGrid) -> VoxelGrid {
         self.run_boolean(other, 0)
     }
 
     /// Boolean intersection: keep only voxels present in both grids.
+    #[must_use]
     pub fn intersection(&self, other: &VoxelGrid) -> VoxelGrid {
         self.run_boolean(other, 1)
     }
 
     /// Boolean difference: keep voxels from self that are not in other.
+    #[must_use]
     pub fn difference(&self, other: &VoxelGrid) -> VoxelGrid {
         self.run_boolean(other, 2)
     }
@@ -706,8 +690,7 @@ impl VoxelGrid {
         self.queue.submit(Some(enc.finish()));
 
         let data = crate::gpu::gpu_read_buffer(&self.device, &readback);
-        let count =
-            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
 
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -715,7 +698,8 @@ impl VoxelGrid {
             if base + 12 > data.len() {
                 break;
             }
-            let x = u32::from_le_bytes([data[base], data[base + 1], data[base + 2], data[base + 3]]);
+            let x =
+                u32::from_le_bytes([data[base], data[base + 1], data[base + 2], data[base + 3]]);
             let y = u32::from_le_bytes([
                 data[base + 4],
                 data[base + 5],
@@ -773,6 +757,7 @@ impl VoxelGrid {
             mapped_at_creation: false,
         });
         // Zero-initialize (atomicMax starts from 0)
+        #[allow(clippy::cast_possible_truncation)]
         let zeros = vec![0u8; (extremes_count * 4) as usize];
         self.queue.write_buffer(&extremes_buf, 0, &zeros);
 
@@ -814,12 +799,12 @@ impl VoxelGrid {
                 ),
             });
 
-        let support_bgl =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("convex_support_bgl"),
-                    entries: &[bgl_uniform(0), bgl_storage_ro(1), bgl_storage_rw(2)],
-                });
+        let support_bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("convex_support_bgl"),
+                entries: &[bgl_uniform(0), bgl_storage_ro(1), bgl_storage_rw(2)],
+            });
 
         let support_pl = self
             .device
@@ -895,17 +880,17 @@ impl VoxelGrid {
                 ),
             });
 
-        let compact_bgl =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("convex_compact_bgl"),
-                    entries: &[
-                        bgl_uniform(0),
-                        bgl_storage_ro(1),
-                        bgl_storage_ro(2),
-                        bgl_storage_rw(3),
-                    ],
-                });
+        let compact_bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("convex_compact_bgl"),
+                entries: &[
+                    bgl_uniform(0),
+                    bgl_storage_ro(1),
+                    bgl_storage_ro(2),
+                    bgl_storage_rw(3),
+                ],
+            });
 
         let compact_pl = self
             .device
@@ -993,8 +978,7 @@ impl VoxelGrid {
         self.queue.submit(Some(enc.finish()));
 
         let data = crate::gpu::gpu_read_buffer(&self.device, &readback);
-        let count =
-            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
 
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -1002,12 +986,8 @@ impl VoxelGrid {
             if base + 16 > data.len() {
                 break;
             }
-            let rid = u32::from_le_bytes([
-                data[base],
-                data[base + 1],
-                data[base + 2],
-                data[base + 3],
-            ]);
+            let rid =
+                u32::from_le_bytes([data[base], data[base + 1], data[base + 2], data[base + 3]]);
             let x = u32::from_le_bytes([
                 data[base + 4],
                 data[base + 5],
@@ -1076,9 +1056,7 @@ impl VoxelGrid {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("cs_sdf_fill"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/cs_sdf_fill.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cs_sdf_fill.wgsl").into()),
             });
 
         let bgl = self
@@ -1203,9 +1181,12 @@ impl VoxelGrid {
 
         #[allow(clippy::cast_sign_loss)]
         let out_dims = [
-            2u32.max(((out_max.x - out_min.x) / pitch).ceil() as u32 + 1).min(1023),
-            2u32.max(((out_max.y - out_min.y) / pitch).ceil() as u32 + 1).min(1023),
-            2u32.max(((out_max.z - out_min.z) / pitch).ceil() as u32 + 1).min(1023),
+            2u32.max(((out_max.x - out_min.x) / pitch).ceil() as u32 + 1)
+                .min(1023),
+            2u32.max(((out_max.y - out_min.y) / pitch).ceil() as u32 + 1)
+                .min(1023),
+            2u32.max(((out_max.z - out_min.z) / pitch).ceil() as u32 + 1)
+                .min(1023),
         ];
 
         let out_grid = VoxelGrid::empty(
@@ -1301,9 +1282,7 @@ impl VoxelGrid {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("cs_boolean"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/cs_boolean.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cs_boolean.wgsl").into()),
             });
 
         let bgl = self
@@ -2803,13 +2782,7 @@ mod tests {
             None => return,
         };
 
-        let grid = VoxelGrid::empty(
-            dev,
-            queue,
-            [10, 10, 10],
-            Point3::origin(),
-            0.1,
-        );
+        let grid = VoxelGrid::empty(dev, queue, [10, 10, 10], Point3::origin(), 0.1);
         assert_eq!(grid.dims(), [10, 10, 10]);
         assert_eq!(grid.volume(), 0.0);
         let data = grid.to_array();
@@ -2832,12 +2805,16 @@ mod tests {
 
         println!(
             "test_sphere_volume: volume={:.4}, expected={:.4}, error={:.2}%",
-            vol, expected, error * 100.0
+            vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.05,
             "Sphere volume should be ~{:.4}, got {:.4} (error {:.2}%)",
-            expected, vol, error * 100.0
+            expected,
+            vol,
+            error * 100.0
         );
     }
 
@@ -2857,12 +2834,16 @@ mod tests {
 
         println!(
             "test_cuboid_volume: volume={:.4}, expected={:.4}, error={:.2}%",
-            vol, expected, error * 100.0
+            vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.05,
             "Cuboid volume should be ~{:.1}, got {:.4} (error {:.2}%)",
-            expected, vol, error * 100.0
+            expected,
+            vol,
+            error * 100.0
         );
     }
 
@@ -2883,12 +2864,16 @@ mod tests {
 
         println!(
             "test_cylinder_volume: volume={:.4}, expected={:.4}, error={:.2}%",
-            vol, expected, error * 100.0
+            vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.05,
             "Cylinder volume should be ~{:.4}, got {:.4} (error {:.2}%)",
-            expected, vol, error * 100.0
+            expected,
+            vol,
+            error * 100.0
         );
     }
 
@@ -2935,7 +2920,13 @@ mod tests {
             [1.0, 1.0, 1.0],
             pitch,
         );
-        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let b = VoxelGrid::cuboid(
+            dev,
+            queue,
+            Point3::new(1.0, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
         let u = a.union(&b);
         let vol = u.volume();
         let expected = 1.5;
@@ -2943,7 +2934,9 @@ mod tests {
 
         println!(
             "test_boolean_union_volume: vol={:.4}, expected={:.4}, error={:.2}%",
-            vol, expected, error * 100.0
+            vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.10,
@@ -2969,7 +2962,13 @@ mod tests {
             [1.0, 1.0, 1.0],
             pitch,
         );
-        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let b = VoxelGrid::cuboid(
+            dev,
+            queue,
+            Point3::new(1.0, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
         let inter = a.intersection(&b);
         let vol = inter.volume();
         let expected = 0.5; // overlap region: [0.5,1.0] in X, [0,1] in Y,Z
@@ -2977,7 +2976,9 @@ mod tests {
 
         println!(
             "test_boolean_intersection_volume: vol={:.4}, expected={:.4}, error={:.2}%",
-            vol, expected, error * 100.0
+            vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.10,
@@ -3003,7 +3004,13 @@ mod tests {
             [1.0, 1.0, 1.0],
             pitch,
         );
-        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let b = VoxelGrid::cuboid(
+            dev,
+            queue,
+            Point3::new(1.0, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
         let diff = a.difference(&b);
         let vol = diff.volume();
         let expected = 0.5; // A minus overlap: 1.0 - 0.5 = 0.5
@@ -3011,7 +3018,9 @@ mod tests {
 
         println!(
             "test_boolean_difference_volume: vol={:.4}, expected={:.4}, error={:.2}%",
-            vol, expected, error * 100.0
+            vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.10,
@@ -3037,7 +3046,13 @@ mod tests {
             [1.0, 1.0, 1.0],
             pitch,
         );
-        let b = VoxelGrid::cuboid(dev, queue, Point3::new(1.0, 0.5, 0.5), [1.0, 1.0, 1.0], pitch);
+        let b = VoxelGrid::cuboid(
+            dev,
+            queue,
+            Point3::new(1.0, 0.5, 0.5),
+            [1.0, 1.0, 1.0],
+            pitch,
+        );
         let u = a.union(&b);
 
         let (verts, faces) = u.to_mesh();
@@ -3051,7 +3066,11 @@ mod tests {
 
         println!(
             "test_boolean_union_to_mesh: verts={}, faces={}, mesh_vol={:.4}, expected={:.2}, error={:.2}%",
-            verts.len(), faces.len(), mesh_vol, expected, error * 100.0
+            verts.len(),
+            faces.len(),
+            mesh_vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.15,
@@ -3083,7 +3102,11 @@ mod tests {
 
         println!(
             "test_marching_cubes_sphere: verts={}, faces={}, mesh_vol={:.4}, expected={:.4}, error={:.2}%",
-            verts.len(), faces.len(), mesh_vol, expected, error * 100.0
+            verts.len(),
+            faces.len(),
+            mesh_vol,
+            expected,
+            error * 100.0
         );
         assert!(
             error < 0.10,

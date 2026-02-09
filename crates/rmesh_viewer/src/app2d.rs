@@ -197,12 +197,12 @@ impl ApplicationHandler for Viewer2DApp<'_> {
                 if state.left_down
                     && let Some((lx, ly)) = state.last_mouse
                 {
-                        let w = f64::from(state.gpu.surface_config.width);
-                        let h = f64::from(state.gpu.surface_config.height);
-                        let dx = (x - lx) / w;
-                        let dy = (y - ly) / h;
-                        state.view.pan(dx, dy, aspect);
-                        regenerate_overlays(state);
+                    let w = f64::from(state.gpu.surface_config.width);
+                    let h = f64::from(state.gpu.surface_config.height);
+                    let dx = (x - lx) / w;
+                    let dy = (y - ly) / h;
+                    state.view.pan(dx, dy, aspect);
+                    regenerate_overlays(state);
                     state.window.request_redraw();
                 }
 

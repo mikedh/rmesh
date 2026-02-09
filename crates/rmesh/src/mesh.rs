@@ -184,6 +184,64 @@ impl Trimesh {
         })
     }
 
+    /// Concatenate multiple meshes into a single mesh.
+    ///
+    /// Vertices are concatenated in order and face indices are offset accordingly.
+    /// Vertex and face attributes are concatenated channel-wise (see `Attributes::concatenate`).
+    /// Materials and face surfaces are concatenated with grouping indices remapped.
+    ///
+    /// Returns an empty mesh if the input slice is empty.
+    pub fn concatenate(meshes: &[&Trimesh]) -> Self {
+        if meshes.is_empty() {
+            return Self::default();
+        }
+        if meshes.len() == 1 {
+            return meshes[0].clone();
+        }
+
+        let total_verts: usize = meshes.iter().map(|m| m.vertices.len()).sum();
+        let total_faces: usize = meshes.iter().map(|m| m.faces.len()).sum();
+
+        let mut vertices = Vec::with_capacity(total_verts);
+        let mut faces = Vec::with_capacity(total_faces);
+
+        for m in meshes {
+            let offset = vertices.len();
+            vertices.extend_from_slice(&m.vertices);
+            faces.extend(
+                m.faces
+                    .iter()
+                    .map(|f| [f[0] + offset, f[1] + offset, f[2] + offset]),
+            );
+        }
+
+        let attr_vertex_slices: Vec<(&Attributes, usize)> = meshes
+            .iter()
+            .map(|m| (&m.attributes_vertex, m.vertices.len()))
+            .collect();
+        let attr_face_slices: Vec<(&Attributes, usize)> = meshes
+            .iter()
+            .map(|m| (&m.attributes_face, m.faces.len()))
+            .collect();
+
+        let mut materials = Vec::new();
+        let mut face_surfaces = Vec::new();
+        for m in meshes {
+            materials.extend_from_slice(&m.materials);
+            face_surfaces.extend_from_slice(&m.face_surfaces);
+        }
+
+        Self {
+            vertices,
+            faces,
+            attributes_vertex: Attributes::concatenate(&attr_vertex_slices),
+            attributes_face: Attributes::concatenate(&attr_face_slices),
+            materials,
+            face_surfaces,
+            ..Default::default()
+        }
+    }
+
     /// Simplify the mesh to a target face count.
     ///
     /// Preserves vertex attributes (normals, UVs, colors) through interpolation.
@@ -341,11 +399,10 @@ impl Trimesh {
     /// What are the pairs of face indices that share an edge?
     ///
     /// Cached on first access. Uses sort-based algorithm for cache efficiency.
+    /// Pairs are normalized to `(min, max)` for deterministic ordering.
     ///
-    /// # Assumptions
-    /// - **Manifold meshes**: Assumes at most 2 faces share any edge. For non-manifold
-    ///   meshes (3+ faces sharing an edge), only the first pair is returned.
-    /// - **Boundary edges**: Edges with only one adjacent face are silently ignored.
+    /// For non-manifold edges (3+ faces sharing an edge), emits a spanning star
+    /// from the first face to all others. Boundary edges are silently ignored.
     pub fn face_adjacency(&self) -> &[(usize, usize)] {
         self.cache_face_adjacency
             .get_or_init(|| adjacency::face_adjacency(self.edges_sorted(), self.edges_grouped()))
@@ -455,7 +512,7 @@ impl Trimesh {
             let groups = self.edges_grouped();
             let mut unique = Vec::with_capacity(groups.starts.len().saturating_sub(1));
             for w in groups.starts.windows(2) {
-                unique.push(edges[groups.order[w[0]]].edge);
+                unique.push(edges[w[0]].edge);
             }
             unique
         })
@@ -468,29 +525,26 @@ impl Trimesh {
     /// Cached on first access.
     pub fn edges_sorted(&self) -> &[SortedEdge] {
         self.cache_edges_sorted.get_or_init(|| {
-            self.faces
-                .par_iter()
-                .enumerate()
-                .flat_map(|(face, &[i0, i1, i2])| {
-                    [
-                        SortedEdge {
-                            edge: [i0.min(i1), i0.max(i1)],
-                            forward: i0 < i1,
-                            face,
-                        },
-                        SortedEdge {
-                            edge: [i1.min(i2), i1.max(i2)],
-                            forward: i1 < i2,
-                            face,
-                        },
-                        SortedEdge {
-                            edge: [i2.min(i0), i2.max(i0)],
-                            forward: i2 < i0,
-                            face,
-                        },
-                    ]
-                })
-                .collect()
+            let mut edges = Vec::with_capacity(self.faces.len() * 3);
+            for (face, &[i0, i1, i2]) in self.faces.iter().enumerate() {
+                edges.push(SortedEdge {
+                    edge: [i0.min(i1), i0.max(i1)],
+                    forward: i0 < i1,
+                    face,
+                });
+                edges.push(SortedEdge {
+                    edge: [i1.min(i2), i1.max(i2)],
+                    forward: i1 < i2,
+                    face,
+                });
+                edges.push(SortedEdge {
+                    edge: [i2.min(i0), i2.max(i0)],
+                    forward: i2 < i0,
+                    face,
+                });
+            }
+            edges.par_sort_unstable_by_key(|e| e.edge);
+            edges
         })
     }
 
@@ -502,19 +556,14 @@ impl Trimesh {
     fn edges_grouped(&self) -> &EdgeGroups {
         self.cache_edges_grouped.get_or_init(|| {
             let edges = self.edges_sorted();
-            let mut order: Vec<usize> = (0..edges.len()).collect();
-            order.par_sort_unstable_by_key(|&i| edges[i].edge);
-
-            let mut starts = Vec::new();
-            starts.push(0);
-            for i in 1..order.len() {
-                if edges[order[i]].edge != edges[order[i - 1]].edge {
+            let mut starts = vec![0];
+            for i in 1..edges.len() {
+                if edges[i].edge != edges[i - 1].edge {
                     starts.push(i);
                 }
             }
-            starts.push(order.len());
-
-            EdgeGroups { order, starts }
+            starts.push(edges.len());
+            EdgeGroups { starts }
         })
     }
 
@@ -538,12 +587,123 @@ impl Trimesh {
             let groups = self.edges_grouped();
             let mut inverse = vec![0usize; edges.len()];
             for (unique_idx, w) in groups.starts.windows(2).enumerate() {
-                for &j in &groups.order[w[0]..w[1]] {
-                    inverse[j] = unique_idx;
+                for slot in &mut inverse[w[0]..w[1]] {
+                    *slot = unique_idx;
                 }
             }
             inverse
         })
+    }
+
+    /// Get directed boundary edges (edges shared by exactly one face).
+    ///
+    /// Each returned edge preserves the winding direction from the original face.
+    /// Non-manifold edges (shared by 3+ faces) are excluded.
+    /// Not cached - derived from `edges_sorted()` and `edges_grouped()`.
+    pub fn edges_boundary(&self) -> Vec<[usize; 2]> {
+        let edges = self.edges_sorted();
+        let groups = self.edges_grouped();
+        let mut boundary = Vec::new();
+        for w in groups.starts.windows(2) {
+            if w[1] - w[0] == 1 {
+                let e = &edges[w[0]];
+                if e.forward {
+                    boundary.push(e.edge);
+                } else {
+                    boundary.push([e.edge[1], e.edge[0]]);
+                }
+            }
+        }
+        boundary
+    }
+
+    /// Fill simple holes in the mesh by fan-triangulating boundary loops.
+    ///
+    /// Returns a new mesh with additional faces closing each hole. The new
+    /// faces reverse the boundary edge winding so normals point outward.
+    /// Fan triangulation works best on roughly convex holes; non-convex
+    /// boundary loops may produce self-intersecting fill faces.
+    ///
+    /// Vertex attributes are preserved; face attributes are reset since
+    /// fill faces have no source attributes. Returns the mesh unchanged
+    /// if the boundary contains non-manifold (bowtie) vertices.
+    ///
+    /// Check `result.is_watertight()` to determine if all holes were filled.
+    #[must_use]
+    pub fn fill_holes(&self) -> Self {
+        let boundary = self.edges_boundary();
+        if boundary.is_empty() {
+            return self.clone();
+        }
+
+        // Build adjacency: vertex -> next vertex in directed boundary
+        let mut next_map = std::collections::HashMap::with_capacity(boundary.len());
+        for &[a, b] in &boundary {
+            if next_map.insert(a, b).is_some() {
+                // Non-manifold boundary: a vertex has multiple outgoing
+                // boundary edges (bowtie vertex). We can't reliably chain
+                // loops, so bail out and return the mesh unchanged.
+                return self.clone();
+            }
+        }
+
+        // Walk chains to find closed loops
+        let mut visited = std::collections::HashSet::with_capacity(boundary.len());
+        let mut loops: Vec<Vec<usize>> = Vec::new();
+
+        for &[start, _] in &boundary {
+            if visited.contains(&start) {
+                continue;
+            }
+            let mut chain = vec![start];
+            visited.insert(start);
+            let mut current = start;
+
+            loop {
+                let Some(&next) = next_map.get(&current) else {
+                    break; // open chain, not a loop
+                };
+                if next == start {
+                    // closed loop
+                    loops.push(chain);
+                    break;
+                }
+                if visited.contains(&next) {
+                    break; // already visited, skip
+                }
+                visited.insert(next);
+                chain.push(next);
+                current = next;
+            }
+        }
+
+        if loops.is_empty() {
+            return self.clone();
+        }
+
+        // Fan-triangulate each loop with reversed winding
+        let mut new_faces = self.faces.clone();
+        for loop_verts in &loops {
+            if loop_verts.len() < 3 {
+                continue;
+            }
+            let v0 = loop_verts[0];
+            for i in 1..loop_verts.len() - 1 {
+                // Reverse winding: [v0, v(i+1), vi]
+                new_faces.push([v0, loop_verts[i + 1], loop_verts[i]]);
+            }
+        }
+
+        Self {
+            vertices: self.vertices.clone(),
+            faces: new_faces,
+            attributes_vertex: self.attributes_vertex.clone(),
+            materials: self.materials.clone(),
+            face_surfaces: self.face_surfaces.clone(),
+            source: self.source.clone(),
+            density: self.density,
+            ..Default::default()
+        }
     }
 
     /// Calculate the Euler characteristic (V - E + F).
@@ -927,8 +1087,7 @@ impl Trimesh {
                         })
                     {
                         let face = self.faces[fi];
-                        for &(a, b) in
-                            &[(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+                        for &(a, b) in &[(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
                         {
                             result[ci].edges.push((vertices_2d[a], vertices_2d[b]));
                         }
@@ -988,6 +1147,160 @@ impl Trimesh {
             .collect()
     }
 
+    /// Create a new mesh from a subset of faces, compacting vertices.
+    ///
+    /// Face and vertex attributes are carried through. Materials and
+    /// face surfaces referenced by the selected faces are compacted.
+    #[must_use]
+    pub fn submesh(&self, face_indices: &[usize]) -> Self {
+        if face_indices.is_empty() {
+            return Self::default();
+        }
+
+        // Extract selected faces and build vertex remapping
+        let mut vertex_map = vec![usize::MAX; self.vertices.len()];
+        let mut new_vertices = Vec::new();
+        let mut new_faces = Vec::with_capacity(face_indices.len());
+
+        for &fi in face_indices {
+            let old_face = self.faces[fi];
+            let mut new_face = [0usize; 3];
+            for (j, &vi) in old_face.iter().enumerate() {
+                if vertex_map[vi] == usize::MAX {
+                    vertex_map[vi] = new_vertices.len();
+                    new_vertices.push(self.vertices[vi]);
+                }
+                new_face[j] = vertex_map[vi];
+            }
+            new_faces.push(new_face);
+        }
+
+        // Collect which original vertices were used (in remapped order)
+        let mut vertex_indices: Vec<(usize, usize)> = self
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| vertex_map[*i] != usize::MAX)
+            .map(|(i, _)| (vertex_map[i], i))
+            .collect();
+        vertex_indices.sort_unstable_by_key(|(new_idx, _)| *new_idx);
+        let vertex_indices: Vec<usize> = vertex_indices.into_iter().map(|(_, old)| old).collect();
+
+        // Subset attributes
+        let attributes_face = self.attributes_face.subset(face_indices);
+        let attributes_vertex = self.attributes_vertex.subset(&vertex_indices);
+
+        // Compact materials: find referenced material indices from grouping
+        let mut materials = self.materials.clone();
+        if let Some(mat_grouping) = attributes_face
+            .groupings
+            .iter()
+            .find(|g| matches!(g.kind, GroupingKind::Material))
+        {
+            // Only keep referenced materials
+            let mut mat_used = vec![false; self.materials.len()];
+            for &idx in &mat_grouping.indices {
+                if idx != UNSET && idx < self.materials.len() {
+                    mat_used[idx] = true;
+                }
+            }
+            // If some materials are unreferenced, compact them
+            if mat_used.iter().any(|&u| !u) && !self.materials.is_empty() {
+                let mut mat_remap = vec![UNSET; self.materials.len()];
+                let mut new_mats = Vec::new();
+                for (old, &used) in mat_used.iter().enumerate() {
+                    if used {
+                        mat_remap[old] = new_mats.len();
+                        new_mats.push(self.materials[old].clone());
+                    }
+                }
+                materials = new_mats;
+            }
+        }
+
+        // Compact face_surfaces similarly
+        let mut face_surfaces = self.face_surfaces.clone();
+        if let Some(surf_grouping) = attributes_face
+            .groupings
+            .iter()
+            .find(|g| matches!(g.kind, GroupingKind::Surface))
+        {
+            let mut surf_used = vec![false; self.face_surfaces.len()];
+            for &idx in &surf_grouping.indices {
+                if idx != UNSET && idx < self.face_surfaces.len() {
+                    surf_used[idx] = true;
+                }
+            }
+            if surf_used.iter().any(|&u| !u) && !self.face_surfaces.is_empty() {
+                let mut surf_remap = vec![UNSET; self.face_surfaces.len()];
+                let mut new_surfs = Vec::new();
+                for (old, &used) in surf_used.iter().enumerate() {
+                    if used {
+                        surf_remap[old] = new_surfs.len();
+                        new_surfs.push(self.face_surfaces[old].clone());
+                    }
+                }
+                face_surfaces = new_surfs;
+            }
+        }
+
+        Self {
+            vertices: new_vertices,
+            faces: new_faces,
+            attributes_vertex,
+            attributes_face,
+            source: self.source.clone(),
+            materials,
+            face_surfaces,
+            density: self.density,
+            ..Default::default()
+        }
+    }
+
+    /// Split the mesh into sub-meshes.
+    ///
+    /// - `on = None`: split by face-adjacency connected components.
+    /// - `on = Some(kind)`: split by the matching face grouping attribute.
+    ///
+    /// Returns an empty vec for empty meshes, or a single-element vec
+    /// (clone of self) if the mesh cannot be split.
+    pub fn split(&self, on: Option<&GroupingKind>) -> Vec<Self> {
+        if self.faces.is_empty() {
+            return vec![];
+        }
+
+        let groups = match on {
+            None => {
+                let components =
+                    crate::graph::connected_components(self.faces.len(), self.face_adjacency());
+                if components.len() <= 1 {
+                    return vec![self.clone()];
+                }
+                components
+            }
+            Some(kind) => {
+                let grouping = self
+                    .attributes_face
+                    .groupings
+                    .iter()
+                    .find(|g| &g.kind == kind);
+
+                match grouping {
+                    None => return vec![self.clone()],
+                    Some(g) => {
+                        let groups = split_by_grouping(g);
+                        if groups.len() <= 1 {
+                            return vec![self.clone()];
+                        }
+                        groups
+                    }
+                }
+            }
+        };
+
+        groups.iter().map(|fi| self.submesh(fi)).collect()
+    }
+
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,
     /// or None if the mesh is empty or degenerate.
     pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
@@ -1006,6 +1319,26 @@ impl Trimesh {
 
         Some((lower, upper))
     }
+}
+
+/// Partition face indices by grouping value.
+///
+/// Returns groups of face indices, one per distinct grouping value.
+/// UNSET faces are collected into a final group. Empty bins are filtered out.
+fn split_by_grouping(grouping: &crate::attributes::Grouping) -> Vec<Vec<usize>> {
+    let n_names = grouping.names.len();
+    // One bin per name + one bin for UNSET
+    let mut bins: Vec<Vec<usize>> = vec![Vec::new(); n_names + 1];
+
+    for (fi, &idx) in grouping.indices.iter().enumerate() {
+        if idx == UNSET || idx >= n_names {
+            bins[n_names].push(fi);
+        } else {
+            bins[idx].push(fi);
+        }
+    }
+
+    bins.into_iter().filter(|b| !b.is_empty()).collect()
 }
 
 impl From<crate::cleanup::CleanupResult> for Trimesh {
@@ -1477,5 +1810,567 @@ mod tests {
             .count();
         assert_eq!(n_cylinders, 46, "expected 46 cylinder surfaces");
         assert_eq!(n_planes, 49, "expected 49 plane surfaces");
+    }
+
+    #[test]
+    fn test_submesh_basic() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        // Take the first 2 faces
+        let sub = cube.submesh(&[0, 1]);
+        assert_eq!(sub.faces.len(), 2);
+        // At most 4 unique vertices for 2 triangles on the same face of a cube
+        assert!(sub.vertices.len() <= 4);
+        // All face indices should be valid
+        for face in &sub.faces {
+            for &vi in face {
+                assert!(vi < sub.vertices.len());
+            }
+        }
+    }
+
+    #[test]
+    fn test_submesh_empty() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let sub = cube.submesh(&[]);
+        assert!(sub.faces.is_empty());
+        assert!(sub.vertices.is_empty());
+    }
+
+    #[test]
+    fn test_split_connected_components_disjoint() {
+        // Two separate triangles → should split into 2 parts
+        let mesh = Trimesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(5.0, 5.0, 0.0),
+                Point3::new(6.0, 5.0, 0.0),
+                Point3::new(5.0, 6.0, 0.0),
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let parts = mesh.split(None);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].faces.len(), 1);
+        assert_eq!(parts[1].faces.len(), 1);
+        // Each part should have 3 vertices
+        assert_eq!(parts[0].vertices.len(), 3);
+        assert_eq!(parts[1].vertices.len(), 3);
+    }
+
+    #[test]
+    fn test_split_connected_components_single() {
+        // A box is one connected component → returns clone of self
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let parts = cube.split(None);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].faces.len(), 12);
+        assert_eq!(parts[0].vertices.len(), 8);
+    }
+
+    #[test]
+    fn test_split_empty_mesh() {
+        let mesh = Trimesh::default();
+        let parts = mesh.split(None);
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn test_split_by_material() {
+        use crate::attributes::{Grouping, GroupingKind};
+
+        // Two triangles sharing vertices but with different materials
+        let mut mesh = Trimesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2], [1, 3, 2]],
+            None,
+            None,
+        )
+        .unwrap();
+
+        mesh.attributes_face.groupings.push(Grouping {
+            kind: GroupingKind::Material,
+            names: vec!["red".into(), "blue".into()],
+            indices: vec![0, 1], // face 0 = red, face 1 = blue
+        });
+
+        let parts = mesh.split(Some(&GroupingKind::Material));
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].faces.len(), 1);
+        assert_eq!(parts[1].faces.len(), 1);
+    }
+
+    #[test]
+    fn test_split_by_material_with_unset() {
+        use crate::attributes::{Grouping, GroupingKind, UNSET};
+
+        let mut mesh = Trimesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+                Point3::new(2.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2], [1, 3, 2], [1, 4, 5]],
+            None,
+            None,
+        )
+        .unwrap();
+
+        mesh.attributes_face.groupings.push(Grouping {
+            kind: GroupingKind::Material,
+            names: vec!["red".into()],
+            indices: vec![0, 0, UNSET], // faces 0,1 = red, face 2 = UNSET
+        });
+
+        let parts = mesh.split(Some(&GroupingKind::Material));
+        assert_eq!(parts.len(), 2);
+        // First group: faces with material "red"
+        assert_eq!(parts[0].faces.len(), 2);
+        // Second group: UNSET face
+        assert_eq!(parts[1].faces.len(), 1);
+    }
+
+    #[test]
+    fn test_split_round_trip() {
+        // Split a mesh into connected components, verify total face count
+        // equals original and all vertex positions are present in some part.
+        let mesh = Trimesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(5.0, 5.0, 0.0),
+                Point3::new(6.0, 5.0, 0.0),
+                Point3::new(5.0, 6.0, 0.0),
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let parts = mesh.split(None);
+        assert_eq!(parts.len(), 2);
+
+        // Total face count preserved
+        let total_faces: usize = parts.iter().map(|p| p.faces.len()).sum();
+        assert_eq!(total_faces, mesh.faces.len());
+
+        // All original vertex positions appear in exactly one part
+        for v in &mesh.vertices {
+            let found = parts.iter().any(|p| {
+                p.vertices
+                    .iter()
+                    .any(|pv| relative_eq!(pv, v, epsilon = 1e-10))
+            });
+            assert!(found, "vertex {v:?} not found in any split part");
+        }
+    }
+
+    #[test]
+    fn test_split_no_matching_grouping() {
+        let mesh = create_box(&[1.0, 1.0, 1.0]);
+        // No material grouping exists → returns clone
+        let parts = mesh.split(Some(&GroupingKind::Material));
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].faces.len(), 12);
+    }
+
+    #[test]
+    fn test_split_preserves_vertex_attributes() {
+        use crate::attributes::Attributes;
+        use nalgebra::Vector4;
+
+        // Two disjoint triangles with vertex colors
+        let colors: Vec<Vector4<u8>> = vec![
+            Vector4::new(255, 0, 0, 255),
+            Vector4::new(0, 255, 0, 255),
+            Vector4::new(0, 0, 255, 255),
+            Vector4::new(255, 255, 0, 255),
+            Vector4::new(0, 255, 255, 255),
+            Vector4::new(255, 0, 255, 255),
+        ];
+
+        let attr_vertex = Attributes {
+            colors: vec![colors.clone()],
+            ..Default::default()
+        };
+
+        let mesh = Trimesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(5.0, 5.0, 0.0),
+                Point3::new(6.0, 5.0, 0.0),
+                Point3::new(5.0, 6.0, 0.0),
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+            Some(attr_vertex),
+            None,
+        )
+        .unwrap();
+
+        let parts = mesh.split(None);
+        assert_eq!(parts.len(), 2);
+
+        // First part should have the first 3 colors
+        assert_eq!(parts[0].attributes_vertex.colors.len(), 1);
+        assert_eq!(parts[0].attributes_vertex.colors[0].len(), 3);
+        assert_eq!(parts[0].attributes_vertex.colors[0][0], colors[0]);
+        assert_eq!(parts[0].attributes_vertex.colors[0][1], colors[1]);
+        assert_eq!(parts[0].attributes_vertex.colors[0][2], colors[2]);
+
+        // Second part should have the last 3 colors
+        assert_eq!(parts[1].attributes_vertex.colors.len(), 1);
+        assert_eq!(parts[1].attributes_vertex.colors[0].len(), 3);
+        assert_eq!(parts[1].attributes_vertex.colors[0][0], colors[3]);
+        assert_eq!(parts[1].attributes_vertex.colors[0][1], colors[4]);
+        assert_eq!(parts[1].attributes_vertex.colors[0][2], colors[5]);
+    }
+
+    #[test]
+    fn test_split_obj_by_object() {
+        // Load two_objects.obj which has "o cube" and "o tetra" object groupings
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test/data/two_objects.obj");
+        if !path.exists() {
+            eprintln!("Skipping test: {:?} not found", path);
+            return;
+        }
+        let data = std::fs::read(&path).unwrap();
+        let scene = load(&data, Some(FileType::OBJ), None).unwrap();
+
+        let mesh = scene
+            .geometry
+            .values()
+            .find_map(|g| match g {
+                Geometry::Mesh(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .expect("two_objects.obj should contain a mesh");
+
+        // Should have Object grouping
+        assert!(
+            mesh.attributes_face
+                .groupings
+                .iter()
+                .any(|g| matches!(g.kind, GroupingKind::Object)),
+            "mesh should have Object grouping"
+        );
+
+        // Split by object: should get cube (12 faces) and tetra (4 faces)
+        let parts = mesh.split(Some(&GroupingKind::Object));
+        assert_eq!(parts.len(), 2, "expected 2 objects");
+
+        let mut face_counts: Vec<usize> = parts.iter().map(|p| p.faces.len()).collect();
+        face_counts.sort_unstable();
+        assert_eq!(face_counts, vec![4, 12], "expected tetra(4) + cube(12)");
+
+        // Split by connected components should also give 2 parts
+        // (cube and tetra don't share vertices)
+        let cc_parts = mesh.split(None);
+        assert_eq!(cc_parts.len(), 2, "expected 2 connected components");
+    }
+
+    #[test]
+    fn test_concatenate_basic() {
+        use crate::creation::create_icosphere;
+
+        let a = create_icosphere(1.0, 3);
+        let b = create_icosphere(2.0, 3);
+
+        assert!(a.is_watertight(), "icosphere a not watertight");
+        assert!(b.is_watertight(), "icosphere b not watertight");
+
+        let mesh = Trimesh::concatenate(&[&a, &b]);
+        assert_eq!(mesh.vertices.len(), a.vertices.len() + b.vertices.len());
+        assert_eq!(mesh.faces.len(), a.faces.len() + b.faces.len());
+
+        // Verify all face indices are valid
+        for (fi, face) in mesh.faces.iter().enumerate() {
+            for &vi in face {
+                assert!(
+                    vi < mesh.vertices.len(),
+                    "face {fi} has vertex index {vi} but only {} vertices",
+                    mesh.vertices.len()
+                );
+            }
+        }
+
+        let parts = mesh.split(None);
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
+    fn test_concatenate_empty() {
+        let mesh = Trimesh::concatenate(&[]);
+        assert!(mesh.vertices.is_empty());
+        assert!(mesh.faces.is_empty());
+    }
+
+    #[test]
+    fn test_concatenate_single() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let mesh = Trimesh::concatenate(&[&cube]);
+        assert_eq!(mesh.vertices.len(), cube.vertices.len());
+        assert_eq!(mesh.faces.len(), cube.faces.len());
+    }
+
+    #[test]
+    fn test_concatenate_mixed_attributes() {
+        use crate::attributes::{Attributes, DEFAULT_COLOR, Grouping, GroupingKind, UNSET};
+        use nalgebra::Vector4;
+
+        // Mesh A: 1 triangle with vertex colors and a material grouping
+        let colors_a = vec![
+            Vector4::new(255, 0, 0, 255),
+            Vector4::new(0, 255, 0, 255),
+            Vector4::new(0, 0, 255, 255),
+        ];
+        let a = Trimesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2]],
+            Some(Attributes {
+                colors: vec![colors_a.clone()],
+                ..Default::default()
+            }),
+            Some(Attributes {
+                groupings: vec![Grouping {
+                    kind: GroupingKind::Material,
+                    names: vec!["red".into()],
+                    indices: vec![0],
+                }],
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        // Mesh B: 1 triangle with NO vertex colors and NO material grouping
+        let b = Trimesh::new(
+            vec![
+                Point3::new(5.0, 0.0, 0.0),
+                Point3::new(6.0, 0.0, 0.0),
+                Point3::new(5.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2]],
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Mesh C: 1 triangle with vertex colors but NO material grouping
+        let colors_c = vec![
+            Vector4::new(255, 255, 0, 255),
+            Vector4::new(0, 255, 255, 255),
+            Vector4::new(255, 0, 255, 255),
+        ];
+        let c = Trimesh::new(
+            vec![
+                Point3::new(10.0, 0.0, 0.0),
+                Point3::new(11.0, 0.0, 0.0),
+                Point3::new(10.0, 1.0, 0.0),
+            ],
+            vec![[0, 1, 2]],
+            Some(Attributes {
+                colors: vec![colors_c.clone()],
+                ..Default::default()
+            }),
+            None,
+        )
+        .unwrap();
+
+        let mesh = Trimesh::concatenate(&[&a, &b, &c]);
+        assert_eq!(mesh.vertices.len(), 9);
+        assert_eq!(mesh.faces.len(), 3);
+
+        // Vertex colors: A's colors, then DEFAULT_COLOR for B, then C's colors
+        assert_eq!(mesh.attributes_vertex.colors.len(), 1);
+        let colors = &mesh.attributes_vertex.colors[0];
+        assert_eq!(colors.len(), 9);
+        assert_eq!(colors[0..3], colors_a[..]);
+        assert_eq!(colors[3], DEFAULT_COLOR);
+        assert_eq!(colors[4], DEFAULT_COLOR);
+        assert_eq!(colors[5], DEFAULT_COLOR);
+        assert_eq!(colors[6..9], colors_c[..]);
+
+        // Face groupings: Material grouping should exist with UNSET for B and C
+        let mat_grouping = mesh
+            .attributes_face
+            .groupings
+            .iter()
+            .find(|g| g.kind == GroupingKind::Material)
+            .expect("should have Material grouping");
+        assert_eq!(mat_grouping.indices.len(), 3);
+        assert_ne!(mat_grouping.indices[0], UNSET); // A has material
+        assert_eq!(mat_grouping.indices[1], UNSET); // B has no material
+        assert_eq!(mat_grouping.indices[2], UNSET); // C has no material
+    }
+
+    #[test]
+    fn test_split_benchmark() {
+        use crate::creation::create_icosphere;
+        use std::time::Instant;
+
+        // Two icospheres with 6 subdivisions each
+        let a = create_icosphere(1.0, 6);
+        let b = create_icosphere(2.0, 6);
+
+        assert!(a.is_watertight(), "icosphere a not watertight");
+        assert!(b.is_watertight(), "icosphere b not watertight");
+
+        let mesh = Trimesh::concatenate(&[&a, &b]);
+        assert!(mesh.is_watertight(), "concatenated mesh not watertight");
+        eprintln!(
+            "split benchmark: {} vertices, {} faces",
+            mesh.vertices.len(),
+            mesh.faces.len()
+        );
+
+        // Time each stage of split individually (cold — no cached edges)
+        // Use a fresh clone so caches from is_watertight() don't affect timing
+        let fresh = mesh.clone();
+        let t0 = Instant::now();
+        let _edges = fresh.edges_sorted();
+        let t1 = Instant::now();
+        let _groups = fresh.edges_grouped();
+        let t2 = Instant::now();
+        let adj = fresh.face_adjacency();
+        let t3 = Instant::now();
+        let components = crate::graph::connected_components(fresh.faces.len(), adj);
+        let t4 = Instant::now();
+        let parts: Vec<Trimesh> = components.iter().map(|fi| fresh.submesh(fi)).collect();
+        let t5 = Instant::now();
+
+        eprintln!(
+            "  edges_sorted:        {:>8.1}ms",
+            (t1 - t0).as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "  edges_grouped:       {:>8.1}ms",
+            (t2 - t1).as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "  face_adjacency:      {:>8.1}ms",
+            (t3 - t2).as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "  connected_components:{:>8.1}ms",
+            (t4 - t3).as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "  submesh (x{}):       {:>8.1}ms",
+            parts.len(),
+            (t5 - t4).as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "  total:               {:>8.1}ms",
+            (t5 - t0).as_secs_f64() * 1000.0
+        );
+
+        let expected_faces = 20 * 4_usize.pow(6);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].faces.len(), expected_faces);
+        assert_eq!(parts[1].faces.len(), expected_faces);
+
+        // Both parts should be watertight
+        for (i, part) in parts.iter().enumerate() {
+            assert!(part.is_watertight(), "part {i} not watertight");
+        }
+    }
+
+    #[test]
+    fn test_edges_boundary_watertight() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        assert!(cube.is_watertight());
+        assert!(cube.edges_boundary().is_empty());
+    }
+
+    #[test]
+    fn test_edges_boundary_open_cube() {
+        // Cube with one face removed (2 triangles) → leaves a square hole with 4 boundary edges.
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        // Remove the last 2 faces (one quad face of the cube)
+        let open = cube.submesh(&(0..10).collect::<Vec<_>>());
+        let boundary = open.edges_boundary();
+        assert_eq!(
+            boundary.len(),
+            4,
+            "expected 4 boundary edges, got {}",
+            boundary.len()
+        );
+
+        // Boundary edges should form a closed loop
+        let mut next_map = std::collections::HashMap::new();
+        for &[a, b] in &boundary {
+            next_map.insert(a, b);
+        }
+        // Walk the loop from the first edge
+        let start = boundary[0][0];
+        let mut current = start;
+        for _ in 0..4 {
+            current = *next_map.get(&current).expect("broken loop");
+        }
+        assert_eq!(current, start, "boundary edges don't form a closed loop");
+    }
+
+    #[test]
+    fn test_fill_holes_open_cube() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let open = cube.submesh(&(0..10).collect::<Vec<_>>());
+        assert!(!open.is_watertight());
+
+        let filled = open.fill_holes();
+        assert!(filled.is_watertight(), "filled mesh should be watertight");
+        // Original 10 faces + 2 fill faces (fan-triangulating a 4-vertex loop)
+        assert_eq!(filled.faces.len(), 12);
+    }
+
+    #[test]
+    fn test_fill_holes_already_watertight() {
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        assert!(cube.is_watertight());
+        let filled = cube.fill_holes();
+        assert_eq!(filled.faces.len(), cube.faces.len());
+        assert!(filled.is_watertight());
+    }
+
+    #[test]
+    fn test_fill_holes_multiple_holes() {
+        // Remove bottom (faces 0,1) and top (faces 2,3) from a cube
+        // This creates 2 separate 4-edge boundary loops
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let keep: Vec<usize> = (4..12).collect();
+        let open = cube.submesh(&keep);
+        assert!(!open.is_watertight());
+
+        let filled = open.fill_holes();
+        assert!(
+            filled.is_watertight(),
+            "filled mesh should be watertight after filling 2 holes"
+        );
+        // 8 original + 2*2 fill = 12
+        assert_eq!(filled.faces.len(), 12);
     }
 }

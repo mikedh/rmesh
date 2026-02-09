@@ -184,4 +184,249 @@ impl Material {
     }
 }
 
+impl Grouping {
+    /// Extract a subset of this grouping by the given element indices.
+    ///
+    /// Compacts the name table to only include referenced names.
+    /// UNSET indices remain UNSET.
+    #[must_use]
+    pub fn subset(&self, indices: &[usize]) -> Self {
+        if indices.is_empty() {
+            return Self {
+                kind: self.kind.clone(),
+                names: Vec::new(),
+                indices: Vec::new(),
+            };
+        }
+
+        // Extract the raw index values at the requested positions
+        let raw: Vec<usize> = indices.iter().map(|&i| self.indices[i]).collect();
+
+        // Find distinct non-UNSET name indices that appear
+        let mut seen = vec![false; self.names.len()];
+        for &idx in &raw {
+            if idx != UNSET && idx < self.names.len() {
+                seen[idx] = true;
+            }
+        }
+
+        // Build old→new remapping and compact names
+        let mut remap = vec![UNSET; self.names.len()];
+        let mut names = Vec::new();
+        for (old, &used) in seen.iter().enumerate() {
+            if used {
+                remap[old] = names.len();
+                names.push(self.names[old].clone());
+            }
+        }
+
+        // Remap indices
+        let new_indices = raw
+            .iter()
+            .map(|&idx| {
+                if idx == UNSET || idx >= self.names.len() {
+                    UNSET
+                } else {
+                    remap[idx]
+                }
+            })
+            .collect();
+
+        Self {
+            kind: self.kind.clone(),
+            names,
+            indices: new_indices,
+        }
+    }
+}
+
+impl Attributes {
+    /// Concatenate multiple `Attributes` in order.
+    ///
+    /// Each `(attributes, count)` pair specifies the attribute data and its
+    /// element count (number of vertices or faces). When a channel exists in
+    /// some inputs but not others, missing inputs are padded with defaults
+    /// (`Vector2::zeros` for UVs, `Vector3::zeros` for normals,
+    /// `DEFAULT_COLOR` for colors, `Vector4::zeros` for tangents, `UNSET`
+    /// for grouping indices).
+    ///
+    /// Groupings are merged by kind: groupings of the same kind across
+    /// inputs are combined (names unified, indices offset). Inputs without
+    /// a grouping that others have are padded with `UNSET`.
+    pub fn concatenate(slices: &[(&Attributes, usize)]) -> Self {
+        if slices.is_empty() {
+            return Self::default();
+        }
+
+        macro_rules! concat_channels {
+            ($field:ident, $default:expr) => {{
+                let max_channels = slices
+                    .iter()
+                    .map(|(a, _)| a.$field.len())
+                    .max()
+                    .unwrap_or(0);
+                (0..max_channels)
+                    .map(|ch| {
+                        let mut combined = Vec::new();
+                        for &(attrs, count) in slices {
+                            if ch < attrs.$field.len() {
+                                combined.extend_from_slice(&attrs.$field[ch]);
+                            } else {
+                                combined.resize(combined.len() + count, $default);
+                            }
+                        }
+                        combined
+                    })
+                    .collect()
+            }};
+        }
+
+        // Collect all distinct grouping kinds across all inputs
+        let mut all_kinds: Vec<GroupingKind> = Vec::new();
+        for (attrs, _) in slices {
+            for g in &attrs.groupings {
+                if !all_kinds.contains(&g.kind) {
+                    all_kinds.push(g.kind.clone());
+                }
+            }
+        }
+
+        // Merge groupings by kind, padding missing inputs with UNSET
+        let groupings: Vec<Grouping> = all_kinds
+            .into_iter()
+            .map(|kind| {
+                let mut names: Vec<String> = Vec::new();
+                let mut indices: Vec<usize> = Vec::new();
+
+                for &(attrs, count) in slices {
+                    if let Some(g) = attrs.groupings.iter().find(|g| g.kind == kind) {
+                        let name_offset = names.len();
+                        names.extend_from_slice(&g.names);
+                        for &idx in &g.indices {
+                            if idx == UNSET {
+                                indices.push(UNSET);
+                            } else {
+                                indices.push(idx + name_offset);
+                            }
+                        }
+                    } else {
+                        // This input has no grouping of this kind — pad with UNSET
+                        indices.resize(indices.len() + count, UNSET);
+                    }
+                }
+
+                Grouping {
+                    kind,
+                    names,
+                    indices,
+                }
+            })
+            .collect();
+
+        Self {
+            uv: concat_channels!(uv, Vector2::zeros()),
+            normals: concat_channels!(normals, Vector3::zeros()),
+            colors: concat_channels!(colors, DEFAULT_COLOR),
+            tangents: concat_channels!(tangents, Vector4::zeros()),
+            groupings,
+        }
+    }
+
+    /// Extract a subset of all attribute channels at the given element indices.
+    #[must_use]
+    pub fn subset(&self, indices: &[usize]) -> Self {
+        macro_rules! subset_channels {
+            ($channels:expr) => {
+                $channels
+                    .iter()
+                    .map(|channel| indices.iter().map(|&i| channel[i]).collect())
+                    .collect()
+            };
+        }
+        Self {
+            uv: subset_channels!(self.uv),
+            normals: subset_channels!(self.normals),
+            colors: subset_channels!(self.colors),
+            tangents: subset_channels!(self.tangents),
+            groupings: self.groupings.iter().map(|g| g.subset(indices)).collect(),
+        }
+    }
+}
+
 pub const DEFAULT_COLOR: Vector4<u8> = Vector4::new(100, 100, 100, 255);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_grouping_subset_basic() {
+        let g = Grouping {
+            kind: GroupingKind::Material,
+            names: vec!["red".into(), "blue".into(), "green".into()],
+            indices: vec![0, 1, 2, 0, 1],
+        };
+
+        // Take faces 1, 3 (blue, red) → names compacted to [red, blue]
+        let sub = g.subset(&[1, 3]);
+        assert_eq!(sub.kind, GroupingKind::Material);
+        assert_eq!(sub.names.len(), 2);
+        assert!(sub.names.contains(&"red".to_string()));
+        assert!(sub.names.contains(&"blue".to_string()));
+        assert_eq!(sub.indices.len(), 2);
+        // Both indices should be valid
+        assert!(sub.indices[0] < sub.names.len());
+        assert!(sub.indices[1] < sub.names.len());
+    }
+
+    #[test]
+    fn test_grouping_subset_with_unset() {
+        let g = Grouping {
+            kind: GroupingKind::Group,
+            names: vec!["a".into(), "b".into()],
+            indices: vec![0, UNSET, 1],
+        };
+
+        let sub = g.subset(&[0, 1, 2]);
+        assert_eq!(sub.indices[1], UNSET);
+        assert!(sub.indices[0] != UNSET);
+        assert!(sub.indices[2] != UNSET);
+    }
+
+    #[test]
+    fn test_grouping_subset_empty() {
+        let g = Grouping {
+            kind: GroupingKind::Material,
+            names: vec!["red".into()],
+            indices: vec![0, 0],
+        };
+        let sub = g.subset(&[]);
+        assert!(sub.names.is_empty());
+        assert!(sub.indices.is_empty());
+    }
+
+    #[test]
+    fn test_attributes_subset() {
+        let attrs = Attributes {
+            colors: vec![vec![
+                Vector4::new(255, 0, 0, 255),
+                Vector4::new(0, 255, 0, 255),
+                Vector4::new(0, 0, 255, 255),
+            ]],
+            normals: vec![vec![
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ]],
+            ..Default::default()
+        };
+
+        let sub = attrs.subset(&[0, 2]);
+        assert_eq!(sub.colors[0].len(), 2);
+        assert_eq!(sub.colors[0][0], Vector4::new(255, 0, 0, 255));
+        assert_eq!(sub.colors[0][1], Vector4::new(0, 0, 255, 255));
+        assert_eq!(sub.normals[0].len(), 2);
+        assert_eq!(sub.normals[0][0], Vector3::new(1.0, 0.0, 0.0));
+        assert_eq!(sub.normals[0][1], Vector3::new(0.0, 0.0, 1.0));
+    }
+}

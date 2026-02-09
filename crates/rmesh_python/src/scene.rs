@@ -238,6 +238,22 @@ impl PyScene {
             .clone_ref(py)
     }
 
+    /// Fill holes in all mesh geometry.
+    ///
+    /// For each mesh: if already watertight, keep as-is. Otherwise attempt
+    /// to fill holes. If ``drop`` is true, meshes that are still not
+    /// watertight after filling are removed from the scene.
+    ///
+    /// Parameters
+    /// ----------
+    /// drop : bool
+    ///     If True (default), remove meshes that cannot be made watertight.
+    #[pyo3(signature = (*, drop=true))]
+    fn fill_holes(&mut self, drop: bool) {
+        self.data.fill_holes(drop);
+        self.geometry_cache = OnceCell::new();
+    }
+
     fn __repr__(&self) -> String {
         format!("Scene(geometry={})", self.data.geometry.len())
     }

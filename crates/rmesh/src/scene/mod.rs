@@ -265,6 +265,76 @@ impl Scene {
         actual_name
     }
 
+    /// Fill holes in all mesh geometry.
+    ///
+    /// For each `Geometry::Mesh` entry:
+    /// - If already watertight, keep as-is.
+    /// - Otherwise, replace with the result of `fill_holes()`.
+    /// - If still not watertight after filling and `drop` is true, remove it.
+    ///
+    /// Non-mesh geometry is always kept. When geometry is removed, scene graph
+    /// node indices are remapped accordingly.
+    pub fn fill_holes(&mut self, drop: bool) {
+        let keys: Vec<String> = self.geometry.keys().cloned().collect();
+        let mut to_remove = std::collections::HashSet::new();
+
+        for key in &keys {
+            let Some(geom) = self.geometry.get_mut(key) else {
+                continue;
+            };
+            if let Geometry::Mesh(mesh) = geom {
+                if mesh.is_watertight() {
+                    continue;
+                }
+                let filled = mesh.fill_holes();
+                if !filled.is_watertight() && drop {
+                    to_remove.insert(key.clone());
+                } else {
+                    **mesh = filled;
+                }
+            }
+        }
+
+        if to_remove.is_empty() {
+            return;
+        }
+
+        // Build old_index -> new_index mapping
+        let mut old_to_new: Vec<Option<usize>> = Vec::with_capacity(keys.len());
+        let mut new_idx = 0usize;
+        for key in &keys {
+            if to_remove.contains(key) {
+                old_to_new.push(None);
+            } else {
+                old_to_new.push(Some(new_idx));
+                new_idx += 1;
+            }
+        }
+
+        // Remove geometry entries
+        for key in &to_remove {
+            self.geometry.shift_remove(key);
+        }
+
+        // Fix scene graph: remap or remove geometry indices
+        for node in &mut self.graph.nodes {
+            if node.kind != SceneNodeKind::Geometry {
+                continue;
+            }
+            node.index = node
+                .index
+                .iter()
+                .filter_map(|&old| {
+                    if old < old_to_new.len() {
+                        old_to_new[old]
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+
     /// Compute the world-space axis-aligned bounding box of all geometry.
     ///
     /// Walks the scene graph to apply world transforms. If the graph is empty
@@ -536,5 +606,80 @@ mod tests {
         assert!((world[(0, 3)] - 5.0).abs() < 1e-10);
         assert!((world[(1, 3)] - 10.0).abs() < 1e-10);
         assert!((world[(0, 0)] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_scene_fill_holes_fixable() {
+        let mut scene = Scene::new();
+        // Add a watertight cube
+        let cube = creation::create_box(&[1.0, 1.0, 1.0]);
+        scene.add("cube", Geometry::Mesh(Box::new(cube)), None);
+
+        // Add an open cube (missing one face)
+        let open_cube = creation::create_box(&[2.0, 2.0, 2.0]);
+        let open = open_cube.submesh(&(0..10).collect::<Vec<_>>());
+        assert!(!open.is_watertight());
+        scene.add("open", Geometry::Mesh(Box::new(open)), None);
+
+        assert_eq!(scene.geometry.len(), 2);
+        scene.fill_holes(false);
+        assert_eq!(
+            scene.geometry.len(),
+            2,
+            "no geometry should be removed with drop=false"
+        );
+
+        // Both should now be watertight
+        for (name, geom) in &scene.geometry {
+            if let Geometry::Mesh(m) = geom {
+                assert!(
+                    m.is_watertight(),
+                    "mesh '{name}' should be watertight after fill_holes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_scene_fill_holes_drop() {
+        use crate::mesh::Trimesh;
+
+        let mut scene = Scene::new();
+        // Add a watertight cube
+        let cube = creation::create_box(&[1.0, 1.0, 1.0]);
+        scene.add("cube", Geometry::Mesh(Box::new(cube)), None);
+
+        // Create a non-manifold mesh (3 triangles sharing one edge).
+        // This can never become watertight by filling boundary loops.
+        let tri = Trimesh::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, -1.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+            ],
+            vec![[0, 1, 2], [0, 1, 3], [0, 1, 4]],
+            None,
+            None,
+        )
+        .unwrap();
+        scene.add("triangle", Geometry::Mesh(Box::new(tri)), None);
+
+        assert_eq!(scene.geometry.len(), 2);
+        scene.fill_holes(true);
+
+        // Triangle can't be made watertight → should be dropped
+        assert_eq!(scene.geometry.len(), 1);
+        assert!(scene.geometry.contains_key("cube"));
+
+        // Remaining graph nodes referencing geometry should have valid indices
+        for node in &scene.graph.nodes {
+            if node.kind == SceneNodeKind::Geometry {
+                for &idx in &node.index {
+                    assert!(idx < scene.geometry.len(), "stale geometry index {idx}");
+                }
+            }
+        }
     }
 }

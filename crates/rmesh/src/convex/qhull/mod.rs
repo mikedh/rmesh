@@ -572,7 +572,7 @@ impl<'a> QHull<'a> {
         }
     }
 
-    /// BFS from `start` to find all facets visible from `apex`, collecting
+    /// Traversal from `start` to find all facets visible from `apex`, collecting
     /// horizon edges (visible-to-non-visible boundaries) in the same pass.
     fn find_visible_and_horizon(&mut self, start: usize, apex: usize) {
         let apex_point = &self.points[apex];
