@@ -7,6 +7,7 @@
 
 use nalgebra::{Point2, Point3, Vector3};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::creation::{Plane, perpendicular};
 
@@ -1197,6 +1198,182 @@ impl Surface {
     }
 }
 
+// ============================================================================
+// SurfaceDict — canonical serde helper for dict ↔ Surface conversion
+// ============================================================================
+
+/// Canonical dict format for `Surface` serialization.
+///
+/// Used by GLTF extensions and Python bindings as the single source of truth
+/// for surface ↔ dict conversion. Tagged by `"kind"` with capitalized variant
+/// names; lowercase aliases provide backward compatibility with older GLB files.
+///
+/// Point/vector fields use `[f64; 3]` rather than `Point3`/`Vector3` because
+/// serde serializes nalgebra types as `{"x":…,"y":…,"z":…}`, while the JSON
+/// format uses flat arrays `[x, y, z]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum SurfaceDict {
+    #[serde(alias = "plane")]
+    Plane {
+        origin: [f64; 3],
+        normal: [f64; 3],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x_dir: Option<[f64; 3]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_x: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_y: Option<[f64; 2]>,
+    },
+    #[serde(alias = "cylinder")]
+    Cylinder {
+        origin: [f64; 3],
+        axis: [f64; 3],
+        radius: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_angle: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_height: Option<[f64; 2]>,
+    },
+    #[serde(alias = "cone")]
+    Cone {
+        #[serde(alias = "semi_angle")]
+        half_angle: f64,
+        apex: [f64; 3],
+        axis: [f64; 3],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ref_radius: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_angle: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_distance: Option<[f64; 2]>,
+    },
+    #[serde(alias = "sphere")]
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_longitude: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_latitude: Option<[f64; 2]>,
+    },
+    #[serde(alias = "torus")]
+    Torus {
+        center: [f64; 3],
+        axis: [f64; 3],
+        major_radius: f64,
+        minor_radius: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_major_angle: Option<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent_minor_angle: Option<[f64; 2]>,
+    },
+    /// Placeholder for BSpline faces — state is too large for dict format.
+    /// Exists so GLTF deserialization doesn't fail; `TryFrom` returns `Err`.
+    #[serde(alias = "bspline")]
+    BSpline,
+}
+
+impl From<&Surface> for SurfaceDict {
+    fn from(surface: &Surface) -> Self {
+        match surface {
+            Surface::Plane(p) => SurfaceDict::Plane {
+                origin: p.origin.into(),
+                normal: p.normal.into(),
+                x_dir: None,
+                extent_x: None,
+                extent_y: None,
+            },
+            Surface::Cylinder(c) => SurfaceDict::Cylinder {
+                origin: c.origin.into(),
+                axis: c.axis.into(),
+                radius: c.radius,
+                extent_angle: None,
+                extent_height: None,
+            },
+            Surface::Cone(c) => SurfaceDict::Cone {
+                half_angle: c.half_angle,
+                apex: c.apex.into(),
+                axis: c.axis.into(),
+                ref_radius: None,
+                extent_angle: None,
+                extent_distance: None,
+            },
+            Surface::Sphere(s) => SurfaceDict::Sphere {
+                center: s.center.into(),
+                radius: s.radius,
+                extent_longitude: None,
+                extent_latitude: None,
+            },
+            Surface::Torus(t) => SurfaceDict::Torus {
+                center: t.center.into(),
+                axis: t.axis.into(),
+                major_radius: t.major_radius,
+                minor_radius: t.minor_radius,
+                extent_major_angle: None,
+                extent_minor_angle: None,
+            },
+            Surface::BSpline(_) => SurfaceDict::BSpline,
+        }
+    }
+}
+
+impl TryFrom<SurfaceDict> for Surface {
+    type Error = String;
+
+    fn try_from(dict: SurfaceDict) -> Result<Self, String> {
+        Ok(match dict {
+            SurfaceDict::Plane { origin, normal, .. } => {
+                Surface::Plane(SurfacePlane::new(origin.into(), normal.into()))
+            }
+            SurfaceDict::Cylinder {
+                origin,
+                axis,
+                radius,
+                ..
+            } => Surface::Cylinder(Cylinder::new(origin.into(), axis.into(), radius)),
+            SurfaceDict::Cone {
+                apex,
+                axis,
+                half_angle,
+                ..
+            } => Surface::Cone(Cone::new(apex.into(), axis.into(), half_angle)),
+            SurfaceDict::Sphere { center, radius, .. } => Surface::Sphere(Sphere {
+                center: center.into(),
+                radius,
+            }),
+            SurfaceDict::Torus {
+                center,
+                axis,
+                major_radius,
+                minor_radius,
+                ..
+            } => Surface::Torus(Torus::new(center.into(), axis.into(), major_radius, minor_radius)),
+            SurfaceDict::BSpline => {
+                return Err("BSpline surfaces cannot be round-tripped through dict format".into());
+            }
+        })
+    }
+}
+
+impl Surface {
+    /// Deserialize a `Surface` from a JSON value in the canonical dict format.
+    ///
+    /// The dict must have a `"kind"` tag (e.g. `{"kind": "Plane", ...}`).
+    /// Lowercase variant names and `"semi_angle"` are accepted for backward compat.
+    pub fn from_dict(value: Value) -> Result<Self, String> {
+        let dict: SurfaceDict =
+            serde_json::from_value(value).map_err(|e| format!("invalid surface dict: {e}"))?;
+        dict.try_into()
+    }
+
+    /// Serialize this `Surface` to a JSON value in the canonical dict format.
+    pub fn to_dict(&self) -> Value {
+        let dict = SurfaceDict::from(self);
+        serde_json::to_value(dict).expect("SurfaceDict is always serializable")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,5 +1738,139 @@ mod tests {
         assert_relative_eq!(curvatures[1], 0.5, epsilon = 1e-10);
         // Sphere r=3: κ = 1/3
         assert_relative_eq!(curvatures[2], 1.0 / 3.0, epsilon = 1e-10);
+    }
+
+    // =========================================================================
+    // SurfaceDict round-trip tests
+    // =========================================================================
+
+    #[test]
+    fn test_surface_dict_roundtrip_plane() {
+        let surface = Surface::Plane(SurfacePlane::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        ));
+        let dict = surface.to_dict();
+        let back = Surface::from_dict(dict).unwrap();
+        assert_eq!(surface, back);
+    }
+
+    #[test]
+    fn test_surface_dict_roundtrip_cylinder() {
+        let surface = Surface::Cylinder(Cylinder::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            0.005,
+        ));
+        let dict = surface.to_dict();
+        let back = Surface::from_dict(dict).unwrap();
+        assert_eq!(surface, back);
+    }
+
+    #[test]
+    fn test_surface_dict_roundtrip_cone() {
+        let surface = Surface::Cone(Cone::new(
+            Point3::new(0.0, 0.0, 5.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            0.3,
+        ));
+        let dict = surface.to_dict();
+        let back = Surface::from_dict(dict).unwrap();
+        assert_eq!(surface, back);
+    }
+
+    #[test]
+    fn test_surface_dict_roundtrip_sphere() {
+        let surface = Surface::Sphere(Sphere {
+            center: Point3::new(1.0, 2.0, 3.0),
+            radius: 1.0,
+        });
+        let dict = surface.to_dict();
+        let back = Surface::from_dict(dict).unwrap();
+        assert_eq!(surface, back);
+    }
+
+    #[test]
+    fn test_surface_dict_roundtrip_torus() {
+        let surface = Surface::Torus(Torus::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            2.0,
+            0.5,
+        ));
+        let dict = surface.to_dict();
+        let back = Surface::from_dict(dict).unwrap();
+        assert_eq!(surface, back);
+    }
+
+    #[test]
+    fn test_surface_dict_backward_compat_lowercase() {
+        // Old GLB format uses lowercase variant names
+        let json = serde_json::json!({
+            "kind": "plane",
+            "origin": [1.0, 2.0, 3.0],
+            "normal": [0.0, 0.0, 1.0]
+        });
+        let surface = Surface::from_dict(json).unwrap();
+        assert!(matches!(surface, Surface::Plane(_)));
+    }
+
+    #[test]
+    fn test_surface_dict_backward_compat_semi_angle() {
+        // Old GLB format uses "semi_angle" instead of "half_angle"
+        let json = serde_json::json!({
+            "kind": "cone",
+            "apex": [0.0, 0.0, 5.0],
+            "axis": [0.0, 0.0, 1.0],
+            "semi_angle": 0.3
+        });
+        let surface = Surface::from_dict(json).unwrap();
+        match surface {
+            Surface::Cone(c) => assert_relative_eq!(c.half_angle, 0.3),
+            _ => panic!("expected Cone"),
+        }
+    }
+
+    #[test]
+    fn test_surface_dict_with_extra_fields() {
+        // Extra extent fields should be accepted and ignored
+        let json = serde_json::json!({
+            "kind": "Cylinder",
+            "origin": [0.0, 0.0, 0.0],
+            "axis": [0.0, 1.0, 0.0],
+            "radius": 0.005,
+            "extent_angle": [-3.14, 3.14],
+            "extent_height": [0.0, 1.0]
+        });
+        let surface = Surface::from_dict(json).unwrap();
+        assert!(matches!(surface, Surface::Cylinder(_)));
+    }
+
+    #[test]
+    fn test_surface_dict_bspline_error() {
+        let json = serde_json::json!({"kind": "BSpline"});
+        assert!(Surface::from_dict(json).is_err());
+    }
+
+    #[test]
+    fn test_surface_dict_missing_fields() {
+        // Missing "normal" — should error, not panic
+        let json = serde_json::json!({"kind": "Plane", "origin": [0.0, 0.0, 0.0]});
+        assert!(Surface::from_dict(json).is_err());
+    }
+
+    #[test]
+    fn test_surface_to_dict_structure() {
+        let surface = Surface::Cone(Cone::new(
+            Point3::new(0.0, 0.0, 5.0),
+            Vector3::z(),
+            0.3,
+        ));
+        let dict = surface.to_dict();
+        assert_eq!(dict["kind"], "Cone");
+        assert_eq!(dict["half_angle"], 0.3);
+        assert_eq!(dict["apex"], serde_json::json!([0.0, 0.0, 5.0]));
+        // Extent fields should be absent (not null)
+        assert!(dict.get("extent_angle").is_none());
     }
 }

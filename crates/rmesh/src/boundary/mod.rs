@@ -4,7 +4,7 @@ pub mod step;
 pub mod tesselate;
 pub mod topology;
 
-pub use faces::{Surface, SurfaceCurvature};
+pub use faces::{Surface, SurfaceCurvature, SurfaceDict};
 pub use step::{StepError, from_step};
 pub use tesselate::TesselationParams;
 pub use topology::{
