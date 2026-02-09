@@ -98,7 +98,7 @@ pub fn from_step(content: &[u8]) -> Result<Scene, StepError> {
     // Preprocess the STEP file (remove comments, whitespace)
     let processed = strip_flatten(content);
 
-    // Parse into entity structures
+    // Parse into entity structures (also extracts length_scale)
     let step_file = StepFile::parse(&processed);
 
     // Convert to Scene
@@ -268,85 +268,13 @@ impl RepGraph {
 
 /// Extract the numeric value from a MEASURE_WITH_UNIT generic entity.
 ///
-/// Handles forms like `MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#10)` and
-/// `MEASURE_WITH_UNIT(POSITIVE_LENGTH_MEASURE(25.4),#10)`.
-fn extract_mwu_value(entity: &ap214::Entity<'_>) -> Option<f64> {
-    let raw = match entity {
-        ap214::Entity::Generic(s) => *s,
-        _ => return None,
-    };
-    let inner = raw.strip_prefix("MEASURE_WITH_UNIT(")?;
-    // inner = "LENGTH_MEASURE(25.4),#10)"
-    let paren = inner.find('(')?;
-    let rest = &inner[paren + 1..];
-    fast_float::parse_partial::<f64, _>(rest)
-        .ok()
-        .map(|(v, _)| v)
-}
-
-/// Extract the length unit scale factor from a STEP file.
-///
-/// STEP files declare their length unit as a complex entity combining
-/// `LENGTH_UNIT`, `NAMED_UNIT`, and either `SI_UNIT` (with optional prefix)
-/// or `CONVERSION_BASED_UNIT` (with a numeric conversion factor).
-///
-/// Returns a scale factor from model units to meters:
-/// - 0.001  for millimetres (`SI_UNIT(.MILLI.,.METRE.)`)
-/// - 1.0    for metres (`SI_UNIT($,.METRE.)`)
-/// - 0.0254 for inches (`CONVERSION_BASED_UNIT('INCH', ...)`)
-/// - 1.0    as fallback if no length unit is found
-fn extract_length_scale(step: &StepFile<'_>) -> f64 {
-    for entity in &step.entities {
-        let ap214::Entity::ComplexEntity(subs) = entity else {
-            continue;
-        };
-
-        // A length-unit complex entity must contain a LengthUnit sub-entity.
-        let has_length_unit = subs
-            .iter()
-            .any(|e| matches!(e, ap214::Entity::LengthUnit(_)));
-        if !has_length_unit {
-            continue;
-        }
-
-        // Check for SI_UNIT with optional prefix
-        for sub in subs {
-            if let ap214::Entity::SiUnit(si) = sub
-                && si.name == "METRE"
-            {
-                return match si.prefix {
-                    Some("MILLI") => 0.001,
-                    Some("CENTI") => 0.01,
-                    Some("MICRO") => 1e-6,
-                    Some("KILO") => 1000.0,
-                    _ => 1.0,
-                };
-            }
-        }
-
-        // Check for CONVERSION_BASED_UNIT — follow its conversion_factor ref
-        for sub in subs {
-            if let ap214::Entity::ConversionBasedUnit(cbu) = sub {
-                let mwu_id = cbu.conversion_factor;
-                if let Some(val) = extract_mwu_value(&step.entities[mwu_id]) {
-                    return val;
-                }
-            }
-        }
-    }
-
-    // No length unit found — assume metres
-    1.0
-}
-
 /// Convert a parsed STEP file to a Scene.
 fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
-    let length_scale = extract_length_scale(step);
     let graph = RepGraph::build(step);
 
     // If no RRWT edges exist this is a single-body file — fall back to flat scan.
     if graph.roots.is_empty() {
-        return convert_to_scene_flat(step, length_scale);
+        return convert_to_scene_flat(step);
     }
 
     let to_mesh = graph.collect_instances(step);
@@ -359,7 +287,7 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
             if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[**msb_id]
                 && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
             {
-                brep.length_scale = length_scale;
+                brep.length_scale = step.length_scale;
                 Some((
                     name.clone(),
                     Geometry::Brep(Box::new(brep)),
@@ -380,10 +308,7 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
 }
 
 /// Flat fallback for single-body STEP files with no representation relationships.
-fn convert_to_scene_flat<'a>(
-    step: &'a StepFile<'a>,
-    length_scale: f64,
-) -> Result<Scene, StepError> {
+fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
     // Collect all (name, msb) pairs to convert in parallel.
     let mut work: Vec<(String, &ap214::ManifoldSolidBrep_<'a>)> = Vec::new();
     for (id, entity) in step.entities.iter().enumerate() {
@@ -404,7 +329,7 @@ fn convert_to_scene_flat<'a>(
         .par_iter()
         .filter_map(|(name, msb)| {
             let mut brep = convert_manifold_solid_brep(step, msb).ok()?;
-            brep.length_scale = length_scale;
+            brep.length_scale = step.length_scale;
             Some((name.clone(), Geometry::Brep(Box::new(brep))))
         })
         .collect();
@@ -656,7 +581,7 @@ fn convert_vertex<'a>(
     Ok(idx)
 }
 
-/// Convert a CARTESIAN_POINT to Point3
+/// Convert a CARTESIAN_POINT to Point3, scaled to meters by `step.length_scale`.
 fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point3<f64>, StepError> {
     let cp = match &step.entities[point_id] {
         ap214::Entity::CartesianPoint(cp) => cp,
@@ -667,11 +592,12 @@ fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point
         }
     };
 
+    let s = step.length_scale;
     let coords = &cp.coordinates;
     Ok(Point3::new(
-        coords.first().copied().unwrap_or(0.0),
-        coords.get(1).copied().unwrap_or(0.0),
-        coords.get(2).copied().unwrap_or(0.0),
+        coords.first().copied().unwrap_or(0.0) * s,
+        coords.get(1).copied().unwrap_or(0.0) * s,
+        coords.get(2).copied().unwrap_or(0.0) * s,
     ))
 }
 
@@ -771,7 +697,7 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
             let dir_entity = &step.entities[line.dir];
             let direction = if let ap214::Entity::Vector(v) = dir_entity {
                 let dir = convert_direction(step, v.orientation)?;
-                dir * v.magnitude
+                dir * v.magnitude * step.length_scale
             } else {
                 return Err(StepError::UnsupportedEntity(
                     "Expected VECTOR for LINE".into(),
@@ -785,7 +711,7 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
                 center,
                 axis,
                 x_axis,
-                radius: circle.radius,
+                radius: circle.radius * step.length_scale,
             }))
         }
         ap214::Entity::Ellipse(ellipse) => {
@@ -794,8 +720,8 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
                 center,
                 axis,
                 x_axis,
-                semi_major: ellipse.semi_axis_1,
-                semi_minor: ellipse.semi_axis_2,
+                semi_major: ellipse.semi_axis_1 * step.length_scale,
+                semi_minor: ellipse.semi_axis_2 * step.length_scale,
             }))
         }
         ap214::Entity::BSplineCurveWithKnots(bspline) => {
@@ -920,7 +846,11 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
         }
         ap214::Entity::CylindricalSurface(cyl) => {
             let (origin, axis, _) = convert_axis2_placement_3d(step, cyl.position)?;
-            Ok(Surface::Cylinder(Cylinder::new(origin, axis, cyl.radius)))
+            Ok(Surface::Cylinder(Cylinder::new(
+                origin,
+                axis,
+                cyl.radius * step.length_scale,
+            )))
         }
         ap214::Entity::ConicalSurface(cone) => {
             let (apex, axis, _) = convert_axis2_placement_3d(step, cone.position)?;
@@ -930,7 +860,7 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
             let (center, _, _) = convert_axis2_placement_3d(step, sphere.position)?;
             Ok(Surface::Sphere(Sphere {
                 center,
-                radius: sphere.radius,
+                radius: sphere.radius * step.length_scale,
             }))
         }
         ap214::Entity::ToroidalSurface(torus) => {
@@ -938,8 +868,8 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
             Ok(Surface::Torus(Torus::new(
                 center,
                 axis,
-                torus.major_radius,
-                torus.minor_radius,
+                torus.major_radius * step.length_scale,
+                torus.minor_radius * step.length_scale,
             )))
         }
         ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf, None),
@@ -1113,8 +1043,8 @@ fn placement_to_matrix(step: &StepFile<'_>, id: usize) -> Result<Matrix4<f64>, S
 
 /// Extract the transform from an ITEM_DEFINED_TRANSFORMATION entity.
 ///
-/// Computes `target * source.inverse()` where source and target are the two
-/// coordinate systems referenced by the IDT.
+/// Computes `target.inverse() * source` (ISO 10303-43) where source and
+/// target are the two coordinate systems referenced by the IDT.
 fn item_defined_transform(step: &StepFile<'_>, idt_id: usize) -> Result<Matrix4<f64>, StepError> {
     let idt = match &step.entities[idt_id] {
         ap214::Entity::ItemDefinedTransformation(v) => v,
@@ -1126,11 +1056,12 @@ fn item_defined_transform(step: &StepFile<'_>, idt_id: usize) -> Result<Matrix4<
     };
     let t1 = placement_to_matrix(step, idt.transform_item_1)?;
     let t2 = placement_to_matrix(step, idt.transform_item_2)?;
-    Ok(t2
-        * t1.try_inverse().unwrap_or_else(|| {
-            eprintln!("warning: singular placement matrix at #{idt_id}, using identity");
-            Matrix4::identity()
-        }))
+    // ISO 10303-43: map from transform_item_1's CS to transform_item_2's CS
+    // i.e. target^(-1) * source
+    Ok(t2.try_inverse().unwrap_or_else(|| {
+        eprintln!("warning: singular placement matrix at #{idt_id}, using identity");
+        Matrix4::identity()
+    }) * t1)
 }
 
 #[cfg(test)]
@@ -1583,6 +1514,101 @@ mod tests {
         assert!(has_transforms, "Instance nodes should have transforms");
 
         println!("\n=== box_sides assembly test passed ===");
+    }
+
+    #[test]
+    fn test_box_sides_extents() {
+        let step_data = include_bytes!("../../../../../test/data/box_sides.STEP");
+
+        // Check length_scale is detected
+        let processed = strip_flatten(step_data);
+        let sf = StepFile::parse(&processed);
+        println!("length_scale = {}", sf.length_scale);
+        assert!(
+            (sf.length_scale - 0.0254).abs() < 1e-6,
+            "Expected 0.0254 for inches, got {}",
+            sf.length_scale
+        );
+
+        let scene = from_step(step_data).expect("Failed to parse box_sides.STEP");
+
+        // Print diagnostics
+        println!("\n=== box_sides extents diagnostic ===");
+        println!("Geometry count: {}", scene.geometry.len());
+        println!("Graph nodes: {}", scene.graph.nodes.len());
+
+        // Print per-geometry local bounds
+        for (name, geom) in &scene.geometry {
+            if let Some((min, max)) = geom.bounds() {
+                println!(
+                    "  '{}': local bounds min=({:.6}, {:.6}, {:.6}) max=({:.6}, {:.6}, {:.6})",
+                    name, min.x, min.y, min.z, max.x, max.y, max.z
+                );
+            }
+        }
+
+        // Print scene graph transforms
+        let geom_keys: Vec<_> = scene.geometry.keys().cloned().collect();
+        for (i, node) in scene.graph.nodes.iter().enumerate() {
+            if let Some(ref tf) = node.transform {
+                println!(
+                    "  node[{}] '{}': transform translation=({:.6}, {:.6}, {:.6})",
+                    i,
+                    node.name,
+                    tf[(0, 3)],
+                    tf[(1, 3)],
+                    tf[(2, 3)]
+                );
+                println!(
+                    "    rotation col0=({:.4}, {:.4}, {:.4}) col1=({:.4}, {:.4}, {:.4}) col2=({:.4}, {:.4}, {:.4})",
+                    tf[(0, 0)],
+                    tf[(1, 0)],
+                    tf[(2, 0)],
+                    tf[(0, 1)],
+                    tf[(1, 1)],
+                    tf[(2, 1)],
+                    tf[(0, 2)],
+                    tf[(1, 2)],
+                    tf[(2, 2)],
+                );
+                // Print geometry index for this node
+                println!("    kind={:?} index={:?}", node.kind, node.index);
+                for &gi in &node.index {
+                    if gi < geom_keys.len() {
+                        if let Some((min, max)) = scene.geometry[&geom_keys[gi]].bounds() {
+                            println!(
+                                "    -> geom '{}': local extents=({:.6}, {:.6}, {:.6})",
+                                geom_keys[gi],
+                                max.x - min.x,
+                                max.y - min.y,
+                                max.z - min.z,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let extents = scene.extents().expect("scene should have extents");
+        println!(
+            "Scene extents: ({:.6}, {:.6}, {:.6})",
+            extents[0], extents[1], extents[2]
+        );
+
+        // trimesh reference: array([0.18415, 0.1143, 0.09525])
+        // These are in meters (the file uses INCH, length_scale = 0.0254)
+        let expected = [0.18415, 0.1143, 0.09525];
+        let tol = 0.001;
+        for i in 0..3 {
+            assert!(
+                (extents[i] - expected[i]).abs() < tol,
+                "extents[{}]: got {:.6}, expected {:.6} (diff={:.6})",
+                i,
+                extents[i],
+                expected[i],
+                (extents[i] - expected[i]).abs()
+            );
+        }
     }
 
     #[test]

@@ -5,6 +5,7 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 
 use rmesh::geometry::Geometry;
+use rmesh::scene::{SceneGraph, SceneNodeKind};
 use rmesh_viewer::{RenderOptions, SceneViewer, ViewerOptions};
 
 use crate::mesh::{PyPath2D, PyPath3D, PyPolygon2D, PyTrimesh, readonly_1d, readonly_bounds};
@@ -95,6 +96,105 @@ impl PyGeometryDictKeysIter {
         } else {
             None
         }
+    }
+}
+
+// ============================================================================
+// PySceneNode / PySceneGraph
+// ============================================================================
+
+/// A node in the scene graph.
+#[pyclass(name = "SceneNode", frozen)]
+pub struct PySceneNode {
+    /// The node name.
+    #[pyo3(get)]
+    name: String,
+    /// Indices of child nodes.
+    #[pyo3(get)]
+    children: Vec<usize>,
+    /// 4x4 transform matrix (column-major), or None for identity.
+    #[pyo3(get)]
+    transform: Option<Vec<Vec<f64>>>,
+    /// What the node references: "geometry", "camera", "light", or "custom".
+    #[pyo3(get)]
+    kind: String,
+    /// Indices into the scene's geometry/cameras/lights depending on `kind`.
+    #[pyo3(get)]
+    index: Vec<usize>,
+}
+
+#[pymethods]
+impl PySceneNode {
+    fn __repr__(&self) -> String {
+        format!(
+            "SceneNode(name='{}', kind='{}', children={})",
+            self.name,
+            self.kind,
+            self.children.len()
+        )
+    }
+}
+
+/// The scene graph: a tree of nodes with transforms.
+#[pyclass(name = "SceneGraph", frozen)]
+pub struct PySceneGraph {
+    /// Index of the root node.
+    #[pyo3(get)]
+    root: usize,
+    /// All nodes in the graph.
+    #[pyo3(get)]
+    nodes: Vec<Py<PySceneNode>>,
+}
+
+impl PySceneGraph {
+    fn from_graph(py: Python<'_>, graph: &SceneGraph) -> Py<Self> {
+        let nodes: Vec<Py<PySceneNode>> = graph
+            .nodes
+            .iter()
+            .map(|node| {
+                let transform = node.transform.map(|m| {
+                    (0..4)
+                        .map(|r| (0..4).map(|c| m[(r, c)]).collect())
+                        .collect()
+                });
+                let kind = match node.kind {
+                    SceneNodeKind::Geometry => "geometry",
+                    SceneNodeKind::Camera => "camera",
+                    SceneNodeKind::Light => "light",
+                    SceneNodeKind::Custom => "custom",
+                };
+                Py::new(
+                    py,
+                    PySceneNode {
+                        name: node.name.clone(),
+                        children: node.children.clone(),
+                        transform,
+                        kind: kind.to_string(),
+                        index: node.index.clone(),
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        Py::new(
+            py,
+            PySceneGraph {
+                root: graph.root,
+                nodes,
+            },
+        )
+        .unwrap()
+    }
+}
+
+#[pymethods]
+impl PySceneGraph {
+    fn __repr__(&self) -> String {
+        format!("SceneGraph(nodes={})", self.nodes.len())
+    }
+
+    fn __len__(&self) -> usize {
+        self.nodes.len()
     }
 }
 
@@ -213,6 +313,8 @@ impl PyScene {
                     .geometry
                     .iter()
                     .filter_map(|(name, geom)| {
+                        // Match exhaustively so adding a new Geometry variant
+                        // produces a compile error until handled here.
                         let obj: Py<PyAny> = match geom {
                             Geometry::Mesh(mesh) => {
                                 Py::new(py, PyTrimesh::new_from_trimesh((**mesh).clone()))
@@ -227,8 +329,26 @@ impl PyScene {
                             )
                             .ok()?
                             .into_any(),
-                            // TODO: Path2D, Path3D, PointCloud bindings
-                            _ => return None,
+                            Geometry::Path2D(path) => Py::new(
+                                py,
+                                PyPath2D {
+                                    data: (**path).clone(),
+                                    vertices_cache: OnceCell::new(),
+                                },
+                            )
+                            .ok()?
+                            .into_any(),
+                            Geometry::Path3D(path) => Py::new(
+                                py,
+                                PyPath3D {
+                                    data: path.clone(),
+                                    vertices_cache: OnceCell::new(),
+                                },
+                            )
+                            .ok()?
+                            .into_any(),
+                            // No Python wrappers yet for these types
+                            Geometry::PointCloud(_) | Geometry::Brep(_) => return None,
                         };
                         Some((name.clone(), obj))
                     })
@@ -289,6 +409,12 @@ impl PyScene {
         self.data.bounds().map(|(min, max)| {
             readonly_bounds(py, vec![min.x, min.y, min.z, max.x, max.y, max.z], 3)
         })
+    }
+
+    /// The scene graph organizing nodes with transforms.
+    #[getter]
+    fn graph(&self, py: Python<'_>) -> Py<PySceneGraph> {
+        PySceneGraph::from_graph(py, &self.data.graph)
     }
 
     /// Extents of the bounding box [x, y, z] as a (3,) array,

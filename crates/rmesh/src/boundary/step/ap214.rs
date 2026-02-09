@@ -970,7 +970,15 @@ impl<'a> ConversionBasedUnit_<'a> {
     pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
         let mut i = 0;
         let (s, _) = tag("CONVERSION_BASED_UNIT(")(strs[0])?;
-        let (s, _) = param_from_chunks::<Derived>(false, s, &mut i, strs)?;
+        // Inherited NAMED_UNIT dimension param: either `*` (derived) or `#nnn` (ref)
+        let i_save = i;
+        let s = match param_from_chunks::<Derived>(false, s, &mut i, strs) {
+            Ok((s, _)) => s,
+            Err(_) => {
+                i = i_save;
+                param_from_chunks::<usize>(false, s, &mut i, strs)?.0
+            }
+        };
         let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
         let (s, conversion_factor) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
         Ok((

@@ -6,7 +6,7 @@ pub use mesh::{
     PyFaceAttributes, PyGrouping, PyGroupingCollection, PyPath2D, PyPath3D, PyPolygon2D, PyTrimesh,
     PyVertexAttributes, PyVoxelGrid, py_load,
 };
-pub use scene::{PyGeometryDict, PyScene};
+pub use scene::{PyGeometryDict, PyScene, PySceneGraph, PySceneNode};
 
 use pyo3::prelude::*;
 
@@ -25,6 +25,8 @@ fn rmesh(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPolygon2D>()?;
     m.add_class::<PyPath2D>()?;
     m.add_class::<PyPath3D>()?;
+    m.add_class::<PySceneGraph>()?;
+    m.add_class::<PySceneNode>()?;
 
     // Starlark expression evaluation (top-level convenience function)
     m.add_function(wrap_pyfunction!(feature::py_evaluate, m)?)?;

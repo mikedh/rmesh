@@ -8,8 +8,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::attributes::{Grouping, GroupingKind, UNSET};
-use crate::boundary::faces::SurfaceDict;
 use crate::boundary::Surface;
+use crate::boundary::faces::SurfaceDict;
 
 use super::PrimitiveResult;
 

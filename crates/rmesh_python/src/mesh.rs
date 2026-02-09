@@ -720,7 +720,7 @@ impl PyPolygon2D {
 #[pyclass(name = "Path2D")]
 pub struct PyPath2D {
     pub(crate) data: rmesh::path::Path2D,
-    vertices_cache: OnceCell<Py<PyArray2<f64>>>,
+    pub(crate) vertices_cache: OnceCell<Py<PyArray2<f64>>>,
 }
 
 #[pymethods]
@@ -901,7 +901,7 @@ impl PyPath2D {
 /// A 3D path consisting of vertices and line segments.
 #[pyclass(name = "Path3D")]
 pub struct PyPath3D {
-    vertices_cache: OnceCell<Py<PyArray2<f64>>>,
+    pub(crate) vertices_cache: OnceCell<Py<PyArray2<f64>>>,
     pub(crate) data: rmesh::path::Path3D,
 }
 
@@ -2029,8 +2029,7 @@ fn value_to_pydict<'py>(py: Python<'py>, value: &serde_json::Value) -> Bound<'py
                     }
                 }
                 serde_json::Value::Array(arr) => {
-                    let floats: Vec<f64> =
-                        arr.iter().filter_map(|v| v.as_f64()).collect();
+                    let floats: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
                     dict.set_item(k, floats).unwrap();
                 }
                 _ => {}

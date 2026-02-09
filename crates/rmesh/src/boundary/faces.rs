@@ -1348,7 +1348,12 @@ impl TryFrom<SurfaceDict> for Surface {
                 major_radius,
                 minor_radius,
                 ..
-            } => Surface::Torus(Torus::new(center.into(), axis.into(), major_radius, minor_radius)),
+            } => Surface::Torus(Torus::new(
+                center.into(),
+                axis.into(),
+                major_radius,
+                minor_radius,
+            )),
             SurfaceDict::BSpline => {
                 return Err("BSpline surfaces cannot be round-tripped through dict format".into());
             }
@@ -1861,11 +1866,7 @@ mod tests {
 
     #[test]
     fn test_surface_to_dict_structure() {
-        let surface = Surface::Cone(Cone::new(
-            Point3::new(0.0, 0.0, 5.0),
-            Vector3::z(),
-            0.3,
-        ));
+        let surface = Surface::Cone(Cone::new(Point3::new(0.0, 0.0, 5.0), Vector3::z(), 0.3));
         let dict = surface.to_dict();
         assert_eq!(dict["kind"], "Cone");
         assert_eq!(dict["half_angle"], 0.3);
