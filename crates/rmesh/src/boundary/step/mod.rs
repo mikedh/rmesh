@@ -581,7 +581,7 @@ fn convert_vertex<'a>(
     Ok(idx)
 }
 
-/// Convert a CARTESIAN_POINT to Point3, scaled to meters by `step.length_scale`.
+/// Convert a CARTESIAN_POINT to Point3 (in native STEP file units).
 fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point3<f64>, StepError> {
     let cp = match &step.entities[point_id] {
         ap214::Entity::CartesianPoint(cp) => cp,
@@ -592,12 +592,11 @@ fn convert_cartesian_point(step: &StepFile<'_>, point_id: usize) -> Result<Point
         }
     };
 
-    let s = step.length_scale;
     let coords = &cp.coordinates;
     Ok(Point3::new(
-        coords.first().copied().unwrap_or(0.0) * s,
-        coords.get(1).copied().unwrap_or(0.0) * s,
-        coords.get(2).copied().unwrap_or(0.0) * s,
+        coords.first().copied().unwrap_or(0.0),
+        coords.get(1).copied().unwrap_or(0.0),
+        coords.get(2).copied().unwrap_or(0.0),
     ))
 }
 
@@ -697,7 +696,7 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
             let dir_entity = &step.entities[line.dir];
             let direction = if let ap214::Entity::Vector(v) = dir_entity {
                 let dir = convert_direction(step, v.orientation)?;
-                dir * v.magnitude * step.length_scale
+                dir * v.magnitude
             } else {
                 return Err(StepError::UnsupportedEntity(
                     "Expected VECTOR for LINE".into(),
@@ -711,7 +710,7 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
                 center,
                 axis,
                 x_axis,
-                radius: circle.radius * step.length_scale,
+                radius: circle.radius,
             }))
         }
         ap214::Entity::Ellipse(ellipse) => {
@@ -720,8 +719,8 @@ fn convert_curve(step: &StepFile<'_>, curve_id: usize) -> Result<Curve, StepErro
                 center,
                 axis,
                 x_axis,
-                semi_major: ellipse.semi_axis_1 * step.length_scale,
-                semi_minor: ellipse.semi_axis_2 * step.length_scale,
+                semi_major: ellipse.semi_axis_1,
+                semi_minor: ellipse.semi_axis_2,
             }))
         }
         ap214::Entity::BSplineCurveWithKnots(bspline) => {
@@ -849,7 +848,7 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
             Ok(Surface::Cylinder(Cylinder::new(
                 origin,
                 axis,
-                cyl.radius * step.length_scale,
+                cyl.radius,
             )))
         }
         ap214::Entity::ConicalSurface(cone) => {
@@ -860,7 +859,7 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
             let (center, _, _) = convert_axis2_placement_3d(step, sphere.position)?;
             Ok(Surface::Sphere(Sphere {
                 center,
-                radius: sphere.radius * step.length_scale,
+                radius: sphere.radius,
             }))
         }
         ap214::Entity::ToroidalSurface(torus) => {
@@ -868,8 +867,8 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
             Ok(Surface::Torus(Torus::new(
                 center,
                 axis,
-                torus.major_radius * step.length_scale,
-                torus.minor_radius * step.length_scale,
+                torus.major_radius,
+                torus.minor_radius,
             )))
         }
         ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf, None),
@@ -1595,18 +1594,19 @@ mod tests {
             extents[0], extents[1], extents[2]
         );
 
-        // trimesh reference: array([0.18415, 0.1143, 0.09525])
-        // These are in meters (the file uses INCH, length_scale = 0.0254)
-        let expected = [0.18415, 0.1143, 0.09525];
+        // trimesh reference in meters: array([0.18415, 0.1143, 0.09525])
+        // Geometry is in native file units (inches), so scale extents to meters.
+        let expected_m = [0.18415, 0.1143, 0.09525];
         let tol = 0.001;
         for i in 0..3 {
+            let got_m = extents[i] * sf.length_scale;
             assert!(
-                (extents[i] - expected[i]).abs() < tol,
-                "extents[{}]: got {:.6}, expected {:.6} (diff={:.6})",
+                (got_m - expected_m[i]).abs() < tol,
+                "extents[{}]: got {:.6} m, expected {:.6} m (diff={:.6})",
                 i,
-                extents[i],
-                expected[i],
-                (extents[i] - expected[i]).abs()
+                got_m,
+                expected_m[i],
+                (got_m - expected_m[i]).abs()
             );
         }
     }
