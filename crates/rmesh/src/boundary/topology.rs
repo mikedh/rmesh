@@ -615,9 +615,6 @@ pub struct BrepModel {
     pub faces: Vec<BrepFace>,
     pub shells: Vec<BrepShell>,
     pub solids: Vec<BrepSolid>,
-    /// Scale factor from model units to meters (e.g. 0.001 for mm, 0.0254 for inches).
-    /// Used to compute effective tessellation tolerance.
-    pub length_scale: f64,
 }
 
 impl Default for BrepModel {
@@ -631,7 +628,6 @@ impl Default for BrepModel {
             faces: Vec::new(),
             shells: Vec::new(),
             solids: Vec::new(),
-            length_scale: 1.0,
         }
     }
 }

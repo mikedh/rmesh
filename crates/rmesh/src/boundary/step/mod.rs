@@ -285,9 +285,8 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
         .par_iter()
         .filter_map(|(msb_id, (name, transforms))| {
             if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[**msb_id]
-                && let Ok(mut brep) = convert_manifold_solid_brep(step, msb)
+                && let Ok(brep) = convert_manifold_solid_brep(step, msb)
             {
-                brep.length_scale = step.length_scale;
                 Some((
                     name.clone(),
                     Geometry::Brep(Box::new(brep)),
@@ -328,8 +327,7 @@ fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError>
     let results: Vec<_> = work
         .par_iter()
         .filter_map(|(name, msb)| {
-            let mut brep = convert_manifold_solid_brep(step, msb).ok()?;
-            brep.length_scale = step.length_scale;
+            let brep = convert_manifold_solid_brep(step, msb).ok()?;
             Some((name.clone(), Geometry::Brep(Box::new(brep))))
         })
         .collect();
@@ -1119,17 +1117,11 @@ mod tests {
 
         for (name, geom) in &scene.geometry {
             if let Geometry::Brep(brep) = geom {
-                // Use looser tolerance to reduce subdivision
-                let params = TesselationParams {
-                    tolerance: 0.1, // 0.1mm chord error (looser for faster test)
-                    min_segments: 4,
-                    max_segments: 64,
-                    ..Default::default()
-                };
+                let params = TesselationParams::default();
 
                 let mesh = brep.tesselate(&params);
 
-                println!("\nBREP '{}' tessellation (tolerance=0.1mm):", name);
+                println!("\nBREP '{}' tessellation:", name);
                 println!("  BREP faces: {}", brep.faces.len());
                 println!("  Vertices: {}", mesh.vertices.len());
                 println!("  Triangles: {}", mesh.faces.len());
@@ -1175,14 +1167,7 @@ mod tests {
             })
             .expect("No BREP model found in STEP file");
 
-        // Tessellate with reasonable tolerance (0.1mm matches typical CAD export settings)
-        let params = TesselationParams {
-            tolerance: 0.1,
-            min_segments: 4,
-            max_segments: 256,
-            ..Default::default()
-        };
-        let tess_mesh = brep.tesselate(&params);
+        let tess_mesh = brep.tesselate(&TesselationParams::default());
 
         // Load reference GLB
         let glb_data = include_bytes!("../../../../../test/data/featuretype.glb");
@@ -1392,13 +1377,7 @@ mod tests {
             })
             .expect("No BREP model found via load pipeline");
 
-        let params = TesselationParams {
-            tolerance: 0.1,
-            min_segments: 4,
-            max_segments: 256,
-            ..Default::default()
-        };
-        let tess_mesh = brep.tesselate(&params);
+        let tess_mesh = brep.tesselate(&TesselationParams::default());
 
         // Must be watertight
         assert!(
@@ -1621,12 +1600,7 @@ mod tests {
         let scene = from_step(step_data).expect("Failed to parse assembly STEP file");
         let parse_ms = t0.elapsed().as_millis();
 
-        let params = TesselationParams {
-            tolerance: 0.1,
-            min_segments: 4,
-            max_segments: 64,
-            ..Default::default()
-        };
+        let params = TesselationParams::default();
 
         let t1 = std::time::Instant::now();
         let mut total_verts = 0;
@@ -1666,7 +1640,6 @@ mod tests {
         use std::time::Instant;
 
         let params = TesselationParams {
-            tolerance: 0.1,
             min_segments: 4,
             max_segments: 64,
             ..Default::default()
@@ -1824,12 +1797,7 @@ mod tests {
             return;
         }
 
-        let params = TesselationParams {
-            tolerance: 0.1,
-            min_segments: 4,
-            max_segments: 64,
-            ..Default::default()
-        };
+        let params = TesselationParams::default();
 
         // Collect all .STEP files
         let mut step_files: Vec<_> = std::fs::read_dir(rosetta_dir)
@@ -1843,6 +1811,7 @@ mod tests {
             .collect();
         step_files.sort_by_key(|e| e.file_name());
 
+        #[allow(dead_code)]
         struct FileResult {
             name: String,
             bytes: usize,
@@ -1873,7 +1842,7 @@ mod tests {
             let t = Instant::now();
             let scene = match convert_to_scene(&step_file) {
                 Ok(s) => s,
-                Err(e) => {
+                Err(_e) => {
                     results.push(FileResult {
                         name,
                         bytes,
@@ -2006,5 +1975,10 @@ mod tests {
             "TOTAL", total_wt_pass, total_wt_total, total_ms, total_tris,
         );
         println!();
+
+        assert_eq!(
+            total_wt_pass, total_wt_total,
+            "Watertight regression: {total_wt_pass}/{total_wt_total}"
+        );
     }
 }

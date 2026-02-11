@@ -17,8 +17,9 @@
 //! 5. **Final assembly** — Per-face triangulations are assembled into a single `Trimesh`
 //!    with per-vertex normals and face-to-surface grouping attributes.
 //!
-//! Known limitations: ~85/17,500 faces fall back to plane projection CDT, and
-//! 4/153 Rosetta benchmark bodies produce non-watertight output.
+//! Known limitations: a small fraction of faces fall back to plane-projection
+//! CDT or fan triangulation. All Rosetta benchmark bodies produce watertight
+//! output at default tolerance.
 
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -38,27 +39,43 @@ use crate::attributes::{Attributes, Grouping, GroupingKind};
 use crate::creation::{Plane, perpendicular};
 use crate::mesh::Trimesh;
 
-/// Parameters controlling tesselation quality.
+/// Parameters controlling tessellation quality.
+///
+/// Tolerance is purely relative: the effective chord-height threshold is
+/// `tolerance_relative * bounding_box_diagonal`, making tessellation quality
+/// independent of model units (mm, inches, meters). A 1mm screw and a 10m
+/// beam both get the same visual fidelity at the same `tolerance_relative`.
+///
+/// The adaptive refinement loop (phase 4) subdivides any triangle whose
+/// midpoint deviates from the true surface by more than the effective
+/// tolerance. Boundary edges are split globally across adjacent faces to
+/// maintain watertightness.
+///
+/// # Defaults
+///
+/// | Parameter | Default | Effect |
+/// |-----------|---------|--------|
+/// | `tolerance_relative` | 0.001 | 0.1% of bbox diagonal — visually smooth |
+/// | `min_segments` | 16 | Full circles always get >= 16 segments |
+/// | `max_segments` | 256 | Caps subdivision on very tight tolerances |
+/// | `merge_tolerance` | 1e-8 | UV-space snap for near-duplicate vertices |
 #[derive(Debug, Clone)]
 pub struct TesselationParams {
-    /// Absolute chord error in meters.
-    pub tolerance: f64,
     /// Chord error as fraction of bounding-box diagonal.
-    /// Effective tolerance = max(tolerance / length_scale, tolerance_relative * char_length).
     pub tolerance_relative: f64,
-    /// Minimum segments per curved edge
+    /// Minimum segments per full circle (ensures cylinders look circular).
     pub min_segments: usize,
-    /// Maximum segments per curved edge
+    /// Maximum segments per curved edge.
     pub max_segments: usize,
-    /// Vertex merge tolerance in UV space for snapping nearly-identical vertices.
-    /// This prevents CDT failures on near-collinear points.
+    /// Vertex merge tolerance in UV parameter space for snapping nearly-identical
+    /// vertices before CDT. This is an absolute distance (not scaled per-face)
+    /// because UV parametrizations are surface-intrinsic.
     pub merge_tolerance: f64,
 }
 
 impl Default for TesselationParams {
     fn default() -> Self {
         Self {
-            tolerance: 0.0005,         // 0.5mm absolute chord error
             tolerance_relative: 0.001, // 0.1% of bounding-box diagonal
             min_segments: 16,          // ensures circles always look circular
             max_segments: 256,
@@ -1135,7 +1152,7 @@ struct EdgeDiscretization {
 struct ShellTessellator<'a> {
     model: &'a BrepModel,
     params: &'a TesselationParams,
-    /// Effective tolerance in model units, computed from absolute + relative tolerances.
+    /// Effective tolerance in model units (tolerance_relative * bounding-box diagonal).
     effective_tolerance: f64,
 
     // Phase 1 results
@@ -1165,16 +1182,12 @@ struct ShellTessellator<'a> {
 
 impl<'a> ShellTessellator<'a> {
     fn new(model: &'a BrepModel, params: &'a TesselationParams) -> Self {
-        // Convert absolute tolerance from meters to model units, then take the
-        // max with the relative tolerance scaled by bounding-box diagonal.
-        let scale = if model.length_scale > 0.0 {
-            model.length_scale
-        } else {
-            1.0
-        };
         let char_length = model.characteristic_length();
-        let effective_tolerance =
-            (params.tolerance / scale).max(params.tolerance_relative * char_length);
+        let effective_tolerance = if char_length > f64::EPSILON {
+            params.tolerance_relative * char_length
+        } else {
+            params.tolerance_relative // unit-scale fallback for degenerate models
+        };
 
         Self {
             model,
@@ -1713,6 +1726,55 @@ impl<'a> ShellTessellator<'a> {
                     Vec::new()
                 }
             };
+        }
+
+        // If UV CDT failed with interior samples, retry with boundary-only vertices.
+        // Interior detail will be recovered by Phase 3 adaptive refinement.
+        if state.triangles.is_empty() && !skip_uv_cdt && !interior_uvs.is_empty() {
+            let boundary_pts: Vec<(f64, f64)> = state.vertices_uv[..boundary_len]
+                .iter()
+                .map(|p| (p.x, p.y))
+                .collect();
+            let boundary_pts_p2: Vec<Point2<f64>> = boundary_pts
+                .iter()
+                .map(|&(x, y)| Point2::new(x, y))
+                .collect();
+            let merge_result = merge_near_vertices(
+                &boundary_pts_p2,
+                &contours,
+                self.params.merge_tolerance,
+            );
+            let merged: Vec<(f64, f64)> = merge_result
+                .merged_uvs
+                .iter()
+                .map(|p| (p.x, p.y))
+                .collect();
+
+            if let Ok(tris) =
+                cdt::triangulate_contours(&merged, &merge_result.merged_contours)
+            {
+                let filtered: Vec<[usize; 3]> = tris
+                    .iter()
+                    .filter_map(|&(a, b, c)| {
+                        let oa = *merge_result.merged_to_original.get(a)?;
+                        let ob = *merge_result.merged_to_original.get(b)?;
+                        let oc = *merge_result.merged_to_original.get(c)?;
+                        if oa == ob || ob == oc || oc == oa {
+                            return None;
+                        }
+                        Some([oa, ob, oc])
+                    })
+                    .collect();
+                let as_tuples: Vec<(usize, usize, usize)> =
+                    filtered.iter().map(|t| (t[0], t[1], t[2])).collect();
+                if check_all_contour_edges_present(
+                    &as_tuples,
+                    &contours,
+                    Some(&merge_result.original_to_merged),
+                ) {
+                    state.triangles = filtered;
+                }
+            }
         }
 
         // Recovery: if CDT produced no triangles (either CDT failed, or boundary
@@ -2650,7 +2712,6 @@ mod tests {
         model.add_face(cyl_surf, loop1, vec![], true);
 
         let params = TesselationParams {
-            tolerance: 0.01,
             min_segments: 4,
             max_segments: 256,
             ..Default::default()

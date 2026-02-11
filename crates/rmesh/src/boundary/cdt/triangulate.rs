@@ -1017,7 +1017,9 @@ impl Triangulation {
         if edge_ba.fixed() {
             return Err(Error::CrossingFixedEdge);
         }
-        assert!(edge_ba.buddy != EMPTY_EDGE);
+        if edge_ba.buddy == EMPTY_EDGE {
+            return Err(Error::WedgeEscape);
+        }
         e = edge_ba.buddy;
 
         loop {
