@@ -605,7 +605,7 @@ pub struct EdgeUse {
 // ============================================================================
 
 /// A complete BREP model containing all topology and geometry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrepModel {
     pub curves: Vec<Curve>,
     pub vertices: Vec<BrepVertex>,
@@ -617,20 +617,6 @@ pub struct BrepModel {
     pub solids: Vec<BrepSolid>,
 }
 
-impl Default for BrepModel {
-    fn default() -> Self {
-        Self {
-            curves: Vec::new(),
-            vertices: Vec::new(),
-            edges: Vec::new(),
-            loops: Vec::new(),
-            face_surfaces: Vec::new(),
-            faces: Vec::new(),
-            shells: Vec::new(),
-            solids: Vec::new(),
-        }
-    }
-}
 
 /// Errors found during BREP model validation.
 #[derive(Debug, Clone, PartialEq)]
@@ -1005,6 +991,7 @@ impl BrepModel {
     /// Collects all referenced entities (surfaces, loops, edges, curves, vertices)
     /// transitively, builds old→new remap tables, and constructs a new model with
     /// a single shell and solid wrapping the selected faces.
+    #[must_use]
     pub fn subset(&self, face_indices: &[usize]) -> BrepModel {
         let face_set: BTreeSet<usize> = face_indices.iter().copied().collect();
 

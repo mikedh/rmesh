@@ -116,18 +116,17 @@ fn extract_length_scale(entities: &[Entity<'_>]) -> f64 {
             // ComplexEntity containing ConversionBasedUnit (+ LengthUnit)
             Entity::ComplexEntity(subs) => {
                 for sub in subs {
-                    if let Entity::ConversionBasedUnit(cbu) = sub {
-                        if let Some(val) =
+                    if let Entity::ConversionBasedUnit(cbu) = sub
+                        && let Some(val) =
                             extract_length_mwu_value(&entities[cbu.conversion_factor])
-                        {
-                            return val;
-                        }
+                    {
+                        return val;
                     }
                     // Also check for SiUnit inside complex entities
-                    if si_scale.is_none() {
-                        if let Entity::SiUnit(si) = sub {
-                            si_scale = si_metre_scale(si);
-                        }
+                    if si_scale.is_none()
+                        && let Entity::SiUnit(si) = sub
+                    {
+                        si_scale = si_metre_scale(si);
                     }
                 }
             }

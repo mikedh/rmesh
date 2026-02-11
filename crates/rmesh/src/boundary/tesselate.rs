@@ -2275,7 +2275,7 @@ impl BrepModel {
         // Expand to edge-adjacent BREP faces
         let adjacency = self.build_edge_adjacency();
         let mut expanded = broken_faces.clone();
-        for (_edge_idx, uses) in &adjacency {
+        for uses in adjacency.values() {
             let touches_broken = uses.iter().any(|u| broken_faces.contains(&u.face_idx));
             if touches_broken {
                 for u in uses {
