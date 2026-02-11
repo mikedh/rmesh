@@ -8,12 +8,30 @@ description = "EXPRESS schema → Rust codegen for STEP file parsing"
 name = "express-gen"
 path = "src/main.rs"
 
+[[bin]]
+name = "gltf-codegen"
+path = "src/gltf_codegen.rs"
+
+[[bin]]
+name = "collada-codegen"
+path = "src/collada_codegen.rs"
+
 [dependencies]
 nom = "7"
 memchr = "2"
 fast-float = "0.2"
 clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }
+serde_json = "1"
+zstd = "0.13"
+typify = "0.6"
+schemars = "0.8"
+syn = "2"
+prettyplease = "0.2"
+regex = "1"
+xsd-parser = "1.4"
+quote = "1"
+proc-macro2 = "1"
 
 [lints]
 workspace = true

@@ -1,3 +1,4 @@
+pub mod collada;
 pub mod gltf;
 mod mtl;
 mod obj;
@@ -16,8 +17,13 @@ pub use crate::exchange::gltf::GltfLoader;
 use crate::exchange::obj::ObjMesh;
 use crate::exchange::stl::BinaryStl;
 
+/// Export a Scene to GLB (glTF 2.0 Binary) format.
+pub fn export_glb(scene: &Scene) -> Result<Vec<u8>> {
+    gltf::convert::from_scene(scene)
+}
+
 // Re-export resolvers for convenience
-pub use crate::resolvers::{FileResolver, InMemoryResolver};
+pub use crate::resolvers::{FileResolver, InMemoryResolver, ZipResolver};
 
 /// Supported file types for loading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -38,6 +44,10 @@ pub enum FileType {
     RCAD,
     /// STEP / ISO 10303-21 boundary representation
     STEP,
+    /// Collada DAE (plain XML)
+    DAE,
+    /// Collada ZAE (ZIP-compressed DAE)
+    ZAE,
 }
 
 impl FileType {
@@ -56,6 +66,8 @@ impl FileType {
             "sldprt" => Ok(FileType::SLDPRT),
             "rcad" => Ok(FileType::RCAD),
             "step" | "stp" => Ok(FileType::STEP),
+            "dae" | "collada" => Ok(FileType::DAE),
+            "zae" => Ok(FileType::ZAE),
             _ => Err(anyhow::anyhow!("Unsupported file type: `{}`", clean)),
         }
     }
@@ -101,6 +113,18 @@ impl FileType {
         // STEP / ISO 10303-21 starts with "ISO-10303-21;"
         if data.len() >= 13 && &data[..13] == b"ISO-10303-21;" {
             return Some(FileType::STEP);
+        }
+
+        // Collada DAE: XML containing "<COLLADA" in the first 100 bytes
+        if let Ok(head) = std::str::from_utf8(&data[..data.len().min(100)]) {
+            if head.to_ascii_lowercase().contains("<collada ") {
+                return Some(FileType::DAE);
+            }
+        }
+
+        // ZIP archive (ZAE) magic: PK\x03\x04
+        if data[0..4] == [0x50, 0x4B, 0x03, 0x04] {
+            return Some(FileType::ZAE);
         }
 
         // GLTF JSON starts with '{' (possibly with whitespace)
@@ -181,6 +205,16 @@ pub fn load(
         }
         FileType::STEP => {
             return crate::boundary::step::from_step(data).map_err(|e| anyhow::anyhow!("{e}"));
+        }
+        FileType::DAE => {
+            let collada_doc = collada::load_dae(data)?;
+            return collada::convert::to_scene(&collada_doc, resolver);
+        }
+        FileType::ZAE => {
+            let (collada_doc, zip_resolver) = collada::load_zae(data)?;
+            // Use the zip resolver for embedded textures, falling back to the caller's resolver
+            let r: &dyn crate::resolvers::Resolver = &zip_resolver;
+            return collada::convert::to_scene(&collada_doc, Some(r));
         }
     };
 

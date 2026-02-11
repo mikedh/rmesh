@@ -107,20 +107,18 @@ impl ExtensionRegistry {
     /// Process primitive extensions, returning merged results from all handlers.
     pub fn handle_primitive(
         &self,
-        extensions: &Option<HashMap<String, Value>>,
+        extensions: &serde_json::Map<String, Value>,
         accessor_reader: &dyn Fn(usize) -> Result<Vec<usize>>,
     ) -> Result<PrimitiveResult> {
         let mut result = PrimitiveResult::default();
-        if let Some(exts) = extensions {
-            for (name, data) in exts {
-                if let Some(handler) = self.primitive_handlers.get(name) {
-                    let hr = handler(data, accessor_reader)?;
-                    if !hr.face_surfaces.is_empty() {
-                        result.face_surfaces = hr.face_surfaces;
-                    }
-                    if hr.surface_grouping.is_some() {
-                        result.surface_grouping = hr.surface_grouping;
-                    }
+        for (name, data) in extensions {
+            if let Some(handler) = self.primitive_handlers.get(name) {
+                let hr = handler(data, accessor_reader)?;
+                if !hr.face_surfaces.is_empty() {
+                    result.face_surfaces = hr.face_surfaces;
+                }
+                if hr.surface_grouping.is_some() {
+                    result.surface_grouping = hr.surface_grouping;
                 }
             }
         }
@@ -130,16 +128,14 @@ impl ExtensionRegistry {
     /// Process extensions at a given scope.
     pub fn handle<'a>(
         &self,
-        extensions: &'a Option<HashMap<String, Value>>,
+        extensions: &'a serde_json::Map<String, Value>,
         scope: Scope,
         context: &mut ExtensionContext<'a>,
     ) -> Result<()> {
-        if let Some(exts) = extensions {
-            for (name, data) in exts {
-                if let Some(handler) = self.handlers.get(&(scope, name.clone())) {
-                    context.data = data;
-                    handler(context)?;
-                }
+        for (name, data) in extensions {
+            if let Some(handler) = self.handlers.get(&(scope, name.clone())) {
+                context.data = data;
+                handler(context)?;
             }
         }
         Ok(())
@@ -191,7 +187,7 @@ mod tests {
     fn test_handle_extensions() {
         let registry = ExtensionRegistry::with_builtins();
 
-        let mut extensions = HashMap::new();
+        let mut extensions = serde_json::Map::new();
         extensions.insert(
             "EXT_texture_webp".to_string(),
             serde_json::json!({ "source": 5 }),
@@ -204,7 +200,7 @@ mod tests {
         };
 
         registry
-            .handle(&Some(extensions), Scope::TextureSource, &mut context)
+            .handle(&extensions, Scope::TextureSource, &mut context)
             .unwrap();
     }
 }

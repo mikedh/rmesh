@@ -1,6 +1,8 @@
 //! GLTF/GLB loader for importing 3D scenes.
 
+pub mod convert;
 pub mod extensions;
+pub mod schema;
 
 use anyhow::{Context, Result, bail};
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3, Vector4};
@@ -16,9 +18,10 @@ use crate::scene::{
     Animation, AnimationChannel, AnimationPath, AnimationSampler, Camera, CameraProjection,
     Interpolation, Light, LightType, Scene, SceneGraph, SceneNode, SceneNodeKind,
 };
-use crate::schemas::gltf_2::{
-    self, COMPONENT_U8, COMPONENT_U16, COMPONENT_U32, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP,
-    GL_TRIANGLES, Gltf, GltfIndex, KhrLightsPunctual,
+use self::schema::{
+    self as gltf_2, AccessorType, CameraType, GltfAlphaMode, GltfAnimationPath,
+    GltfInterpolation, GltfLightType, COMPONENT_U8, COMPONENT_U16, COMPONENT_U32,
+    GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GL_TRIANGLES, GlTf, GltfIndex, KhrLightsPunctual,
 };
 
 use self::extensions::ExtensionRegistry;
@@ -38,7 +41,7 @@ struct AccessorReader<'a> {
 
 /// GLTF loader that holds parsed header and buffer data.
 pub struct GltfLoader {
-    header: Gltf,
+    header: GlTf,
     buffers: Vec<Vec<u8>>,
     extensions: ExtensionRegistry,
 }
@@ -97,7 +100,7 @@ impl GltfLoader {
         }
 
         let json_data = json_data.context("GLB missing JSON chunk")?;
-        let header: Gltf =
+        let header: GlTf =
             serde_json::from_slice(json_data).context("Failed to parse GLTF JSON")?;
 
         let mut buffers = Vec::new();
@@ -114,10 +117,10 @@ impl GltfLoader {
 
     /// Load from GLTF JSON with optional resolver for external buffers.
     pub fn from_gltf(json: &[u8], resolver: Option<&dyn Resolver>) -> Result<Self> {
-        let header: Gltf = serde_json::from_slice(json).context("Failed to parse GLTF JSON")?;
+        let header: GlTf = serde_json::from_slice(json).context("Failed to parse GLTF JSON")?;
 
         let mut buffers = Vec::new();
-        for buffer in header.buffers.as_deref().unwrap_or(&[]) {
+        for buffer in header.buffers.as_slice() {
             if let Some(uri) = &buffer.uri {
                 if uri.starts_with("data:") {
                     // Data URI
@@ -165,13 +168,10 @@ impl GltfLoader {
 
     /// Get raw bytes for a buffer view.
     fn get_buffer_view_data(&self, buffer_view_index: usize) -> Option<&[u8]> {
-        let buffer_views = self.header.buffer_views.as_ref()?;
-        let buffer_view = buffer_views.get(buffer_view_index)?;
-        let buffer = self.buffers.get(buffer_view.buffer)?;
+        let buffer_view = self.header.buffer_views.get(buffer_view_index)?;
+        let buffer = self.buffers.get(buffer_view.buffer as usize)?;
 
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let start = buffer_view.byte_offset.unwrap_or(0) as usize;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let start = buffer_view.byte_offset as usize;
         let length = buffer_view.byte_length as usize;
         let end = start + length;
 
@@ -184,12 +184,11 @@ impl GltfLoader {
 
     /// Load an image by index, returning a LazyImage containing raw bytes.
     fn load_image(&self, image_index: usize) -> Option<LazyImage> {
-        let images = self.header.images.as_ref()?;
-        let image = images.get(image_index)?;
+        let image = self.header.images.get(image_index)?;
 
         // Case 1: Image in buffer view (embedded in GLB)
         if let Some(buffer_view_index) = image.buffer_view {
-            let bytes = self.get_buffer_view_data(buffer_view_index)?;
+            let bytes = self.get_buffer_view_data(buffer_view_index as usize)?;
             return Some(LazyImage::new(bytes.to_vec()));
         }
 
@@ -208,11 +207,10 @@ impl GltfLoader {
 
     /// Load a texture by index, resolving through the texture -> image indirection.
     fn load_texture(&self, texture_index: usize) -> Option<LazyImage> {
-        let textures = self.header.textures.as_ref()?;
-        let texture = textures.get(texture_index)?;
+        let texture = self.header.textures.get(texture_index)?;
 
         // Get the image source index
-        let image_index = texture.source?;
+        let image_index = texture.source? as usize;
         self.load_image(image_index)
     }
 
@@ -224,15 +222,14 @@ impl GltfLoader {
         let materials = self.load_materials();
 
         // Load each GLTF mesh (combining all its primitives into one Trimesh)
-        let gltf_meshes = self.header.meshes.as_deref().unwrap_or(&[]);
+        let gltf_meshes = self.header.meshes.as_slice();
         let meshes_with_names: Vec<_> = gltf_meshes
             .par_iter()
             .enumerate()
             .filter_map(|(mesh_idx, mesh)| {
                 let mesh_name = mesh
                     .name
-                    .as_ref()
-                    .and_then(|v| v.as_str())
+                    .as_deref()
                     .map_or_else(|| format!("mesh_{}", mesh_idx), |s| s.to_string());
                 self.load_mesh(mesh, &materials)
                     .ok()
@@ -245,14 +242,13 @@ impl GltfLoader {
         }
 
         // Load cameras
-        for gltf_cam in self.header.cameras.as_deref().unwrap_or(&[]) {
+        for gltf_cam in self.header.cameras.as_slice() {
             let camera = self.convert_camera(gltf_cam);
             scene.add_camera(camera);
         }
 
         // Load lights from KHR_lights_punctual extension
-        if let Some(exts) = &self.header.extensions
-            && let Some(lights_ext) = exts.get("KHR_lights_punctual")
+        if let Some(lights_ext) = self.header.extensions.get("KHR_lights_punctual")
             && let Ok(lights_data) = serde_json::from_value::<KhrLightsPunctual>(lights_ext.clone())
         {
             for gltf_light in lights_data.lights {
@@ -265,7 +261,7 @@ impl GltfLoader {
         scene.graph = self.build_scene_graph();
 
         // Load animations
-        for gltf_anim in self.header.animations.as_deref().unwrap_or(&[]) {
+        for gltf_anim in self.header.animations.as_slice() {
             if let Ok(animation) = self.convert_animation(gltf_anim) {
                 scene.add_animation(animation);
             }
@@ -274,8 +270,8 @@ impl GltfLoader {
         // Set active scene (root is already set by build_scene_graph)
         // Just validate the scene index exists
         if let Some(scene_idx) = self.header.scene {
-            let scenes = self.header.scenes.as_deref().unwrap_or(&[]);
-            if scene_idx >= scenes.len() {
+            let scenes = self.header.scenes.as_slice();
+            if scene_idx as usize >= scenes.len() {
                 // Invalid scene index, but we continue anyway
             }
         }
@@ -448,12 +444,7 @@ impl GltfLoader {
         materials: &[Material],
     ) -> Result<Trimesh> {
         // Only handle triangles for now
-        #[allow(clippy::cast_possible_truncation)]
-        let mode = primitive
-            .mode
-            .as_ref()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(u64::from(GL_TRIANGLES)) as u32;
+        let mode = primitive.mode;
         if mode != GL_TRIANGLES && mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN {
             bail!("Unsupported primitive mode: {}", mode);
         }
@@ -463,7 +454,7 @@ impl GltfLoader {
             .attributes
             .get("POSITION")
             .context("Primitive missing POSITION attribute")?;
-        let positions = self.read_accessor_vec3(*pos_accessor_idx)?;
+        let positions = self.read_accessor_vec3(*pos_accessor_idx as usize)?;
 
         let vertices: Vec<Point3<f64>> = positions
             .into_iter()
@@ -472,7 +463,7 @@ impl GltfLoader {
 
         // Get indices
         let faces = if let Some(indices_idx) = primitive.indices {
-            let indices = self.read_accessor_indices(indices_idx)?;
+            let indices = self.read_accessor_indices(indices_idx as usize)?;
             match mode {
                 GL_TRIANGLES => indices.chunks(3).map(|c| [c[0], c[1], c[2]]).collect(),
                 GL_TRIANGLE_STRIP => {
@@ -510,7 +501,7 @@ impl GltfLoader {
 
         // Load normals if present
         if let Some(&normal_idx) = primitive.attributes.get("NORMAL")
-            && let Ok(normals) = self.read_accessor_vec3(normal_idx)
+            && let Ok(normals) = self.read_accessor_vec3(normal_idx as usize)
         {
             let normals: Vec<Vector3<f64>> = normals
                 .into_iter()
@@ -532,7 +523,7 @@ impl GltfLoader {
         ];
         for attr_name in TEXCOORD_NAMES {
             if let Some(&uv_idx) = primitive.attributes.get(attr_name) {
-                if let Ok(uvs) = self.read_accessor_vec2(uv_idx) {
+                if let Ok(uvs) = self.read_accessor_vec2(uv_idx as usize) {
                     let uvs: Vec<nalgebra::Vector2<f64>> = uvs
                         .into_iter()
                         .map(|[u, v]| nalgebra::Vector2::new(f64::from(u), f64::from(v)))
@@ -547,7 +538,7 @@ impl GltfLoader {
 
         // Load tangents if present (VEC4: xyz = tangent direction, w = handedness)
         if let Some(&tangent_idx) = primitive.attributes.get("TANGENT")
-            && let Ok(tangents) = self.read_accessor_vec4(tangent_idx)
+            && let Ok(tangents) = self.read_accessor_vec4(tangent_idx as usize)
         {
             let tangents: Vec<Vector4<f64>> = tangents
                 .into_iter()
@@ -560,7 +551,7 @@ impl GltfLoader {
 
         // Load vertex colors if present
         if let Some(&color_idx) = primitive.attributes.get("COLOR_0")
-            && let Ok(colors) = self.read_accessor_vec4(color_idx)
+            && let Ok(colors) = self.read_accessor_vec4(color_idx as usize)
         {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let colors: Vec<Vector4<u8>> = colors
@@ -579,7 +570,7 @@ impl GltfLoader {
 
         // Assign material to mesh if present
         if let Some(material_index) = primitive.material {
-            if let Some(material) = materials.get(material_index) {
+            if let Some(material) = materials.get(material_index as usize) {
                 let material_name = material.name().to_string();
                 let num_faces = mesh.faces.len();
 
@@ -602,7 +593,7 @@ impl GltfLoader {
         }
 
         // Process primitive extensions (TM_brep_faces, etc.)
-        if primitive.extensions.is_some() {
+        if !primitive.extensions.is_empty() {
             let ext_result = self
                 .extensions
                 .handle_primitive(&primitive.extensions, &|accessor_idx| {
@@ -623,50 +614,41 @@ impl GltfLoader {
     fn resolve_accessor(
         &self,
         index: GltfIndex,
-        expected_type: Option<&str>,
+        expected_type: Option<&AccessorType>,
         element_size: usize,
     ) -> Result<AccessorReader<'_>> {
-        let accessors = self
+        let accessor = self
             .header
             .accessors
-            .as_ref()
-            .context("No accessors in file")?;
-        let accessor = accessors.get(index).context("Invalid accessor index")?;
+            .get(index)
+            .context("Invalid accessor index")?;
 
         if let Some(expected) = expected_type {
-            let accessor_type = accessor.type_.as_str().unwrap_or("");
-            if accessor_type != expected {
-                bail!("Expected {} accessor, got {}", expected, accessor_type);
+            if &accessor.type_ != expected {
+                bail!("Expected {:?} accessor, got {:?}", expected, accessor.type_);
             }
         }
 
         let buffer_view_idx = accessor
             .buffer_view
-            .context("Accessor missing buffer view")?;
-        let buffer_views = self
+            .context("Accessor missing buffer view")? as usize;
+        let buffer_view = self
             .header
             .buffer_views
-            .as_ref()
-            .context("No buffer views")?;
-        let buffer_view = buffer_views
             .get(buffer_view_idx)
             .context("Invalid buffer view index")?;
         let buffer = self
             .buffers
-            .get(buffer_view.buffer)
+            .get(buffer_view.buffer as usize)
             .context("Invalid buffer index")?;
 
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let start = buffer_view.byte_offset.unwrap_or(0) as usize
-            + accessor.byte_offset.unwrap_or(0) as usize;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let start = buffer_view.byte_offset as usize + accessor.byte_offset as usize;
         let stride = buffer_view.byte_stride.map_or(element_size, |s| s as usize);
 
         Ok(AccessorReader {
             buffer,
             start,
             stride,
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             count: accessor.count as usize,
         })
     }
@@ -675,7 +657,7 @@ impl GltfLoader {
     fn read_accessor_with<T, F>(
         &self,
         index: GltfIndex,
-        expected_type: Option<&str>,
+        expected_type: Option<&AccessorType>,
         element_size: usize,
         parse: F,
     ) -> Result<Vec<T>>
@@ -698,7 +680,7 @@ impl GltfLoader {
 
     /// Read a VEC2 accessor as f32 arrays.
     fn read_accessor_vec2(&self, index: GltfIndex) -> Result<Vec<[f32; 2]>> {
-        self.read_accessor_with(index, Some("VEC2"), 8, |bytes| {
+        self.read_accessor_with(index, Some(&AccessorType::VEC2), 8, |bytes| {
             [
                 f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
                 f32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
@@ -708,7 +690,7 @@ impl GltfLoader {
 
     /// Read a VEC3 accessor as f32 arrays.
     fn read_accessor_vec3(&self, index: GltfIndex) -> Result<Vec<[f32; 3]>> {
-        self.read_accessor_with(index, Some("VEC3"), 12, |bytes| {
+        self.read_accessor_with(index, Some(&AccessorType::VEC3), 12, |bytes| {
             [
                 f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
                 f32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
@@ -719,7 +701,7 @@ impl GltfLoader {
 
     /// Read a VEC4 accessor as f32 arrays.
     fn read_accessor_vec4(&self, index: GltfIndex) -> Result<Vec<[f32; 4]>> {
-        self.read_accessor_with(index, Some("VEC4"), 16, |bytes| {
+        self.read_accessor_with(index, Some(&AccessorType::VEC4), 16, |bytes| {
             [
                 f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
                 f32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
@@ -731,21 +713,19 @@ impl GltfLoader {
 
     /// Read an accessor as scalar f32 values.
     fn read_accessor_scalar(&self, index: GltfIndex) -> Result<Vec<f32>> {
-        self.read_accessor_with(index, Some("SCALAR"), 4, |bytes| {
+        self.read_accessor_with(index, Some(&AccessorType::SCALAR), 4, |bytes| {
             f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
         })
     }
 
     /// Read indices from an accessor (supports u8, u16, u32).
     fn read_accessor_indices(&self, index: GltfIndex) -> Result<Vec<usize>> {
-        let accessors = self
+        let accessor = self
             .header
             .accessors
-            .as_ref()
-            .context("No accessors in file")?;
-        let accessor = accessors.get(index).context("Invalid accessor index")?;
-        #[allow(clippy::cast_possible_truncation)]
-        let component_type = accessor.component_type.as_u64().unwrap_or(0) as u32;
+            .get(index)
+            .context("Invalid accessor index")?;
+        let component_type = accessor.component_type;
 
         match component_type {
             COMPONENT_U8 => self.read_accessor_with(index, None, 1, |bytes| bytes[0] as usize),
@@ -762,8 +742,7 @@ impl GltfLoader {
     /// Convert a GLTF camera to our Camera type.
     #[allow(clippy::unused_self)]
     fn convert_camera(&self, gltf_cam: &gltf_2::GltfCamera) -> Camera {
-        let cam_type = gltf_cam.type_.as_str().unwrap_or("");
-        let projection = if cam_type == "perspective" {
+        let projection = if gltf_cam.type_ == CameraType::Perspective {
             if let Some(persp) = &gltf_cam.perspective {
                 CameraProjection::Perspective {
                     fov_y: persp.yfov,
@@ -787,8 +766,7 @@ impl GltfLoader {
 
         let name = gltf_cam
             .name
-            .as_ref()
-            .and_then(|v| v.as_str())
+            .as_deref()
             .unwrap_or("")
             .to_string();
 
@@ -798,13 +776,13 @@ impl GltfLoader {
     /// Convert a GLTF light to our Light type.
     #[allow(clippy::unused_self)]
     fn convert_light(&self, gltf_light: &gltf_2::GltfLight) -> Light {
-        let light_type = match gltf_light.type_.as_str() {
-            "directional" => LightType::Directional,
-            "spot" => {
+        let light_type = match gltf_light.type_ {
+            GltfLightType::Directional => LightType::Directional,
+            GltfLightType::Spot => {
                 if let Some(spot) = &gltf_light.spot {
                     LightType::Spot {
-                        inner: spot.inner_cone_angle.unwrap_or(0.0),
-                        outer: spot.outer_cone_angle.unwrap_or(std::f64::consts::FRAC_PI_4),
+                        inner: spot.inner_cone_angle,
+                        outer: spot.outer_cone_angle,
                     }
                 } else {
                     LightType::Spot {
@@ -813,30 +791,20 @@ impl GltfLoader {
                     }
                 }
             }
-            _ => LightType::Point,
+            GltfLightType::Point => LightType::Point,
         };
 
         let name = gltf_light
             .name
-            .as_ref()
-            .and_then(|v| v.as_str())
+            .as_deref()
             .unwrap_or("")
             .to_string();
-
-        // Extract color from Option<Vec<f64>>
-        let color = gltf_light.color.as_ref().map_or([1.0, 1.0, 1.0], |c| {
-            [
-                c.first().copied().unwrap_or(1.0),
-                c.get(1).copied().unwrap_or(1.0),
-                c.get(2).copied().unwrap_or(1.0),
-            ]
-        });
 
         Light {
             name,
             light_type,
-            color,
-            intensity: gltf_light.intensity.unwrap_or(1.0),
+            color: gltf_light.color,
+            intensity: gltf_light.intensity,
             range: gltf_light.range,
         }
     }
@@ -846,21 +814,16 @@ impl GltfLoader {
         let mut graph = SceneGraph::new();
 
         // Create nodes
-        for gltf_node in self.header.nodes.as_deref().unwrap_or(&[]) {
+        for gltf_node in self.header.nodes.as_slice() {
             let transform = self.node_transform(gltf_node);
 
             let (kind, index) = if let Some(mesh_idx) = gltf_node.mesh {
-                (SceneNodeKind::Geometry, vec![mesh_idx])
+                (SceneNodeKind::Geometry, vec![mesh_idx as usize])
             } else if let Some(cam_idx) = gltf_node.camera {
-                (SceneNodeKind::Camera, vec![cam_idx])
-            } else if let Some(exts) = &gltf_node.extensions {
-                if let Some(light_ext) = exts.get("KHR_lights_punctual") {
-                    if let Some(light_idx) = light_ext.get("light").and_then(|v| v.as_u64()) {
-                        #[allow(clippy::cast_possible_truncation)]
-                        (SceneNodeKind::Light, vec![light_idx as usize])
-                    } else {
-                        (SceneNodeKind::Custom, vec![])
-                    }
+                (SceneNodeKind::Camera, vec![cam_idx as usize])
+            } else if let Some(light_ext) = gltf_node.extensions.get("KHR_lights_punctual") {
+                if let Some(light_idx) = light_ext.get("light").and_then(|v| v.as_u64()) {
+                    (SceneNodeKind::Light, vec![light_idx as usize])
                 } else {
                     (SceneNodeKind::Custom, vec![])
                 }
@@ -870,14 +833,21 @@ impl GltfLoader {
 
             let name = gltf_node
                 .name
-                .as_ref()
-                .and_then(|v| v.as_str())
+                .as_deref()
                 .unwrap_or("")
                 .to_string();
 
+            let children: Vec<usize> = gltf_node
+                .children
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|&c| c as usize)
+                .collect();
+
             let node = SceneNode {
                 name,
-                children: gltf_node.children.clone().unwrap_or_default(),
+                children,
                 transform,
                 kind,
                 index,
@@ -888,24 +858,24 @@ impl GltfLoader {
 
         // Set root from default scene
         if let Some(scene_idx) = self.header.scene {
-            let scenes = self.header.scenes.as_deref().unwrap_or(&[]);
-            if let Some(scene) = scenes.get(scene_idx)
+            let scenes = self.header.scenes.as_slice();
+            if let Some(scene) = scenes.get(scene_idx as usize)
                 && let Some(nodes) = &scene.nodes
                 && !nodes.is_empty()
             {
+                let nodes_usize: Vec<usize> = nodes.iter().map(|&n| n as usize).collect();
                 // If multiple roots, create a synthetic root
-                if nodes.len() == 1 {
-                    graph.root = nodes[0];
+                if nodes_usize.len() == 1 {
+                    graph.root = nodes_usize[0];
                 } else {
                     let scene_name = scene
                         .name
-                        .as_ref()
-                        .and_then(|v| v.as_str())
+                        .as_deref()
                         .unwrap_or("root")
                         .to_string();
                     let root = SceneNode {
                         name: scene_name,
-                        children: nodes.clone(),
+                        children: nodes_usize,
                         transform: None,
                         kind: SceneNodeKind::Custom,
                         index: vec![],
@@ -921,56 +891,43 @@ impl GltfLoader {
     /// Compute the transform matrix for a node.
     #[allow(clippy::unused_self)]
     fn node_transform(&self, node: &gltf_2::Node) -> Option<Matrix4<f64>> {
-        if let Some(matrix) = &node.matrix
-            && matrix.len() >= 16
-        {
-            // Column-major matrix
-            return Some(Matrix4::from_column_slice(matrix));
+        const IDENTITY: [f64; 16] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        const DEFAULT_TRANSLATION: [f64; 3] = [0.0, 0.0, 0.0];
+        const DEFAULT_ROTATION: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
+        const DEFAULT_SCALE: [f64; 3] = [1.0, 1.0, 1.0];
+
+        // Check if an explicit matrix was provided (differs from identity)
+        if node.matrix != IDENTITY {
+            return Some(Matrix4::from_column_slice(&node.matrix));
         }
 
-        let has_trs = node.translation.is_some() || node.rotation.is_some() || node.scale.is_some();
+        // Check if any TRS values differ from defaults
+        let has_trs = node.translation != DEFAULT_TRANSLATION
+            || node.rotation != DEFAULT_ROTATION
+            || node.scale != DEFAULT_SCALE;
         if !has_trs {
             return None;
         }
 
-        let translation = node.translation.as_ref().map_or([0.0, 0.0, 0.0], |v| {
-            [
-                v.first().copied().unwrap_or(0.0),
-                v.get(1).copied().unwrap_or(0.0),
-                v.get(2).copied().unwrap_or(0.0),
-            ]
-        });
-
-        let rotation = node.rotation.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |v| {
-            [
-                v.first().copied().unwrap_or(0.0),
-                v.get(1).copied().unwrap_or(0.0),
-                v.get(2).copied().unwrap_or(0.0),
-                v.get(3).copied().unwrap_or(1.0),
-            ]
-        });
-
-        let scale = node.scale.as_ref().map_or([1.0, 1.0, 1.0], |v| {
-            [
-                v.first().copied().unwrap_or(1.0),
-                v.get(1).copied().unwrap_or(1.0),
-                v.get(2).copied().unwrap_or(1.0),
-            ]
-        });
-
         let t = Matrix4::new_translation(&Vector3::new(
-            translation[0],
-            translation[1],
-            translation[2],
+            node.translation[0],
+            node.translation[1],
+            node.translation[2],
         ));
         let r = UnitQuaternion::from_quaternion(Quaternion::new(
-            rotation[3],
-            rotation[0],
-            rotation[1],
-            rotation[2],
+            node.rotation[3],
+            node.rotation[0],
+            node.rotation[1],
+            node.rotation[2],
         ))
         .to_homogeneous();
-        let s = Matrix4::new_nonuniform_scaling(&Vector3::new(scale[0], scale[1], scale[2]));
+        let s = Matrix4::new_nonuniform_scaling(&Vector3::new(
+            node.scale[0],
+            node.scale[1],
+            node.scale[2],
+        ));
 
         Some(t * r * s)
     }
@@ -979,55 +936,34 @@ impl GltfLoader {
     fn load_materials(&self) -> Vec<Material> {
         self.header
             .materials
-            .as_ref()
-            .map(|mats| mats.par_iter().map(|m| self.convert_material(m)).collect())
-            .unwrap_or_default()
+            .par_iter()
+            .map(|m| self.convert_material(m))
+            .collect()
     }
 
     /// Convert a GLTF material to our Material type.
     fn convert_material(&self, mat: &gltf_2::Material) -> Material {
         let pbr = mat.pbr_metallic_roughness.as_ref();
 
-        // Parse base color factor (RGBA)
-        let base_color_factor = pbr.and_then(|p| p.base_color_factor.as_ref()).map_or_else(
-            || Vector4::new(1.0, 1.0, 1.0, 1.0),
-            |v| {
-                Vector4::new(
-                    v.first().copied().unwrap_or(1.0),
-                    v.get(1).copied().unwrap_or(1.0),
-                    v.get(2).copied().unwrap_or(1.0),
-                    v.get(3).copied().unwrap_or(1.0),
-                )
-            },
-        );
+        // Parse base color factor (RGBA) - fixed array with defaults
+        let bcf = pbr.map_or([1.0, 1.0, 1.0, 1.0], |p| p.base_color_factor);
+        let base_color_factor = Vector4::new(bcf[0], bcf[1], bcf[2], bcf[3]);
 
-        // Parse emissive factor (RGB)
-        let emissive_factor = mat
-            .emissive_factor
-            .as_ref()
-            .map_or_else(Vector3::zeros, |v| {
-                Vector3::new(
-                    v.first().copied().unwrap_or(0.0),
-                    v.get(1).copied().unwrap_or(0.0),
-                    v.get(2).copied().unwrap_or(0.0),
-                )
-            });
+        // Parse emissive factor (RGB) - fixed array
+        let ef = mat.emissive_factor;
+        let emissive_factor = Vector3::new(ef[0], ef[1], ef[2]);
 
         // Parse alpha mode
-        let alpha_mode = mat.alpha_mode.as_ref().and_then(|v| v.as_str()).map_or(
-            AlphaMode::Opaque,
-            |s| match s {
-                "MASK" => AlphaMode::Mask,
-                "BLEND" => AlphaMode::Blend,
-                _ => AlphaMode::Opaque,
-            },
-        );
+        let alpha_mode = match mat.alpha_mode {
+            GltfAlphaMode::MASK => AlphaMode::Mask,
+            GltfAlphaMode::BLEND => AlphaMode::Blend,
+            GltfAlphaMode::OPAQUE => AlphaMode::Opaque,
+        };
 
         // Get material name
         let name = mat
             .name
-            .as_ref()
-            .and_then(|v| v.as_str())
+            .as_deref()
             .unwrap_or("")
             .to_string();
 
@@ -1036,21 +972,16 @@ impl GltfLoader {
             base_color_factor,
             base_color_texture: pbr
                 .and_then(|p| p.base_color_texture.as_ref())
-                .and_then(|t| self.load_texture(t.index)),
-            metallic_factor: pbr.and_then(|p| p.metallic_factor).unwrap_or(1.0),
-            roughness_factor: pbr.and_then(|p| p.roughness_factor).unwrap_or(1.0),
+                .and_then(|t| self.load_texture(t.index as usize)),
+            metallic_factor: pbr.map_or(1.0, |p| p.metallic_factor),
+            roughness_factor: pbr.map_or(1.0, |p| p.roughness_factor),
             metallic_roughness_texture: pbr
                 .and_then(|p| p.metallic_roughness_texture.as_ref())
-                .and_then(|t| self.load_texture(t.index)),
+                .and_then(|t| self.load_texture(t.index as usize)),
             normal_texture: mat
                 .normal_texture
                 .as_ref()
-                .and_then(|t| t.index.as_ref())
-                .and_then(|v| v.as_u64())
-                .and_then(|idx| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    self.load_texture(idx as usize)
-                }),
+                .and_then(|t| self.load_texture(t.index as usize)),
             normal_scale: mat
                 .normal_texture
                 .as_ref()
@@ -1059,12 +990,7 @@ impl GltfLoader {
             occlusion_texture: mat
                 .occlusion_texture
                 .as_ref()
-                .and_then(|t| t.index.as_ref())
-                .and_then(|v| v.as_u64())
-                .and_then(|idx| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    self.load_texture(idx as usize)
-                }),
+                .and_then(|t| self.load_texture(t.index as usize)),
             occlusion_strength: mat
                 .occlusion_texture
                 .as_ref()
@@ -1074,10 +1000,10 @@ impl GltfLoader {
             emissive_texture: mat
                 .emissive_texture
                 .as_ref()
-                .and_then(|t| self.load_texture(t.index)),
+                .and_then(|t| self.load_texture(t.index as usize)),
             alpha_mode,
-            alpha_cutoff: mat.alpha_cutoff.unwrap_or(0.5),
-            double_sided: mat.double_sided.unwrap_or(false),
+            alpha_cutoff: mat.alpha_cutoff,
+            double_sided: mat.double_sided,
         }))
     }
 
@@ -1088,45 +1014,41 @@ impl GltfLoader {
 
         for gltf_sampler in &gltf_anim.samplers {
             let timestamps: Vec<f64> = self
-                .read_accessor_scalar(gltf_sampler.input)?
+                .read_accessor_scalar(gltf_sampler.input as usize)?
                 .into_iter()
                 .map(f64::from)
                 .collect();
 
-            let accessors = self.header.accessors.as_ref().context("No accessors")?;
-            let output_accessor = accessors
-                .get(gltf_sampler.output)
+            let output_accessor = self
+                .header
+                .accessors
+                .get(gltf_sampler.output as usize)
                 .context("Invalid output accessor")?;
 
-            let accessor_type = output_accessor.type_.as_str().unwrap_or("");
-            let (values, components) = match accessor_type {
-                "VEC3" => {
-                    let v = self.read_accessor_vec3(gltf_sampler.output)?;
+            let output_idx = gltf_sampler.output as usize;
+            let (values, components) = match output_accessor.type_ {
+                AccessorType::VEC3 => {
+                    let v = self.read_accessor_vec3(output_idx)?;
                     let flat: Vec<f64> = v.into_iter().flat_map(|a| a.map(f64::from)).collect();
                     (flat, 3)
                 }
-                "VEC4" => {
-                    let v = self.read_accessor_vec4(gltf_sampler.output)?;
+                AccessorType::VEC4 => {
+                    let v = self.read_accessor_vec4(output_idx)?;
                     let flat: Vec<f64> = v.into_iter().flat_map(|a| a.map(f64::from)).collect();
                     (flat, 4)
                 }
-                "SCALAR" => {
-                    let v = self.read_accessor_scalar(gltf_sampler.output)?;
+                AccessorType::SCALAR => {
+                    let v = self.read_accessor_scalar(output_idx)?;
                     let flat: Vec<f64> = v.into_iter().map(f64::from).collect();
                     (flat, 1)
                 }
-                _ => bail!("Unsupported animation output type: {}", accessor_type),
+                _ => bail!("Unsupported animation output type: {:?}", output_accessor.type_),
             };
 
-            let interp_str = gltf_sampler
-                .interpolation
-                .as_ref()
-                .and_then(|v| v.as_str())
-                .unwrap_or("LINEAR");
-            let interpolation = match interp_str {
-                "STEP" => Interpolation::Step,
-                "CUBICSPLINE" => Interpolation::CubicSpline,
-                _ => Interpolation::Linear,
+            let interpolation = match gltf_sampler.interpolation {
+                GltfInterpolation::STEP => Interpolation::Step,
+                GltfInterpolation::CUBICSPLINE => Interpolation::CubicSpline,
+                GltfInterpolation::LINEAR => Interpolation::Linear,
             };
 
             samplers.push(AnimationSampler {
@@ -1141,19 +1063,17 @@ impl GltfLoader {
             let node = gltf_channel
                 .target
                 .node
-                .context("Animation channel missing node")?;
+                .context("Animation channel missing node")? as usize;
 
-            let path_str = gltf_channel.target.path.as_str().unwrap_or("");
-            let path = match path_str {
-                "translation" => AnimationPath::Translation,
-                "rotation" => AnimationPath::Rotation,
-                "scale" => AnimationPath::Scale,
-                "weights" => AnimationPath::Weights,
-                _ => continue,
+            let path = match gltf_channel.target.path {
+                GltfAnimationPath::Translation => AnimationPath::Translation,
+                GltfAnimationPath::Rotation => AnimationPath::Rotation,
+                GltfAnimationPath::Scale => AnimationPath::Scale,
+                GltfAnimationPath::Weights => AnimationPath::Weights,
             };
 
             channels.push(AnimationChannel {
-                sampler: gltf_channel.sampler,
+                sampler: gltf_channel.sampler as usize,
                 node,
                 path,
             });
@@ -1161,8 +1081,7 @@ impl GltfLoader {
 
         let name = gltf_anim
             .name
-            .as_ref()
-            .and_then(|v| v.as_str())
+            .as_deref()
             .unwrap_or("")
             .to_string();
 

@@ -1,0 +1,3 @@
+[submodule "crates/codegen/upstream"]
+	path = crates/codegen/schemas/gLTF
+	url = https://github.com/KhronosGroup/glTF.git

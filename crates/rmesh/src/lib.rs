@@ -20,7 +20,6 @@ pub mod project;
 pub mod render;
 pub mod resolvers;
 pub mod scene;
-pub mod schemas;
 pub mod serialize;
 pub mod simplify;
 pub mod subdivide;
