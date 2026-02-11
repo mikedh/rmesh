@@ -94,26 +94,48 @@ fn node_transform(node: &schema::NodeElementType) -> Option<Matrix4<f64>> {
     any.then_some(m)
 }
 
-/// Compute up-axis correction matrix to convert to Y-up.
-fn up_axis_correction(collada: &schema::Collada) -> Option<Matrix4<f64>> {
-    let asset = collada.asset.as_ref()?;
-    let axis = asset.up_axis.as_ref()?;
-    match axis {
-        schema::UpAxisType::ZUp => {
-            // Rotate -90° around X: (x, y, z) → (x, z, -y)
-            Some(Matrix4::new(
-                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                1.0,
-            ))
-        }
-        schema::UpAxisType::XUp => {
-            // Rotate 90° around Z: (x, y, z) → (-y, x, z)
-            Some(Matrix4::new(
-                0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                1.0,
-            ))
-        }
-        schema::UpAxisType::YUp => None,
+/// Compute root correction matrix combining up-axis conversion and unit scale.
+fn root_correction(collada: &schema::Collada) -> Option<Matrix4<f64>> {
+    let asset = collada.asset.as_ref();
+
+    // Up-axis rotation
+    let axis_correction = asset
+        .and_then(|a| a.up_axis.as_ref())
+        .and_then(|axis| match axis {
+            schema::UpAxisType::ZUp => {
+                // Rotate -90° around X: (x, y, z) → (x, z, -y)
+                Some(Matrix4::new(
+                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0,
+                ))
+            }
+            schema::UpAxisType::XUp => {
+                // Rotate 90° around Z: (x, y, z) → (-y, x, z)
+                Some(Matrix4::new(
+                    0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0,
+                ))
+            }
+            schema::UpAxisType::YUp => None,
+        });
+
+    // Unit scale: asset.unit.meter (1.0 = meters, 0.01 = centimeters, etc.)
+    let meter = asset
+        .and_then(|a| a.unit.as_ref())
+        .map(|u| u.meter)
+        .unwrap_or(1.0);
+    let unit_scale = if (meter - 1.0).abs() > f64::EPSILON {
+        Some(Matrix4::new_scaling(meter))
+    } else {
+        None
+    };
+
+    // Compose: scale first, then rotate
+    match (axis_correction, unit_scale) {
+        (Some(rot), Some(scale)) => Some(rot * scale),
+        (Some(rot), None) => Some(rot),
+        (None, Some(scale)) => Some(scale),
+        (None, None) => None,
     }
 }
 
@@ -158,7 +180,7 @@ pub fn to_scene(collada: &schema::Collada, resolver: Option<&dyn Resolver>) -> R
         let root = SceneNode {
             name: vs.name.as_deref().unwrap_or("Scene").to_string(),
             children: Vec::new(),
-            transform: up_axis_correction(collada),
+            transform: root_correction(collada),
             kind: SceneNodeKind::Geometry,
             index: vec![],
         };
@@ -174,7 +196,7 @@ pub fn to_scene(collada: &schema::Collada, resolver: Option<&dyn Resolver>) -> R
         let root = SceneNode {
             name: "Scene".to_string(),
             children: Vec::new(),
-            transform: up_axis_correction(collada),
+            transform: root_correction(collada),
             kind: SceneNodeKind::Geometry,
             index: vec![],
         };
@@ -360,12 +382,13 @@ fn load_mesh(
         .context("vertices has no POSITION input")?;
 
     let mut parts: Vec<(UnmergedPrimitive, Option<String>)> = Vec::new();
+    let mut triangulator = crate::creation::Triangulator::new();
 
     // Process <triangles>
     for tri in mesh.triangles() {
         let face_sizes: Vec<usize> = vec![3; tri.count as usize];
         let p = tri.p.as_ref().map(|p| &p.0[..]).unwrap_or(&[]);
-        let prim = load_primitive(&tri.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id)?;
+        let prim = load_primitive(&tri.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
         parts.push((prim, tri.material.clone()));
     }
 
@@ -377,13 +400,13 @@ fn load_mesh(
             .map(|v| v.0.iter().map(|&n| n as usize).collect())
             .unwrap_or_default();
         let p = poly.p.as_ref().map(|p| &p.0[..]).unwrap_or(&[]);
-        let prim = load_primitive(&poly.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id)?;
+        let prim = load_primitive(&poly.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
         parts.push((prim, poly.material.clone()));
     }
 
     // Process <polygons>
     for polys in mesh.polygons() {
-        let inputs: Vec<&schema::InputLocalOffsetType> = polys.inputs().collect();
+        let inputs: Vec<schema::InputLocalOffsetType> = polys.inputs().cloned().collect();
         let stride = inputs
             .iter()
             .map(|i| i.offset as usize)
@@ -401,7 +424,7 @@ fn load_mesh(
         }
 
         if !face_sizes.is_empty() {
-            let prim = load_primitive(&inputs, &all_p, &face_sizes, &vertices.id, &source_map, pos_source_id)?;
+            let prim = load_primitive(&inputs, &all_p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
             parts.push((prim, polys.material.clone()));
         }
     }
@@ -530,6 +553,10 @@ fn load_mesh(
 }
 
 /// Try to load a texture for a material by following the binding chain.
+///
+/// The full Collada chain is: symbol → material → effect → sampler → image,
+/// but effects are not fully parsed. We use name-matching heuristics against
+/// the material ID and effect ID, and fall back to a single-image shortcut.
 fn try_load_texture(
     symbol: &str,
     bindings: &HashMap<String, String>,
@@ -537,24 +564,29 @@ fn try_load_texture(
     images: &HashMap<&str, &schema::ImageElementType>,
     resolver: &dyn Resolver,
 ) -> Option<LazyImage> {
-    // symbol → material_id → material → instance_effect → effect_id
-    // We don't have effects parsed, but we can try to find an image with a similar name
     let mat_id = bindings.get(symbol)?;
-    let _mat = materials.get(mat_id.as_str())?;
+    let mat = materials.get(mat_id.as_str())?;
 
-    // Heuristic: try to find an image whose id contains the material id
+    // Collect name candidates: material id and effect id
+    let effect_id = strip_fragment(&mat.instance_effect.url);
+    let candidates = [mat_id.as_str(), effect_id];
+
+    // Try to find an image whose id matches any candidate
     for (img_id, img) in images {
-        if img_id.contains(mat_id.as_str()) || mat_id.contains(*img_id) {
-            if let Some(init_from) = img.init_from() {
-                if let Ok(data) = resolver.resolve(init_from) {
-                    return Some(LazyImage::new(data));
+        for candidate in &candidates {
+            if img_id.contains(candidate) || candidate.contains(*img_id) {
+                if let Some(init_from) = img.init_from() {
+                    if let Ok(data) = resolver.resolve(init_from) {
+                        return Some(LazyImage::new(data));
+                    }
                 }
             }
         }
     }
 
-    // Try all images with init_from
-    for img in images.values() {
+    // If there is exactly one image, use it as a last resort
+    if images.len() == 1 {
+        let img = images.values().next().unwrap();
         if let Some(init_from) = img.init_from() {
             if let Ok(data) = resolver.resolve(init_from) {
                 return Some(LazyImage::new(data));
@@ -567,17 +599,18 @@ fn try_load_texture(
 
 /// Process a single primitive group (triangles, polylist, or polygon batch).
 fn load_primitive(
-    inputs: &[impl AsInputLocalOffset],
+    inputs: &[schema::InputLocalOffsetType],
     p_data: &[u64],
     face_sizes: &[usize],
     vertices_id: &str,
     source_map: &HashMap<&str, &schema::SourceElementType>,
     pos_source_id: &str,
+    triangulator: &mut crate::creation::Triangulator,
 ) -> Result<UnmergedPrimitive> {
     // Determine stride (tuple width)
     let stride = inputs
         .iter()
-        .map(|i| i.offset() as usize)
+        .map(|i| i.offset as usize)
         .max()
         .unwrap_or(0)
         + 1;
@@ -595,15 +628,15 @@ fn load_primitive(
     let mut uv_source: Option<SourceData> = None;
 
     for input in inputs {
-        let source_id = strip_fragment(input.source());
-        match input.semantic() {
+        let source_id = strip_fragment(&input.source);
+        match input.semantic.as_str() {
             "VERTEX" => {
                 if source_id == vertices_id {
-                    pos_offset = Some(input.offset() as usize);
+                    pos_offset = Some(input.offset as usize);
                 }
             }
             "NORMAL" => {
-                normal_offset = Some(input.offset() as usize);
+                normal_offset = Some(input.offset as usize);
                 if let Some(src) = source_map.get(source_id) {
                     normal_source = read_source(src);
                 }
@@ -611,7 +644,7 @@ fn load_primitive(
             "TEXCOORD" => {
                 if uv_offset.is_none() {
                     // Take first UV set
-                    uv_offset = Some(input.offset() as usize);
+                    uv_offset = Some(input.offset as usize);
                     if let Some(src) = source_map.get(source_id) {
                         uv_source = read_source(src);
                     }
@@ -661,58 +694,72 @@ fn load_primitive(
             };
 
             let key = (pi, ni, ti);
-            let new_idx = *key_map.entry(key).or_insert_with(|| {
-                let idx = new_vertices.len();
+            let new_idx = match key_map.get(&key) {
+                Some(&idx) => idx,
+                None => {
+                    let idx = new_vertices.len();
 
-                // Read position
-                if let Some(pos) = pos_source.get(pi) {
+                    // Read position — bail on out-of-bounds
+                    let pos = pos_source
+                        .get(pi)
+                        .context(format!("position index {pi} out of range"))?;
                     if pos.len() >= 3 {
                         new_vertices.push(Point3::new(pos[0], pos[1], pos[2]));
                     } else {
-                        new_vertices.push(Point3::origin());
+                        bail!("position data at index {pi} has fewer than 3 components");
                     }
-                } else {
-                    new_vertices.push(Point3::origin());
-                }
 
-                // Read normal
-                if let Some(ref src) = normal_source {
-                    if let Some(n) = ni.and_then(|i| src.get(i)) {
-                        if n.len() >= 3 {
-                            new_normals.push(Vector3::new(n[0], n[1], n[2]));
+                    // Read normal
+                    if let Some(ref src) = normal_source {
+                        if let Some(n) = ni.and_then(|i| src.get(i)) {
+                            if n.len() >= 3 {
+                                new_normals.push(Vector3::new(n[0], n[1], n[2]));
+                            } else {
+                                new_normals.push(Vector3::zeros());
+                            }
                         } else {
                             new_normals.push(Vector3::zeros());
                         }
-                    } else {
-                        new_normals.push(Vector3::zeros());
                     }
-                }
 
-                // Read UV
-                if let Some(ref src) = uv_source {
-                    if let Some(uv) = ti.and_then(|i| src.get(i)) {
-                        if uv.len() >= 2 {
-                            new_uv.push(Vector2::new(uv[0], uv[1]));
+                    // Read UV
+                    if let Some(ref src) = uv_source {
+                        if let Some(uv) = ti.and_then(|i| src.get(i)) {
+                            if uv.len() >= 2 {
+                                new_uv.push(Vector2::new(uv[0], uv[1]));
+                            } else {
+                                new_uv.push(Vector2::zeros());
+                            }
                         } else {
                             new_uv.push(Vector2::zeros());
                         }
-                    } else {
-                        new_uv.push(Vector2::zeros());
                     }
-                }
 
-                idx
-            });
+                    key_map.insert(key, idx);
+                    idx
+                }
+            };
 
             face_indices.push(new_idx);
             p_idx += stride;
         }
 
-        // Fan-triangulate the face
-        if face_size >= 3 {
-            for i in 1..face_size - 1 {
-                new_faces.push([face_indices[0], face_indices[i], face_indices[i + 1]]);
-            }
+        // Triangulate the face
+        if face_size == 3 {
+            new_faces.push([face_indices[0], face_indices[1], face_indices[2]]);
+        } else if face_size == 4 {
+            // Diagonal split for quads
+            new_faces.push([face_indices[0], face_indices[1], face_indices[2]]);
+            new_faces.push([face_indices[0], face_indices[2], face_indices[3]]);
+        } else if face_size > 4 {
+            // Use earcut triangulation with fan fallback for 5+ vertex faces
+            new_faces.extend(triangulator.triangulate_3d(
+                &face_indices,
+                &[],
+                &new_vertices,
+                false,
+                true,
+            )?);
         }
     }
 
@@ -724,36 +771,6 @@ fn load_primitive(
     })
 }
 
-/// Trait to abstract over InputLocalOffsetType and &InputLocalOffsetType.
-trait AsInputLocalOffset {
-    fn offset(&self) -> u64;
-    fn semantic(&self) -> &str;
-    fn source(&self) -> &str;
-}
-
-impl AsInputLocalOffset for schema::InputLocalOffsetType {
-    fn offset(&self) -> u64 {
-        self.offset
-    }
-    fn semantic(&self) -> &str {
-        &self.semantic
-    }
-    fn source(&self) -> &str {
-        &self.source
-    }
-}
-
-impl AsInputLocalOffset for &schema::InputLocalOffsetType {
-    fn offset(&self) -> u64 {
-        self.offset
-    }
-    fn semantic(&self) -> &str {
-        &self.semantic
-    }
-    fn source(&self) -> &str {
-        &self.source
-    }
-}
 
 // ── Export ───────────────────────────────────────────────────────────────────
 

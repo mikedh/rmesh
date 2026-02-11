@@ -117,7 +117,7 @@ impl FileType {
 
         // Collada DAE: XML containing "<COLLADA" in the first 100 bytes
         if let Ok(head) = std::str::from_utf8(&data[..data.len().min(100)]) {
-            if head.to_ascii_lowercase().contains("<collada ") {
+            if head.to_ascii_lowercase().contains("<collada") {
                 return Some(FileType::DAE);
             }
         }
@@ -317,6 +317,14 @@ mod tests {
         // STEP header
         let step_header = b"ISO-10303-21;\nHEADER;\n";
         assert_eq!(FileType::from_bytes(step_header), Some(FileType::STEP));
+
+        // DAE: various header forms
+        let dae_space = b"<?xml version=\"1.0\"?>\n<COLLADA xmlns=\"...\" version=\"1.4.1\">";
+        assert_eq!(FileType::from_bytes(dae_space), Some(FileType::DAE));
+        let dae_newline = b"<?xml version=\"1.0\"?>\n<COLLADA\n  xmlns=\"...\">";
+        assert_eq!(FileType::from_bytes(dae_newline), Some(FileType::DAE));
+        let dae_close = b"<COLLADA>";
+        assert_eq!(FileType::from_bytes(dae_close), Some(FileType::DAE));
 
         // Unknown
         let unknown = b"UNKNOWN";

@@ -274,4 +274,65 @@ mod tests {
         }
         assert!(found_texture, "duck.zae should have at least one texture");
     }
+
+    #[test]
+    fn test_load_plain_dae() {
+        // Minimal DAE XML that should round-trip through load_dae + to_scene
+        let dae_xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <up_axis>Y_UP</up_axis>
+  </asset>
+  <library_geometries>
+    <geometry id="tri-mesh" name="Triangle">
+      <mesh>
+        <source id="tri-positions">
+          <float_array id="tri-positions-array" count="9">0 0 0 1 0 0 0 1 0</float_array>
+          <technique_common>
+            <accessor source="#tri-positions-array" count="3" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="tri-vertices">
+          <input semantic="POSITION" source="#tri-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#tri-vertices" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="Triangle" name="Triangle">
+        <instance_geometry url="#tri-mesh"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>"##;
+
+        let collada = load_dae(dae_xml.as_bytes()).unwrap();
+        let scene = convert::to_scene(&collada, None).unwrap();
+
+        assert_eq!(scene.geometry.len(), 1);
+        for (_name, geom) in &scene.geometry {
+            if let crate::geometry::Geometry::Mesh(mesh) = geom {
+                assert_eq!(mesh.vertices.len(), 3);
+                assert_eq!(mesh.faces.len(), 1);
+            }
+        }
+
+        // Round-trip through export and re-import
+        let xml_bytes = convert::from_scene(&scene).unwrap();
+        let collada2 = load_dae(&xml_bytes).unwrap();
+        let scene2 = convert::to_scene(&collada2, None).unwrap();
+        assert_eq!(scene2.geometry.len(), 1);
+    }
 }

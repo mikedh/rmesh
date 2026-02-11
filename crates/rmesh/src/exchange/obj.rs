@@ -5,7 +5,7 @@ use nalgebra::{Point3, Vector2, Vector3, Vector4};
 use rayon::prelude::*;
 
 use crate::attributes::{Attributes, DEFAULT_COLOR, Grouping, GroupingKind, Material};
-use crate::creation::{Triangulator, triangulate_fan};
+use crate::creation::Triangulator;
 use crate::mesh::Trimesh;
 
 use super::mtl::parse_mtl;
@@ -241,9 +241,7 @@ impl ObjFaces {
         } else if f.len() == 4 {
             vec![[0, 1, 2], [0, 2, 3]]
         } else if f.len() > 4 {
-            triangulator
-                .triangulate_3d(&f, &[], vertices, true)
-                .unwrap_or_else(|_| triangulate_fan(&f, true))
+            triangulator.triangulate_3d(&f, &[], vertices, true, true).unwrap()
         } else {
             vec![]
         };

@@ -307,15 +307,22 @@ impl Triangulator {
         interiors: &[Vec<usize>],
         vertices: &[Point3<f64>],
         local_indices: bool,
+        fan_fallback: bool,
     ) -> Result<Vec<[usize; 3]>> {
         // find a plane for the vertices in our exterior as not every vertex may be referenced
         let fittable: Vec<Point3<f64>> = exterior.iter().map(|i| vertices[*i]).collect();
         // use the cross product method to find a plane which works well for exactly planar points
-        let plane = Plane::from_points(&fittable, true)?;
-        // project the 3D vertices into the plane so we can triangulate them in 2D
-        let on_plane = plane.to_2d(vertices);
+        let result = Plane::from_points(&fittable, true)
+            .map(|plane| {
+                let on_plane = plane.to_2d(vertices);
+                self.trianglate_2d(exterior, interiors, &on_plane, local_indices)
+            });
 
-        Ok(self.trianglate_2d(exterior, interiors, &on_plane, local_indices))
+        match result {
+            Ok(tris) => Ok(tris),
+            Err(e) if fan_fallback => Ok(triangulate_fan(exterior, local_indices)),
+            Err(e) => Err(e),
+        }
     }
 }
 

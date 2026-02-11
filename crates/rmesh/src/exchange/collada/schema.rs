@@ -427,7 +427,7 @@ pub struct InputLocalType {
     #[serde(rename = "@source")]
     pub source: String,
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InputLocalOffsetType {
     #[serde(rename = "@offset")]
     pub offset: u64,
