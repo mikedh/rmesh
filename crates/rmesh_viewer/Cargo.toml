@@ -3,8 +3,14 @@ name = "rmesh_viewer"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+python = ["dep:pyo3", "dep:numpy"]
+
 [dependencies]
-rmesh = { path = "../rmesh", features = ["wgpu"] }
+rmesh = { path = "../rmesh", features = ["render"] }
 wgpu = { workspace = true }
 winit = "0.30"
 pollster = "0.4"
@@ -12,13 +18,13 @@ bytemuck = { workspace = true }
 nalgebra = { workspace = true }
 anyhow = { workspace = true }
 earcut = "0.4"
-image = "0.25"
 log = "0.4"
 env_logger = "0.11"
+pyo3 = { version = "0.27", features = ["anyhow", "abi3-py310"], optional = true }
+numpy = { version = "0.27", optional = true }
 
-[build-dependencies]
-anyhow = { workspace = true }
-shaderloom = { workspace = true }
+[dev-dependencies]
+image = "0.25"
 
 [lints]
 workspace = true

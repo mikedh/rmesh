@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Result;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -7,14 +8,15 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
+use rmesh::render::fill::GpuFill;
+use rmesh::render::scene2d::Scene2DRenderer;
+use rmesh::render::upload::{GpuPath, LineVertex};
+use rmesh::render::view2d::View2D;
+
 use crate::View2DData;
 use crate::ViewerOptions;
 use crate::gpu::GpuContext;
 use crate::input::ZoomBoxState;
-use crate::render::fill::GpuFill;
-use crate::render::scene2d::Scene2DRenderer;
-use crate::upload::{GpuPath, LineVertex};
-use crate::view2d::View2D;
 
 /// All GPU-uploaded 2D scene data.
 struct Gpu2DData {
@@ -44,6 +46,7 @@ struct Viewer2DApp<'a> {
     data: &'a View2DData,
     options: ViewerOptions,
     state: Option<Viewer2DState>,
+    error: Option<anyhow::Error>,
 }
 
 impl<'a> Viewer2DApp<'a> {
@@ -52,16 +55,11 @@ impl<'a> Viewer2DApp<'a> {
             data,
             options,
             state: None,
+            error: None,
         }
     }
-}
 
-impl ApplicationHandler for Viewer2DApp<'_> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
-
+    fn init(&self, event_loop: &ActiveEventLoop) -> Result<Viewer2DState> {
         let window_attrs = WindowAttributes::default()
             .with_title(&self.options.title)
             .with_inner_size(winit::dpi::LogicalSize::new(
@@ -69,14 +67,9 @@ impl ApplicationHandler for Viewer2DApp<'_> {
                 self.options.height,
             ));
 
-        let window = Arc::new(
-            event_loop
-                .create_window(window_attrs)
-                .expect("failed to create window"),
-        );
-
-        let gpu = GpuContext::new(window.clone(), None);
-        let renderer = Scene2DRenderer::new(&gpu);
+        let window = Arc::new(event_loop.create_window(window_attrs)?);
+        let gpu = GpuContext::new(window.clone())?;
+        let renderer = Scene2DRenderer::new(&gpu.device, gpu.surface_format());
 
         let view = View2D::new(self.data.bounds.0, self.data.bounds.1);
 
@@ -85,7 +78,7 @@ impl ApplicationHandler for Viewer2DApp<'_> {
         let grid_buf = Some(generate_grid(&gpu.device, &view, gpu.aspect_ratio()));
         let axes_buf = Some(generate_axes(&gpu.device, &view, gpu.aspect_ratio()));
 
-        let state = Viewer2DState {
+        Ok(Viewer2DState {
             window,
             gpu,
             renderer,
@@ -106,9 +99,24 @@ impl ApplicationHandler for Viewer2DApp<'_> {
                 height: self.options.height,
                 background: self.options.background,
             },
-        };
+        })
+    }
+}
 
-        self.state = Some(state);
+impl ApplicationHandler for Viewer2DApp<'_> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() {
+            return;
+        }
+
+        match self.init(event_loop) {
+            Ok(state) => self.state = Some(state),
+            Err(e) => {
+                log::error!("failed to initialize 2D viewer: {e}");
+                self.error = Some(e);
+                event_loop.exit();
+            }
+        }
     }
 
     fn window_event(
@@ -155,7 +163,6 @@ impl ApplicationHandler for Viewer2DApp<'_> {
                             let dx = (cx - sx).abs();
                             let dy = (cy - sy).abs();
                             if dx > 5.0 && dy > 5.0 {
-                                let size = state.gpu.surface_config.width;
                                 state.view.zoom_to_box(
                                     sx,
                                     sy,
@@ -164,7 +171,6 @@ impl ApplicationHandler for Viewer2DApp<'_> {
                                     state.gpu.surface_config.width,
                                     state.gpu.surface_config.height,
                                 );
-                                let _ = size; // suppress unused
                             }
                             state.zoom_box_fill = None;
                             state.zoom_box_lines = None;
@@ -610,13 +616,21 @@ fn update_zoom_box_gpu(state: &mut Viewer2DState) {
 ///
 /// Uses a singleton viewer thread so the event loop can be reused
 /// across multiple calls (winit only allows one EventLoop per process).
-pub fn run(data: &View2DData, options: ViewerOptions) {
-    crate::viewer_thread::show_2d(data, options);
+pub fn run(data: &View2DData, options: ViewerOptions) -> Result<()> {
+    crate::viewer_thread::show_2d(data, options)
 }
 
 /// Run on an existing event loop (called from viewer thread).
-pub(crate) fn run_on(event_loop: &mut EventLoop<()>, data: &View2DData, options: ViewerOptions) {
+pub(crate) fn run_on(
+    event_loop: &mut EventLoop<()>,
+    data: &View2DData,
+    options: ViewerOptions,
+) -> Result<()> {
     use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
     let mut app = Viewer2DApp::new(data, options);
     let _ = event_loop.run_app_on_demand(&mut app);
+    if let Some(e) = app.error {
+        return Err(e);
+    }
+    Ok(())
 }

@@ -17,7 +17,7 @@ use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
 use rmesh::geometry::Geometry;
 use rmesh::mesh::Trimesh;
 use rmesh::resolvers::Resolver;
-use rmesh_viewer::{RenderOptions, SceneViewer, ViewerOptions};
+use rmesh::render::RenderOptions;
 
 // ============================================================================
 // PyMaterial
@@ -682,27 +682,6 @@ impl PyPolygon2D {
         self.data.to_path3d().map(|p| wrap_path3d(py, p))
     }
 
-    /// Open an interactive 2D viewer window displaying this polygon.
-    #[pyo3(signature = (*, title="rmesh 2D", width=1280, height=720, background=None))]
-    fn show(
-        &self,
-        py: Python<'_>,
-        title: &str,
-        width: u32,
-        height: u32,
-        background: Option<[f32; 3]>,
-    ) {
-        use rmesh_viewer::{Viewer2D, ViewerOptions};
-        let data = self.data.clone();
-        let options = ViewerOptions {
-            title: title.to_string(),
-            width,
-            height,
-            background: background.unwrap_or([1.0, 1.0, 1.0]),
-        };
-        py.detach(|| data.show_2d_with_options(options));
-    }
-
     fn __repr__(&self) -> String {
         format!(
             "<rmesh.Polygon2D vertices: {} holes: {}>",
@@ -768,27 +747,6 @@ impl PyPath2D {
             .into_iter()
             .map(|p| wrap_path2d(py, p))
             .collect()
-    }
-
-    /// Open an interactive 2D viewer window displaying this path.
-    #[pyo3(signature = (*, title="rmesh 2D", width=1280, height=720, background=None))]
-    fn show(
-        &self,
-        py: Python<'_>,
-        title: &str,
-        width: u32,
-        height: u32,
-        background: Option<[f32; 3]>,
-    ) {
-        use rmesh_viewer::{Viewer2D, ViewerOptions};
-        let data = self.data.clone();
-        let options = ViewerOptions {
-            title: title.to_string(),
-            width,
-            height,
-            background: background.unwrap_or([1.0, 1.0, 1.0]),
-        };
-        py.detach(|| data.show_2d_with_options(options));
     }
 
     /// Segment descriptions as a list of dicts.
@@ -1796,28 +1754,6 @@ impl PyTrimesh {
         Self::new_from_trimesh(self.data.cleanup(&options).into())
     }
 
-    /// Open an interactive 3D viewer window displaying this mesh.
-    #[pyo3(signature = (*, title="rmesh viewer", width=1280, height=720, background=None))]
-    fn show(
-        &self,
-        py: Python<'_>,
-        title: &str,
-        width: u32,
-        height: u32,
-        background: Option<[f32; 3]>,
-    ) {
-        use rmesh::scene::Scene;
-        let mut scene = Scene::new();
-        scene.add_geometry("mesh", Geometry::Mesh(Box::new(self.data.clone())));
-        let options = ViewerOptions {
-            title: title.to_string(),
-            width,
-            height,
-            background: background.unwrap_or([0.15, 0.15, 0.18]),
-        };
-        py.detach(|| scene.show_with_options(options));
-    }
-
     /// Render this mesh to a PNG image (headless, no window).
     ///
     /// Returns PNG bytes.
@@ -1837,7 +1773,8 @@ impl PyTrimesh {
             height,
             background: background.unwrap_or([0.15, 0.15, 0.18]),
         };
-        let rgba = py.detach(|| scene.render_to_image(&options));
+        let rgba = py.detach(|| rmesh::render::render_to_image(&scene, &options))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let img = image::RgbaImage::from_raw(width, height, rgba)
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("render failed"))?;
         let mut buf = Vec::new();

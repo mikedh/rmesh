@@ -5,8 +5,7 @@ use super::fill::{FillRenderer, GpuFill};
 use super::line::LineRenderer;
 use super::mat4_to_array;
 use super::shaders::CameraUniforms;
-use crate::gpu::GpuContext;
-use crate::upload::GpuPath;
+use super::upload::GpuPath;
 
 /// Orchestrates 2D rendering: fill polygons + line outlines/grid via reused LineRenderer.
 pub struct Scene2DRenderer {
@@ -19,9 +18,7 @@ pub struct Scene2DRenderer {
 }
 
 impl Scene2DRenderer {
-    pub fn new(gpu: &GpuContext) -> Self {
-        let format = gpu.surface_format();
-        let device = &gpu.device;
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("camera2d_bgl"),

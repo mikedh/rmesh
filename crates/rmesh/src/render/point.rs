@@ -2,15 +2,15 @@ use wgpu::{
     DepthBiasState, MultisampleState, PipelineCompilationOptions, StencilState, TextureFormat,
 };
 
-use crate::gpu::DEPTH_FORMAT;
-use crate::upload::{GpuPointCloud, PointVertex};
+use super::device::DEPTH_FORMAT;
+use super::upload::{GpuPointCloud, PointVertex};
 
 pub struct PointRenderer {
     pipeline: wgpu::RenderPipeline,
 }
 
 impl PointRenderer {
-    pub fn new_with_format(
+    pub fn new(
         device: &wgpu::Device,
         camera_bgl: &wgpu::BindGroupLayout,
         format: TextureFormat,

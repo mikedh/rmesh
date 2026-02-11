@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use nalgebra::Matrix4;
+use anyhow::Result;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
+use rmesh::render::mesh::MeshBindGroups;
+use rmesh::render::upload::{self, SceneGpuData};
+use rmesh::render::{RenderToggles, SceneRenderer, mat4_f64_to_f32};
 use rmesh::scene::{Camera, Scene, Trackball};
 
 use crate::ViewerOptions;
 use crate::gpu::GpuContext;
-use crate::input::{InputCommand, InputState, RenderToggles};
-use crate::render::SceneRenderer;
-use crate::render::mesh::MeshBindGroups;
-use crate::upload::{self, SceneGpuData};
+use crate::input::{InputCommand, InputState};
 
 struct ViewerState {
     window: Arc<Window>,
@@ -33,6 +33,7 @@ struct ViewerApp<'a> {
     scene: &'a Scene,
     options: ViewerOptions,
     state: Option<ViewerState>,
+    error: Option<anyhow::Error>,
 }
 
 impl<'a> ViewerApp<'a> {
@@ -41,16 +42,11 @@ impl<'a> ViewerApp<'a> {
             scene,
             options,
             state: None,
+            error: None,
         }
     }
-}
 
-impl ApplicationHandler for ViewerApp<'_> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
-
+    fn init(&self, event_loop: &ActiveEventLoop) -> Result<ViewerState> {
         let window_attrs = WindowAttributes::default()
             .with_title(&self.options.title)
             .with_inner_size(winit::dpi::LogicalSize::new(
@@ -58,14 +54,10 @@ impl ApplicationHandler for ViewerApp<'_> {
                 self.options.height,
             ));
 
-        let window = Arc::new(
-            event_loop
-                .create_window(window_attrs)
-                .expect("failed to create window"),
-        );
-
-        let gpu = GpuContext::new(window.clone(), None);
-        let renderer = SceneRenderer::new(&gpu);
+        let window = Arc::new(event_loop.create_window(window_attrs)?);
+        let gpu = GpuContext::new(window.clone())?;
+        let renderer =
+            SceneRenderer::new(&gpu.device, &gpu.queue, gpu.surface_format());
 
         let scene_data = upload::upload_scene(&gpu.device, &gpu.queue, self.scene);
 
@@ -119,7 +111,24 @@ impl ApplicationHandler for ViewerApp<'_> {
             .renderer
             .update_overlays(&state.gpu.device, scene_extent);
 
-        self.state = Some(state);
+        Ok(state)
+    }
+}
+
+impl ApplicationHandler for ViewerApp<'_> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() {
+            return;
+        }
+
+        match self.init(event_loop) {
+            Ok(state) => self.state = Some(state),
+            Err(e) => {
+                log::error!("failed to initialize viewer: {e}");
+                self.error = Some(e);
+                event_loop.exit();
+            }
+        }
     }
 
     fn window_event(
@@ -216,27 +225,6 @@ fn handle_command(state: &mut ViewerState, cmd: &InputCommand) {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn mat4_f64_to_f32(m: &Matrix4<f64>) -> Matrix4<f32> {
-    Matrix4::new(
-        m[(0, 0)] as f32,
-        m[(0, 1)] as f32,
-        m[(0, 2)] as f32,
-        m[(0, 3)] as f32,
-        m[(1, 0)] as f32,
-        m[(1, 1)] as f32,
-        m[(1, 2)] as f32,
-        m[(1, 3)] as f32,
-        m[(2, 0)] as f32,
-        m[(2, 1)] as f32,
-        m[(2, 2)] as f32,
-        m[(2, 3)] as f32,
-        m[(3, 0)] as f32,
-        m[(3, 1)] as f32,
-        m[(3, 2)] as f32,
-        m[(3, 3)] as f32,
-    )
-}
-
 fn render_frame(state: &ViewerState) {
     let output = match state.gpu.surface.get_current_texture() {
         Ok(t) => t,
@@ -298,13 +286,21 @@ fn render_frame(state: &ViewerState) {
 ///
 /// Uses a singleton viewer thread so the event loop can be reused
 /// across multiple calls (winit only allows one EventLoop per process).
-pub fn run(scene: &Scene, options: ViewerOptions) {
-    crate::viewer_thread::show_scene(scene, options);
+pub fn run(scene: &Scene, options: ViewerOptions) -> Result<()> {
+    crate::viewer_thread::show_scene(scene, options)
 }
 
 /// Run on an existing event loop (called from viewer thread).
-pub(crate) fn run_on(event_loop: &mut EventLoop<()>, scene: &Scene, options: ViewerOptions) {
+pub(crate) fn run_on(
+    event_loop: &mut EventLoop<()>,
+    scene: &Scene,
+    options: ViewerOptions,
+) -> Result<()> {
     use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
     let mut app = ViewerApp::new(scene, options);
     let _ = event_loop.run_app_on_demand(&mut app);
+    if let Some(e) = app.error {
+        return Err(e);
+    }
+    Ok(())
 }

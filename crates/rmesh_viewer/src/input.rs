@@ -2,27 +2,8 @@ use nalgebra::Vector2;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
+use rmesh::render::RenderToggles;
 use rmesh::scene::Trackball;
-
-/// Toggle states for rendering options.
-#[allow(clippy::struct_excessive_bools)]
-pub struct RenderToggles {
-    pub wireframe: bool,
-    pub grid: bool,
-    pub axes: bool,
-    pub env_light: bool,
-}
-
-impl Default for RenderToggles {
-    fn default() -> Self {
-        Self {
-            wireframe: false,
-            grid: false,
-            axes: false,
-            env_light: true,
-        }
-    }
-}
 
 /// Input state for mouse tracking.
 pub struct InputState {

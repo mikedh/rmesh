@@ -5,7 +5,7 @@ pub struct VoxelRenderer {
 }
 
 impl VoxelRenderer {
-    pub fn new_with_format(
+    pub fn new(
         _device: &wgpu::Device,
         _camera_bgl: &wgpu::BindGroupLayout,
         _format: wgpu::TextureFormat,

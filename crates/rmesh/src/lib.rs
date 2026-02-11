@@ -24,5 +24,7 @@ pub mod simplify;
 pub mod subdivide;
 pub mod timer;
 pub mod triangles;
+#[cfg(feature = "render")]
+pub mod render;
 #[cfg(feature = "wgpu")]
 pub mod voxel;

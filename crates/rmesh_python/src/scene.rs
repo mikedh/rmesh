@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 
 use rmesh::geometry::Geometry;
 use rmesh::scene::{SceneGraph, SceneNodeKind};
-use rmesh_viewer::{RenderOptions, SceneViewer, ViewerOptions};
+use rmesh::render::RenderOptions;
 
 use crate::mesh::{PyPath2D, PyPath3D, PyPolygon2D, PyTrimesh, readonly_1d, readonly_bounds};
 
@@ -382,26 +382,6 @@ impl PyScene {
         self.data.geometry.len()
     }
 
-    /// Open an interactive 3D viewer window displaying this scene.
-    #[pyo3(signature = (*, title="rmesh viewer", width=1280, height=720, background=None))]
-    fn show(
-        &self,
-        py: Python<'_>,
-        title: &str,
-        width: u32,
-        height: u32,
-        background: Option<[f32; 3]>,
-    ) {
-        let options = ViewerOptions {
-            title: title.to_string(),
-            width,
-            height,
-            background: background.unwrap_or([0.15, 0.15, 0.18]),
-        };
-        let data = self.data.clone();
-        py.detach(|| data.show_with_options(options));
-    }
-
     /// Axis-aligned bounding box as a (2, 3) array [[min_x, min_y, min_z], [max_x, max_y, max_z]],
     /// or None if the scene has no geometry with valid bounds.
     #[getter]
@@ -441,7 +421,8 @@ impl PyScene {
             background: background.unwrap_or([0.15, 0.15, 0.18]),
         };
         let data = self.data.clone();
-        let rgba = py.detach(|| data.render_to_image(&options));
+        let rgba = py.detach(|| rmesh::render::render_to_image(&data, &options))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let img = image::RgbaImage::from_raw(width, height, rgba)
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("render failed"))?;
         let mut buf = Vec::new();

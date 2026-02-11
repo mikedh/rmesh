@@ -4,10 +4,10 @@ use wgpu::{
     DepthBiasState, MultisampleState, PipelineCompilationOptions, StencilState, TextureFormat,
 };
 
-use crate::gpu::DEPTH_FORMAT;
-use crate::render::mat4_to_array;
-use crate::render::shaders::{MaterialUniforms, ModelUniforms};
-use crate::upload::{GpuMesh, MeshVertex};
+use super::device::DEPTH_FORMAT;
+use super::mat4_to_array;
+use super::shaders::{MaterialUniforms, ModelUniforms};
+use super::upload::{GpuMesh, MeshVertex};
 
 /// Pre-created bind groups for a single mesh draw call.
 #[allow(clippy::struct_field_names)]
@@ -30,7 +30,7 @@ pub struct MeshRenderer {
 }
 
 impl MeshRenderer {
-    pub fn new_with_format(
+    pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera_bgl: &wgpu::BindGroupLayout,

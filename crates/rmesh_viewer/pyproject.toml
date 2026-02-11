@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin[patchelf]>=1.8,<2.0", "numpy>=2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rmesh-viewer"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+dependencies = ["rmesh"]
+
+[tool.maturin]
+features = ["pyo3/extension-module", "pyo3/abi3-py310", "python"]
+editable-profile = "dev"

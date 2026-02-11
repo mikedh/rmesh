@@ -10,6 +10,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schemas_dir = Path::new(&manifest_dir).join("schemas");
     let src_schemas_dir = Path::new(&manifest_dir).join("src").join("schemas");
 
+    // Compile all shaders (render + compute) when GPU features are enabled
+    if std::env::var("CARGO_FEATURE_WGPU").is_ok() {
+        compile_shaders()?;
+    }
+
     // Skip schema generation if the mod.rs already exists
     // The schemas are committed to the repository, so we don't need to regenerate them
     if src_schemas_dir.join("mod.rs").exists() {
@@ -302,6 +307,19 @@ fn map_xsd_type_to_rust(xsd_type: &str) -> String {
         // Fallback
         _ => "String".to_string(),
     }
+}
+
+fn compile_shaders() -> Result<(), Box<dyn std::error::Error>> {
+    use shaderloom::Shaderloom;
+
+    let loom_path = "shader_src/loom.lua";
+    if Path::new(loom_path).exists() {
+        Shaderloom::new().build_from_file(loom_path)?;
+        println!("cargo:rerun-if-changed=shader_src/");
+    } else {
+        eprintln!("Warning: {loom_path} not found, skipping shader build");
+    }
+    Ok(())
 }
 
 fn create_schemas_mod(schemas_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {

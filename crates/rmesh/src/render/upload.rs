@@ -2,10 +2,10 @@ use image::GenericImageView;
 use nalgebra::{Matrix4, Point3, Vector4};
 use wgpu::util::DeviceExt;
 
-use rmesh::attributes::{DEFAULT_COLOR, Material};
-use rmesh::geometry::Geometry;
-use rmesh::image::LazyImage;
-use rmesh::scene::{Scene, SceneNodeKind};
+use crate::attributes::{DEFAULT_COLOR, Material};
+use crate::geometry::Geometry;
+use crate::image::LazyImage;
+use crate::scene::{Scene, SceneNodeKind};
 
 /// GPU-ready mesh vertex: 52 bytes interleaved.
 #[repr(C)]
@@ -281,7 +281,7 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                 }
                 Geometry::Brep(brep) => {
                     // Tessellate BREP to mesh for rendering
-                    let params = rmesh::boundary::tesselate::TesselationParams::default();
+                    let params = crate::boundary::tesselate::TesselationParams::default();
                     let mesh = brep.tesselate(&params);
                     upload_mesh(
                         device,
@@ -346,7 +346,7 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                 Geometry::Feature(_) => {}
                 Geometry::Brep(brep) => {
                     // Tessellate BREP to mesh for rendering
-                    let params = rmesh::boundary::tesselate::TesselationParams::default();
+                    let params = crate::boundary::tesselate::TesselationParams::default();
                     let mesh = brep.tesselate(&params);
                     upload_mesh(
                         device,
@@ -420,7 +420,7 @@ fn transform_point(p: &Point3<f64>, m: &Matrix4<f64>) -> Point3<f64> {
 fn upload_mesh(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    mesh: &rmesh::mesh::Trimesh,
+    mesh: &crate::mesh::Trimesh,
     world_transform: &Matrix4<f64>,
     meshes: &mut Vec<GpuMesh>,
     bounds_min: &mut Point3<f64>,
@@ -602,7 +602,7 @@ fn upload_mesh(
 #[allow(clippy::cast_possible_truncation)]
 fn upload_path2d(
     device: &wgpu::Device,
-    path: &rmesh::path::Path2D,
+    path: &crate::path::Path2D,
     world_transform: &Matrix4<f64>,
     paths: &mut Vec<GpuPath>,
     bounds_min: &mut Point3<f64>,
@@ -653,7 +653,7 @@ fn upload_path2d(
 #[allow(clippy::cast_possible_truncation)]
 fn upload_path3d(
     device: &wgpu::Device,
-    path: &rmesh::path::Path3D,
+    path: &crate::path::Path3D,
     world_transform: &Matrix4<f64>,
     paths: &mut Vec<GpuPath>,
     bounds_min: &mut Point3<f64>,
@@ -702,7 +702,7 @@ fn upload_path3d(
 #[allow(clippy::cast_possible_truncation)]
 fn upload_point_cloud(
     device: &wgpu::Device,
-    pc: &rmesh::geometry::PointCloud,
+    pc: &crate::geometry::PointCloud,
     world_transform: &Matrix4<f64>,
     points: &mut Vec<GpuPointCloud>,
     bounds_min: &mut Point3<f64>,

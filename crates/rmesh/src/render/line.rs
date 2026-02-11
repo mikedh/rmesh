@@ -3,8 +3,8 @@ use wgpu::{
     DepthBiasState, MultisampleState, PipelineCompilationOptions, StencilState, TextureFormat,
 };
 
-use crate::gpu::DEPTH_FORMAT;
-use crate::upload::{GpuPath, LineVertex};
+use super::device::DEPTH_FORMAT;
+use super::upload::{GpuPath, LineVertex};
 
 pub struct LineRenderer {
     pipeline: wgpu::RenderPipeline,
