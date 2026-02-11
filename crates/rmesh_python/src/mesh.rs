@@ -16,8 +16,8 @@ use rmesh::attributes::{
 use rmesh::exchange::{FileResolver, FileType, InMemoryResolver, load};
 use rmesh::geometry::Geometry;
 use rmesh::mesh::Trimesh;
-use rmesh::resolvers::Resolver;
 use rmesh::render::RenderOptions;
+use rmesh::resolvers::Resolver;
 
 // ============================================================================
 // PyMaterial
@@ -1773,7 +1773,8 @@ impl PyTrimesh {
             height,
             background: background.unwrap_or([0.15, 0.15, 0.18]),
         };
-        let rgba = py.detach(|| rmesh::render::render_to_image(&scene, &options))
+        let rgba = py
+            .detach(|| rmesh::render::render_to_image(&scene, &options))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let img = image::RgbaImage::from_raw(width, height, rgba)
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("render failed"))?;

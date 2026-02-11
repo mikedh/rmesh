@@ -98,11 +98,7 @@ pub struct SceneRenderer {
 }
 
 impl SceneRenderer {
-    pub fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: TextureFormat,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: TextureFormat) -> Self {
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("camera_bgl"),
@@ -142,10 +138,8 @@ impl SceneRenderer {
             mesh::MeshRenderer::new(device, queue, &camera_bind_group_layout, format);
         let line_renderer =
             line::LineRenderer::new_with_format(device, &camera_bind_group_layout, format);
-        let point_renderer =
-            point::PointRenderer::new(device, &camera_bind_group_layout, format);
-        let voxel_renderer =
-            voxel::VoxelRenderer::new(device, &camera_bind_group_layout, format);
+        let point_renderer = point::PointRenderer::new(device, &camera_bind_group_layout, format);
+        let voxel_renderer = voxel::VoxelRenderer::new(device, &camera_bind_group_layout, format);
 
         Self {
             camera_bind_group_layout,

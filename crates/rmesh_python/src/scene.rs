@@ -5,8 +5,8 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 
 use rmesh::geometry::Geometry;
-use rmesh::scene::{SceneGraph, SceneNodeKind};
 use rmesh::render::RenderOptions;
+use rmesh::scene::{SceneGraph, SceneNodeKind};
 
 use crate::mesh::{PyPath2D, PyPath3D, PyPolygon2D, PyTrimesh, readonly_1d, readonly_bounds};
 
@@ -421,7 +421,8 @@ impl PyScene {
             background: background.unwrap_or([0.15, 0.15, 0.18]),
         };
         let data = self.data.clone();
-        let rgba = py.detach(|| rmesh::render::render_to_image(&data, &options))
+        let rgba = py
+            .detach(|| rmesh::render::render_to_image(&data, &options))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let img = image::RgbaImage::from_raw(width, height, rgba)
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("render failed"))?;

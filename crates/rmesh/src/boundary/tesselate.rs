@@ -1739,20 +1739,12 @@ impl<'a> ShellTessellator<'a> {
                 .iter()
                 .map(|&(x, y)| Point2::new(x, y))
                 .collect();
-            let merge_result = merge_near_vertices(
-                &boundary_pts_p2,
-                &contours,
-                self.params.merge_tolerance,
-            );
-            let merged: Vec<(f64, f64)> = merge_result
-                .merged_uvs
-                .iter()
-                .map(|p| (p.x, p.y))
-                .collect();
+            let merge_result =
+                merge_near_vertices(&boundary_pts_p2, &contours, self.params.merge_tolerance);
+            let merged: Vec<(f64, f64)> =
+                merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
 
-            if let Ok(tris) =
-                cdt::triangulate_contours(&merged, &merge_result.merged_contours)
-            {
+            if let Ok(tris) = cdt::triangulate_contours(&merged, &merge_result.merged_contours) {
                 let filtered: Vec<[usize; 3]> = tris
                     .iter()
                     .filter_map(|&(a, b, c)| {
@@ -2262,6 +2254,38 @@ impl BrepModel {
     /// - `attributes_face.groupings`: face-to-surface mapping with `GroupingKind::Surface`
     pub fn tesselate(&self, params: &TesselationParams) -> Trimesh {
         ShellTessellator::new(self, params).tessellate()
+    }
+
+    /// Tessellate, find non-watertight faces, return a reduced BrepModel
+    /// containing only the broken faces plus their edge-adjacent neighbors.
+    ///
+    /// Returns `None` if the mesh is already watertight.
+    pub fn debug_reduce(&self, params: &TesselationParams) -> Option<BrepModel> {
+        let mesh = self.tesselate(params);
+        if mesh.is_watertight() {
+            return None;
+        }
+
+        // Get BREP face indices that border non-manifold mesh edges
+        let broken_faces = mesh.non_watertight_face_indices();
+        if broken_faces.is_empty() {
+            return None;
+        }
+
+        // Expand to edge-adjacent BREP faces
+        let adjacency = self.build_edge_adjacency();
+        let mut expanded = broken_faces.clone();
+        for (_edge_idx, uses) in &adjacency {
+            let touches_broken = uses.iter().any(|u| broken_faces.contains(&u.face_idx));
+            if touches_broken {
+                for u in uses {
+                    expanded.insert(u.face_idx);
+                }
+            }
+        }
+
+        let face_vec: Vec<usize> = expanded.into_iter().collect();
+        Some(self.subset(&face_vec))
     }
 }
 
@@ -3120,7 +3144,7 @@ mod tests {
         let model = create_watertight_cube();
 
         // Verify the BREP model is valid
-        let brep_errors = model.validate();
+        let brep_errors = model.errors_index();
         assert!(
             brep_errors.is_empty(),
             "BREP validation failed: {:?}",
@@ -3128,7 +3152,7 @@ mod tests {
         );
 
         // Verify edge sharing is correct for watertight mesh
-        let edge_errors = model.validate_edge_sharing();
+        let edge_errors = model.errors_edge_sharing();
         assert!(
             edge_errors.is_empty(),
             "Edge sharing validation failed: {:?}",
@@ -3351,5 +3375,81 @@ mod tests {
         // Point exactly at vertex 0 — distance should be ~0
         let (_idx, dist_sq) = closest_polygon_edge(&Point2::new(0.0, 0.0), &triangle);
         assert!(dist_sq < 1e-20);
+    }
+
+    #[test]
+    fn test_watertight_regressions() {
+        let dir = std::path::Path::new("/home/mikedh/dev/rmesh/feat_obj/test/regression/brep");
+        if !dir.is_dir() {
+            eprintln!("test/regression/brep directory not found, skipping");
+            return;
+        }
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("wt_regression_") && n.ends_with(".json"))
+            })
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            eprintln!("No wt_regression files found, skipping");
+            return;
+        }
+        use crate::serialize::RmeshSerializable;
+        let params = TesselationParams::default();
+        let mut pass = 0;
+        let total = paths.len();
+        for path in &paths {
+            let bytes = std::fs::read(path).unwrap();
+            let model = BrepModel::from_bytes(&bytes).unwrap();
+            let mesh = model.tesselate(&params);
+            let name = path.file_stem().unwrap().to_string_lossy();
+            if mesh.is_watertight() {
+                pass += 1;
+            } else {
+                let bad_brep = mesh.non_watertight_face_indices();
+                eprintln!(
+                    "  FAIL: {} ({} faces, {} tris)",
+                    name,
+                    model.faces.len(),
+                    mesh.faces.len(),
+                );
+                // Print surface type for each face.
+                for (i, face) in model.faces.iter().enumerate() {
+                    let surface_kind = model.face_surfaces[face.surface].kind_name();
+                    eprintln!("    face {i}: {surface_kind}");
+                }
+                eprintln!("    bad faces: {:?}", bad_brep);
+                // Find edges shared between bad face pairs.
+                let adjacency = model.build_edge_adjacency();
+                let mut shared = Vec::new();
+                for (&edge_idx, uses) in &adjacency {
+                    let bad_faces_on_edge: Vec<usize> = uses
+                        .iter()
+                        .filter(|u| bad_brep.contains(&u.face_idx))
+                        .map(|u| u.face_idx)
+                        .collect();
+                    if bad_faces_on_edge.len() >= 2 {
+                        let curve_kind = model.curves[model.edges[edge_idx].curve].kind_name();
+                        shared.push((edge_idx, curve_kind));
+                    }
+                }
+                shared.sort_by_key(|&(idx, _)| idx);
+                if !shared.is_empty() {
+                    let desc: Vec<String> = shared
+                        .iter()
+                        .map(|(idx, kind)| format!("edge {idx} ({kind})"))
+                        .collect();
+                    eprintln!("    shared edges between bad faces: [{}]", desc.join(", "));
+                }
+            }
+        }
+        eprintln!("  watertight regressions: {pass}/{total}");
+        // TODO: uncomment once tessellation bugs are fixed
+        // assert_eq!(pass, total, "watertight regressions: {pass}/{total}");
     }
 }

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -483,6 +484,48 @@ impl Trimesh {
     /// Check if the mesh is watertight (all edges shared by exactly 2 faces).
     pub fn is_watertight(&self) -> bool {
         self.manifold_status().is_watertight
+    }
+
+    /// Return BREP face indices that border non-manifold mesh edges.
+    ///
+    /// Finds mesh edges with count != 2 (boundary or non-manifold), maps them
+    /// to incident triangles, then maps those triangles to BREP face indices
+    /// via the `GroupingKind::Surface` grouping. Returns an empty set if
+    /// no surface grouping exists or the mesh is watertight.
+    pub fn non_watertight_face_indices(&self) -> BTreeSet<usize> {
+        let edges = self.edges_sorted();
+        let groups = self.edges_grouped();
+
+        // Find triangles incident to non-manifold edges
+        let mut bad_tris = BTreeSet::new();
+        for w in groups.starts.windows(2) {
+            let group = &edges[w[0]..w[1]];
+            if group.len() != 2 {
+                for e in group {
+                    bad_tris.insert(e.face);
+                }
+            }
+        }
+
+        if bad_tris.is_empty() {
+            return BTreeSet::new();
+        }
+
+        // Map triangle indices → BREP face indices via Surface grouping
+        let surface_grouping = self
+            .attributes_face
+            .groupings
+            .iter()
+            .find(|g| g.kind == GroupingKind::Surface);
+
+        match surface_grouping {
+            Some(g) => bad_tris
+                .into_iter()
+                .filter_map(|tri_idx| g.indices.get(tri_idx).copied())
+                .filter(|&idx| idx != crate::attributes::UNSET)
+                .collect(),
+            None => BTreeSet::new(),
+        }
     }
 
     /// Check if face winding is consistent across the mesh.

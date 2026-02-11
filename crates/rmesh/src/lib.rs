@@ -16,6 +16,8 @@ pub mod image;
 pub mod mesh;
 pub mod path;
 pub mod project;
+#[cfg(feature = "render")]
+pub mod render;
 pub mod resolvers;
 pub mod scene;
 pub mod schemas;
@@ -24,7 +26,5 @@ pub mod simplify;
 pub mod subdivide;
 pub mod timer;
 pub mod triangles;
-#[cfg(feature = "render")]
-pub mod render;
 #[cfg(feature = "wgpu")]
 pub mod voxel;

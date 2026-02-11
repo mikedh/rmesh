@@ -258,9 +258,7 @@ fn show_polylines_2d(
     };
 
     py.detach(|| crate::show_2d_data(&data, options))
-        .map_err(|e: anyhow::Error| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(|e: anyhow::Error| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok(())
 }
 

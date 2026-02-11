@@ -8,7 +8,7 @@
 //! - Shells - connected collections of faces
 //! - Solids (3D) - volumes bounded by shells
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use nalgebra::{Point3, Vector3};
 use serde::{Deserialize, Serialize};
@@ -748,8 +748,8 @@ impl BrepModel {
         idx
     }
 
-    /// Validate all index references in the model.
-    pub fn validate(&self) -> Vec<BrepError> {
+    /// Return errors for invalid index references in the model.
+    pub fn errors_index(&self) -> Vec<BrepError> {
         let mut errors = Vec::new();
 
         // Validate edges
@@ -864,8 +864,8 @@ impl BrepModel {
         errors
     }
 
-    /// Validate that loops form closed chains (edge endpoints connect).
-    pub fn validate_loop_closure(&self, tolerance: f64) -> Vec<BrepError> {
+    /// Return errors for loops that don't form closed chains (edge endpoints connect).
+    pub fn errors_loop_closure(&self, tolerance: f64) -> Vec<BrepError> {
         let mut errors = Vec::new();
 
         for (loop_idx, loop_) in self.loops.iter().enumerate() {
@@ -919,14 +919,14 @@ impl BrepModel {
         errors
     }
 
-    /// Validate that each edge is used exactly twice with opposite orientations.
+    /// Return errors for edges not used exactly twice with opposite orientations.
     ///
     /// For a valid watertight BREP, each edge must be shared by exactly 2 faces:
     /// - Once with `same_sense: true` (forward direction)
     /// - Once with `same_sense: false` (reverse direction)
     ///
     /// This is a prerequisite for producing a watertight mesh from tessellation.
-    pub fn validate_edge_sharing(&self) -> Vec<BrepError> {
+    pub fn errors_edge_sharing(&self) -> Vec<BrepError> {
         let adjacency = self.build_edge_adjacency();
         let mut errors = Vec::new();
 
@@ -945,9 +945,181 @@ impl BrepModel {
         errors
     }
 
-    /// Check if the model passes all validation.
+    /// Check if all index references are valid.
+    pub fn is_indices_valid(&self) -> bool {
+        self.errors_index().is_empty()
+    }
+
+    /// Check if edge sharing is valid (each edge used exactly twice with opposite orientations).
+    pub fn is_watertight(&self) -> bool {
+        self.errors_edge_sharing().is_empty()
+    }
+
+    /// Check if all loops form closed chains at the given tolerance.
+    pub fn is_loops_closed(&self, tolerance: f64) -> bool {
+        self.errors_loop_closure(tolerance).is_empty()
+    }
+
+    /// Check if the model passes all validation (indices + edge sharing).
     pub fn is_valid(&self) -> bool {
-        self.validate().is_empty()
+        self.is_indices_valid() && self.is_watertight()
+    }
+
+    /// Return edge indices that violate the watertight invariant.
+    pub fn unmatched_edges(&self) -> Vec<usize> {
+        self.errors_edge_sharing()
+            .into_iter()
+            .filter_map(|e| match e {
+                BrepError::EdgeSharingInvalid { edge, .. } => Some(edge),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Return face indices that reference unmatched edges.
+    pub fn defect_faces(&self) -> BTreeSet<usize> {
+        let bad_edges: BTreeSet<usize> = self.unmatched_edges().into_iter().collect();
+        if bad_edges.is_empty() {
+            return BTreeSet::new();
+        }
+        let mut result = BTreeSet::new();
+        for (face_idx, face) in self.faces.iter().enumerate() {
+            let all_loops =
+                std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied());
+            for loop_idx in all_loops {
+                if loop_idx >= self.loops.len() {
+                    continue;
+                }
+                for oe in &self.loops[loop_idx].edges {
+                    if bad_edges.contains(&oe.edge) {
+                        result.insert(face_idx);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Extract a subset of faces into a new self-contained BrepModel with remapped indices.
+    ///
+    /// Collects all referenced entities (surfaces, loops, edges, curves, vertices)
+    /// transitively, builds old→new remap tables, and constructs a new model with
+    /// a single shell and solid wrapping the selected faces.
+    pub fn subset(&self, face_indices: &[usize]) -> BrepModel {
+        let face_set: BTreeSet<usize> = face_indices.iter().copied().collect();
+
+        // Collect referenced loops, edges, curves, vertices, surfaces
+        let mut loop_set = BTreeSet::new();
+        let mut edge_set = BTreeSet::new();
+        let mut curve_set = BTreeSet::new();
+        let mut vertex_set = BTreeSet::new();
+        let mut surface_set = BTreeSet::new();
+
+        for &fi in &face_set {
+            let face = &self.faces[fi];
+            surface_set.insert(face.surface);
+            let all_loops =
+                std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied());
+            for li in all_loops {
+                loop_set.insert(li);
+                if li < self.loops.len() {
+                    for oe in &self.loops[li].edges {
+                        edge_set.insert(oe.edge);
+                        if oe.edge < self.edges.len() {
+                            let edge = &self.edges[oe.edge];
+                            curve_set.insert(edge.curve);
+                            vertex_set.insert(edge.start_vertex);
+                            vertex_set.insert(edge.end_vertex);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build old→new remap tables (BTreeSet iteration is sorted → deterministic)
+        let curve_map: HashMap<usize, usize> = curve_set
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new))
+            .collect();
+        let vertex_map: HashMap<usize, usize> = vertex_set
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new))
+            .collect();
+        let edge_map: HashMap<usize, usize> = edge_set
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new))
+            .collect();
+        let loop_map: HashMap<usize, usize> = loop_set
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new))
+            .collect();
+        let surface_map: HashMap<usize, usize> = surface_set
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new))
+            .collect();
+
+        let mut model = BrepModel::new();
+
+        // Copy curves
+        for &ci in &curve_set {
+            model.curves.push(self.curves[ci].clone());
+        }
+        // Copy vertices
+        for &vi in &vertex_set {
+            model.vertices.push(self.vertices[vi].clone());
+        }
+        // Copy edges with remapped indices
+        for &ei in &edge_set {
+            let edge = &self.edges[ei];
+            model.edges.push(BrepEdge {
+                curve: curve_map[&edge.curve],
+                start_vertex: vertex_map[&edge.start_vertex],
+                end_vertex: vertex_map[&edge.end_vertex],
+                t_start: edge.t_start,
+                t_end: edge.t_end,
+            });
+        }
+        // Copy loops with remapped edge indices
+        for &li in &loop_set {
+            let loop_ = &self.loops[li];
+            model.loops.push(BrepLoop {
+                edges: loop_
+                    .edges
+                    .iter()
+                    .map(|oe| OrientedEdge {
+                        edge: edge_map[&oe.edge],
+                        same_sense: oe.same_sense,
+                    })
+                    .collect(),
+            });
+        }
+        // Copy surfaces
+        for &si in &surface_set {
+            model.face_surfaces.push(self.face_surfaces[si].clone());
+        }
+        // Copy faces with remapped indices
+        let mut new_face_indices = Vec::new();
+        for &fi in &face_set {
+            let face = &self.faces[fi];
+            let new_fi = model.faces.len();
+            new_face_indices.push(new_fi);
+            model.faces.push(BrepFace {
+                surface: surface_map[&face.surface],
+                outer_loop: loop_map[&face.outer_loop],
+                inner_loops: face.inner_loops.iter().map(|&li| loop_map[&li]).collect(),
+                same_sense: face.same_sense,
+            });
+        }
+        // Single shell containing all faces, single solid wrapping it
+        let shell_idx = model.add_shell(new_face_indices);
+        model.add_solid(shell_idx, vec![]);
+
+        model
     }
 
     /// Build a map from edge index to all faces that use that edge.
@@ -1247,7 +1419,7 @@ mod tests {
     fn test_validate_empty_model() {
         let model = BrepModel::new();
         assert!(model.is_valid());
-        assert!(model.validate().is_empty());
+        assert!(model.errors_index().is_empty());
     }
 
     #[test]
@@ -1258,7 +1430,7 @@ mod tests {
         // Edge references curve 99 which doesn't exist
         model.add_edge(99, 0, 1, 0.0, 1.0);
 
-        let errors = model.validate();
+        let errors = model.errors_index();
         assert!(!errors.is_empty());
         assert!(matches!(
             errors[0],
@@ -1282,7 +1454,7 @@ mod tests {
         // t_start > t_end for a line (non-periodic) is invalid
         model.add_edge(0, 0, 1, 5.0, 1.0);
 
-        let errors = model.validate();
+        let errors = model.errors_index();
         assert!(errors.iter().any(|e| matches!(
             e,
             BrepError::InvalidParameterRange {
@@ -1307,7 +1479,7 @@ mod tests {
         // t_start > t_end is allowed for periodic curves (wrapping around)
         model.add_edge(0, 0, 1, 5.0, 1.0);
 
-        let errors = model.validate();
+        let errors = model.errors_index();
         // Should not contain InvalidParameterRange for periodic curves
         assert!(
             !errors
@@ -1360,7 +1532,7 @@ mod tests {
             },
         ]);
 
-        let errors = model.validate_loop_closure(1e-10);
+        let errors = model.errors_loop_closure(1e-10);
         assert!(errors.is_empty(), "Triangle loop should be closed");
     }
 
@@ -1394,7 +1566,7 @@ mod tests {
             },
         ]);
 
-        let errors = model.validate_loop_closure(1e-10);
+        let errors = model.errors_loop_closure(1e-10);
         assert!(!errors.is_empty(), "Should detect gap in loop");
         assert!(matches!(
             errors[0],

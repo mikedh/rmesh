@@ -56,8 +56,7 @@ impl<'a> ViewerApp<'a> {
 
         let window = Arc::new(event_loop.create_window(window_attrs)?);
         let gpu = GpuContext::new(window.clone())?;
-        let renderer =
-            SceneRenderer::new(&gpu.device, &gpu.queue, gpu.surface_format());
+        let renderer = SceneRenderer::new(&gpu.device, &gpu.queue, gpu.surface_format());
 
         let scene_data = upload::upload_scene(&gpu.device, &gpu.queue, self.scene);
 
