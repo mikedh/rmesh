@@ -45,6 +45,10 @@ use super::{
 use crate::geometry::Geometry;
 use crate::scene::Scene;
 
+/// Maximum squared distance between curve midpoints to consider edges as duplicates.
+/// sqrt(1e-10) ≈ 1e-5, which is ~10μm — tight enough to only match true geometric duplicates.
+const EDGE_MERGE_TOL_SQ: f64 = 1e-10;
+
 /// Find a sub-entity of a given variant inside a complex entity's sub-entity slice.
 ///
 /// Returns `Option<&T>` where `T` is the inner data of the matched `Entity` variant.
@@ -354,6 +358,8 @@ fn convert_manifold_solid_brep<'a>(
     let mut edge_map: HashMap<usize, usize> = HashMap::new();
     let mut curve_map: HashMap<usize, usize> = HashMap::new();
     let mut surface_map: HashMap<usize, usize> = HashMap::new();
+    // Merge edges that share the same vertex pair and curve geometry (different STEP entity IDs)
+    let mut vertex_pair_map: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
 
     // Get the outer shell
     let shell_id = msb.outer;
@@ -374,6 +380,7 @@ fn convert_manifold_solid_brep<'a>(
             &mut edge_map,
             &mut curve_map,
             &mut surface_map,
+            &mut vertex_pair_map,
         ) {
             Ok(face_idx) => {
                 face_indices.push(face_idx);
@@ -402,6 +409,7 @@ fn convert_face<'a>(
     edge_map: &mut HashMap<usize, usize>,
     curve_map: &mut HashMap<usize, usize>,
     surface_map: &mut HashMap<usize, usize>,
+    vertex_pair_map: &mut HashMap<(usize, usize), Vec<usize>>,
 ) -> Result<usize, StepError> {
     let face = match &step.entities[face_id] {
         ap214::Entity::AdvancedFace(f) => f,
@@ -434,7 +442,7 @@ fn convert_face<'a>(
             _ => continue,
         };
 
-        let loop_idx = convert_loop(step, model, loop_id, vertex_map, edge_map, curve_map)?;
+        let loop_idx = convert_loop(step, model, loop_id, vertex_map, edge_map, curve_map, vertex_pair_map)?;
 
         if is_outer && outer_loop_idx.is_none() {
             outer_loop_idx = Some(loop_idx);
@@ -464,6 +472,7 @@ fn convert_loop<'a>(
     vertex_map: &mut HashMap<usize, usize>,
     edge_map: &mut HashMap<usize, usize>,
     curve_map: &mut HashMap<usize, usize>,
+    vertex_pair_map: &mut HashMap<(usize, usize), Vec<usize>>,
 ) -> Result<usize, StepError> {
     let edge_loop = match &step.entities[loop_id] {
         ap214::Entity::EdgeLoop(el) => el,
@@ -487,9 +496,43 @@ fn convert_loop<'a>(
             idx
         };
 
+        // Merge edges with identical vertex pairs AND matching curve geometry
+        // (different STEP entity IDs but same geometric edge)
+        let edge = &model.edges[edge_idx];
+        let vp = (
+            edge.start_vertex.min(edge.end_vertex),
+            edge.start_vertex.max(edge.end_vertex),
+        );
+        let (final_edge_idx, flip) =
+            if let Some(candidates) = vertex_pair_map.get(&vp) {
+                // Check curve midpoints to confirm geometric match
+                let t_mid = (edge.t_start + edge.t_end) / 2.0;
+                let mid = model.curves[edge.curve].evaluate(t_mid);
+                let mut found = None;
+                for &candidate_idx in candidates {
+                    let cand = &model.edges[candidate_idx];
+                    let ct_mid = (cand.t_start + cand.t_end) / 2.0;
+                    let cmid = model.curves[cand.curve].evaluate(ct_mid);
+                    if (mid - cmid).norm_squared() < EDGE_MERGE_TOL_SQ {
+                        let needs_flip = cand.start_vertex != edge.start_vertex;
+                        found = Some((candidate_idx, needs_flip));
+                        break;
+                    }
+                }
+                if let Some((ci, flip)) = found {
+                    (ci, flip)
+                } else {
+                    vertex_pair_map.get_mut(&vp).unwrap().push(edge_idx);
+                    (edge_idx, false)
+                }
+            } else {
+                vertex_pair_map.insert(vp, vec![edge_idx]);
+                (edge_idx, false)
+            };
+
         oriented_edges.push(OrientedEdge {
-            edge: edge_idx,
-            same_sense: oe.orientation,
+            edge: final_edge_idx,
+            same_sense: if flip { !oe.orientation } else { oe.orientation },
         });
     }
 
@@ -2024,6 +2067,11 @@ mod tests {
         use std::io::Write;
         use std::time::Instant;
 
+        struct DefectFaceInfo {
+            surface_kind: &'static str,
+            has_holes: bool,
+        }
+
         struct BodyResult {
             step_faces: usize,
             skipped_faces: usize,
@@ -2033,6 +2081,7 @@ mod tests {
             mesh_triangles: usize,
             mesh_watertight: bool,
             mesh_defect_faces: usize,
+            defect_details: Vec<DefectFaceInfo>,
         }
 
         // Debug mode guard: timings are meaningless and corpus is too large
@@ -2115,6 +2164,9 @@ mod tests {
         let mut total_brep_bad = 0usize;
         let mut total_brep_bad_mesh_ok = 0usize;
         let mut total_defect_faces = 0usize;
+        // Defect face aggregation by surface type: (total, with_holes)
+        let mut defect_by_surface: std::collections::HashMap<&'static str, (usize, usize)> =
+            std::collections::HashMap::new();
         let mut total_parse_ms = 0.0f64;
         let mut total_convert_ms = 0.0f64;
         let mut total_tess_ms = 0.0f64;
@@ -2177,11 +2229,24 @@ mod tests {
                         let mesh_watertight = mesh.is_watertight();
 
                         // Compute defect faces only for tess_bug cases
-                        let mesh_defect_faces = if brep_watertight && !mesh_watertight {
-                            mesh.non_watertight_face_indices().len()
-                        } else {
-                            0
-                        };
+                        let (mesh_defect_faces, defect_details) =
+                            if brep_watertight && !mesh_watertight {
+                                let bad = mesh.non_watertight_face_indices();
+                                let details: Vec<DefectFaceInfo> = bad
+                                    .iter()
+                                    .map(|&fi| {
+                                        let face = &brep.faces[fi];
+                                        DefectFaceInfo {
+                                            surface_kind: brep.face_surfaces[face.surface]
+                                                .kind_name(),
+                                            has_holes: !face.inner_loops.is_empty(),
+                                        }
+                                    })
+                                    .collect();
+                                (bad.len(), details)
+                            } else {
+                                (0, Vec::new())
+                            };
 
                         body_results.push(BodyResult {
                             step_faces,
@@ -2192,6 +2257,7 @@ mod tests {
                             mesh_triangles,
                             mesh_watertight,
                             mesh_defect_faces,
+                            defect_details,
                         });
                     }
                     let convert_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -2305,6 +2371,15 @@ mod tests {
             total_brep_bad += file_brep_bad;
             total_brep_bad_mesh_ok += file_brep_bad_mesh_ok;
             total_defect_faces += file_defect_faces;
+            for br in &body_results {
+                for d in &br.defect_details {
+                    let entry = defect_by_surface.entry(d.surface_kind).or_insert((0, 0));
+                    entry.0 += 1;
+                    if d.has_holes {
+                        entry.1 += 1;
+                    }
+                }
+            }
             total_parse_ms += parse_ms;
             total_convert_ms += convert_ms;
             total_tess_ms += tess_ms;
@@ -2536,6 +2611,20 @@ mod tests {
             total_defect_faces
         );
         println!();
+        if !defect_by_surface.is_empty() {
+            println!("  === Defect Face Summary ===");
+            println!("  {:12} {:>8} {:>10} {:>10}", "Surface", "Defects", "w/ holes", "w/o holes");
+            println!("  {}", "-".repeat(44));
+            let mut surface_entries: Vec<_> = defect_by_surface.iter().collect();
+            surface_entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+            for &(&kind, &(total, with_holes)) in &surface_entries {
+                println!(
+                    "  {:12} {:>8} {:>10} {:>10}",
+                    kind, total, with_holes, total - with_holes
+                );
+            }
+            println!();
+        }
         println!(
             "  Time:           {:.1}s ({:.0} files/sec)",
             total_elapsed,

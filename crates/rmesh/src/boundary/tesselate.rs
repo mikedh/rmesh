@@ -82,6 +82,72 @@ fn canonical_edge(a: usize, b: usize) -> (usize, usize) {
     (a.min(b), a.max(b))
 }
 
+/// Validate a face triangulation: no degenerate triangles, correct edge
+/// multiplicities, and all boundary edges present in the triangulation.
+#[cfg(test)]
+fn validate_triangulation(
+    triangles: &[[usize; 3]],
+    local_to_pool: &[usize],
+    boundary_edges: &HashSet<(usize, usize)>,
+    face_idx: usize,
+    phase: &str,
+    skip_self_loops: bool,
+) {
+    // No degenerate triangles (all 3 pool indices must be distinct)
+    for tri in triangles {
+        let pa = local_to_pool[tri[0]];
+        let pb = local_to_pool[tri[1]];
+        let pc = local_to_pool[tri[2]];
+        assert!(
+            pa != pb && pb != pc && pa != pc,
+            "face {face_idx} {phase}: degenerate triangle pool=[{pa},{pb},{pc}]",
+        );
+    }
+
+    // Edge multiplicity checks
+    let mut edge_count: HashMap<(usize, usize), usize> = HashMap::new();
+    for tri in triangles {
+        for &[a, b] in &[[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]] {
+            let key = canonical_edge(local_to_pool[a], local_to_pool[b]);
+            *edge_count.entry(key).or_default() += 1;
+        }
+    }
+
+    let pool_boundary: HashSet<(usize, usize)> = boundary_edges
+        .iter()
+        .map(|&(a, b)| canonical_edge(local_to_pool[a], local_to_pool[b]))
+        .collect();
+
+    for (&key, &count) in &edge_count {
+        let is_boundary = pool_boundary.contains(&key);
+        if is_boundary {
+            assert!(
+                count == 1,
+                "face {face_idx} {phase}: boundary pool edge ({},{}) in {count} tris (expected 1)",
+                key.0, key.1
+            );
+        } else {
+            assert!(
+                count == 2,
+                "face {face_idx} {phase}: interior pool edge ({},{}) in {count} tris (expected 2)",
+                key.0, key.1
+            );
+        }
+    }
+
+    // All boundary edges must appear in the triangulation
+    for &pool_edge in &pool_boundary {
+        if skip_self_loops && pool_edge.0 == pool_edge.1 {
+            continue;
+        }
+        assert!(
+            edge_count.contains_key(&pool_edge),
+            "face {face_idx} {phase}: boundary pool edge ({},{}) missing from triangulation",
+            pool_edge.0, pool_edge.1
+        );
+    }
+}
+
 /// Build the set of expected contour edges from closed contour index lists.
 fn contour_edge_set(contours: &[Vec<usize>]) -> HashSet<(usize, usize)> {
     let cap: usize = contours.iter().map(|c| c.len().saturating_sub(1)).sum();
@@ -103,6 +169,17 @@ fn contours_complete_with(triangles: &[[usize; 3]], expected: &HashSet<(usize, u
         tri_edges.insert(canonical_edge(tri[2], tri[0]));
     }
     expected.iter().all(|e| tri_edges.contains(e))
+}
+
+/// Count how many expected contour edges appear in the triangulation.
+fn count_boundary_edges(triangles: &[[usize; 3]], expected: &HashSet<(usize, usize)>) -> usize {
+    let mut tri_edges: HashSet<(usize, usize)> = HashSet::new();
+    for tri in triangles {
+        tri_edges.insert(canonical_edge(tri[0], tri[1]));
+        tri_edges.insert(canonical_edge(tri[1], tri[2]));
+        tri_edges.insert(canonical_edge(tri[2], tri[0]));
+    }
+    expected.iter().filter(|e| tri_edges.contains(e)).count()
 }
 
 /// Fan triangulation: connect every contour edge to a central vertex.
@@ -193,6 +270,10 @@ struct FaceTriangulation {
     /// Edge-to-triangle adjacency: canonical edge (min,max) → triangle indices.
     /// Built at Phase 3 start and maintained incrementally during splits.
     edge_tris: HashMap<(usize, usize), Vec<usize>>,
+    /// Which triangulation strategy produced the result.
+    /// 0=uv_cdt, 1=plane_cdt, 2=earcut, 3=best_incomplete, 4=fan
+    #[cfg(test)]
+    diag_strategy: u8,
 }
 
 impl FaceTriangulation {
@@ -771,11 +852,10 @@ fn collect_loop_indices(
     indices
 }
 
-/// Triangulate a face with a 4-strategy fallback chain:
-/// 1. CDT in UV space
-/// 2. CDT in 3D plane projection
-/// 3. Earcut in UV space (loses interior points and edge constraints)
-/// 4. Fan triangulation (wrong for non-convex, last resort)
+/// Triangulate a face with a multi-strategy fallback chain.
+/// Returns (triangles, strategy_code) where strategy codes are:
+/// 0=uv_cdt, 1=plane_cdt, 2=earcut_uv, 3=best_incomplete, 4=fan,
+/// 5=earcut_3d, 6=multi_axis_cdt
 fn triangulate_face_robust_pts(
     pts: &[(f64, f64)],
     contours: &[Vec<usize>],
@@ -783,43 +863,72 @@ fn triangulate_face_robust_pts(
     pool_vertices: &[Point3<f64>],
     new_vertices: &[Point3<f64>],
     sentinel_base: usize,
-) -> Vec<[usize; 3]> {
+) -> (Vec<[usize; 3]>, u8) {
     // Build contour edge set once — invariant across all CDT attempts
     let expected = contour_edge_set(contours);
+
+    // Track the best incomplete result (most boundary edges preserved)
+    let mut best_incomplete: Option<(Vec<[usize; 3]>, usize, u8)> = None;
+    let mut track_best = |result: &[[usize; 3]], strategy: u8, expected: &HashSet<(usize, usize)>| {
+        if result.is_empty() {
+            return;
+        }
+        let count = count_boundary_edges(result, expected);
+        if best_incomplete.as_ref().is_none_or(|(_, best_count, _)| count > *best_count) {
+            best_incomplete = Some((result.to_vec(), count, strategy));
+        }
+    };
 
     // Try 1: CDT in UV space
     if let Ok(tris) = cdt::triangulate_contours(pts, contours) {
         let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
         if contours_complete_with(&result, &expected) {
-            return result;
+            return (result, 0);
+        }
+        track_best(&result, 0, &expected);
+    }
+
+    // Build 3D positions once for plane-based fallbacks
+    let positions: Vec<Point3<f64>> = state
+        .local_to_pool
+        .iter()
+        .map(|&pool_idx| lookup_vertex(pool_idx, pool_vertices, new_vertices, sentinel_base))
+        .collect();
+
+    // Try 2: CDT in best-fit 3D plane projection
+    if positions.len() >= 3 {
+        if let Ok(plane) = Plane::from_points(&positions, true) {
+            let pts_2d: Vec<(f64, f64)> = plane
+                .to_2d(&positions)
+                .into_iter()
+                .map(|p| (p.x, p.y))
+                .collect();
+
+            if let Ok(tris) = cdt::triangulate_contours(&pts_2d, contours) {
+                let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
+                if contours_complete_with(&result, &expected) {
+                    return (result, 1);
+                }
+                track_best(&result, 1, &expected);
+            }
         }
     }
 
-    // Try 2: CDT in 3D plane projection (inlined cdt_plane_fallback)
-    {
-        let n = state.local_to_pool.len();
-        if n >= 3 {
-            let positions: Vec<Point3<f64>> = state
-                .local_to_pool
-                .iter()
-                .map(|&pool_idx| {
-                    lookup_vertex(pool_idx, pool_vertices, new_vertices, sentinel_base)
-                })
-                .collect();
-
-            if let Ok(plane) = Plane::from_points(&positions, true) {
-                let pts_2d: Vec<(f64, f64)> = plane
-                    .to_2d(&positions)
-                    .into_iter()
-                    .map(|p| (p.x, p.y))
-                    .collect();
-
-                if let Ok(tris) = cdt::triangulate_contours(&pts_2d, contours) {
-                    let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
-                    if contours_complete_with(&result, &expected) {
-                        return result;
-                    }
+    // Try 2b: CDT in axis-aligned plane projections (XY, XZ, YZ)
+    if positions.len() >= 3 {
+        let projections: [(fn(&Point3<f64>) -> (f64, f64), &str); 3] = [
+            (|p| (p.x, p.y), "XY"),
+            (|p| (p.x, p.z), "XZ"),
+            (|p| (p.y, p.z), "YZ"),
+        ];
+        for (proj_fn, _) in &projections {
+            let pts_2d: Vec<(f64, f64)> = positions.iter().map(proj_fn).collect();
+            if let Ok(tris) = cdt::triangulate_contours(&pts_2d, contours) {
+                let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
+                if contours_complete_with(&result, &expected) {
+                    return (result, 6);
                 }
+                track_best(&result, 6, &expected);
             }
         }
     }
@@ -835,12 +944,39 @@ fn triangulate_face_robust_pts(
         let mut tri = Triangulator::new();
         let result = tri.triangulate_2d(&exterior, &interiors, &vertices, false);
         if !result.is_empty() && contours_complete_with(&result, &expected) {
-            return result;
+            return (result, 2);
+        }
+        track_best(&result, 2, &expected);
+    }
+
+    // Try 3b: Earcut in 3D plane projection
+    if positions.len() >= 3 {
+        let exterior: Vec<usize> = contours[0][..contours[0].len() - 1].to_vec();
+        let interiors: Vec<Vec<usize>> = contours[1..]
+            .iter()
+            .map(|c| c[..c.len() - 1].to_vec())
+            .collect();
+        let mut tri = Triangulator::new();
+        if let Ok(result) = tri.triangulate_3d(&exterior, &interiors, &positions, false, false) {
+            if !result.is_empty() && contours_complete_with(&result, &expected) {
+                return (result, 5);
+            }
+            track_best(&result, 5, &expected);
         }
     }
 
-    // Try 4: Fan triangulation (always produces something, wrong for non-convex)
-    fan_triangulate(contours)
+    // Try 4: Fan triangulation
+    let fan = fan_triangulate(contours);
+    let fan_count = count_boundary_edges(&fan, &expected);
+
+    // Return best incomplete if it preserves more boundary edges than fan
+    if let Some((best_tris, best_count, _)) = best_incomplete {
+        if best_count > fan_count {
+            return (best_tris, 3);
+        }
+    }
+
+    (fan, 4)
 }
 
 /// Tessellate a single face independently. New vertices are stored in a local
@@ -941,7 +1077,7 @@ fn tessellate_face(
     let (dedup_pts, dedup_contours, dedup_map) = dedup_by_pool(&state, &contours);
 
     // 3. CDT triangulation
-    let dedup_tris = triangulate_face_robust_pts(
+    let (dedup_tris, _strategy) = triangulate_face_robust_pts(
         &dedup_pts,
         &dedup_contours,
         &state,
@@ -950,11 +1086,27 @@ fn tessellate_face(
         sentinel_base,
     );
 
+    #[cfg(test)]
+    {
+        state.diag_strategy = _strategy;
+    }
+
     // Map dedup triangles back to original local indices
     state.triangles = dedup_tris
         .into_iter()
         .map(|[a, b, c]| [dedup_map[a], dedup_map[b], dedup_map[c]])
         .collect();
+
+    // Strict CDT validation (test-only)
+    #[cfg(test)]
+    validate_triangulation(
+        &state.triangles,
+        &state.local_to_pool,
+        &state.boundary_edges,
+        face_idx,
+        "CDT",
+        false,
+    );
 
     // 4. Chord error pass
     if !surface.is_planar() && !state.triangles.is_empty() {
@@ -966,6 +1118,17 @@ fn tessellate_face(
             effective_tolerance,
         );
     }
+
+    // Post-chord-refinement validation (test-only)
+    #[cfg(test)]
+    validate_triangulation(
+        &state.triangles,
+        &state.local_to_pool,
+        &state.boundary_edges,
+        face_idx,
+        "POST-CHORD",
+        true,
+    );
 
     (state, new_vertices)
 }
@@ -1358,6 +1521,18 @@ impl<'a> ShellTessellator<'a> {
                         state.local_to_pool[tri[1]],
                     ]
                 };
+                // Assembly validation: no degenerate triangles
+                #[cfg(test)]
+                {
+                    assert!(
+                        pool_tri[0] != pool_tri[1]
+                            && pool_tri[1] != pool_tri[2]
+                            && pool_tri[0] != pool_tri[2],
+                        "face {face_idx} ASSEMBLY: degenerate pool tri [{},{},{}] from local [{},{},{}]",
+                        pool_tri[0], pool_tri[1], pool_tri[2],
+                        tri[0], tri[1], tri[2]
+                    );
+                }
                 self.triangles.push(pool_tri);
                 self.face_indices.push(face_idx);
             }
@@ -1375,6 +1550,62 @@ impl<'a> ShellTessellator<'a> {
 
         // Phase 1: Discretize all edges globally
         self.phase1_discretize_all_edges();
+
+        // Phase 1 validation (test-only)
+        #[cfg(test)]
+        {
+            // Every BREP edge shared by 2 faces: both faces reference it
+            for (&edge_idx, disc) in &self.edge_discretization {
+                assert!(
+                    disc.pool_indices.len() >= 2,
+                    "edge {edge_idx}: discretization has {} vertices (need >= 2)",
+                    disc.pool_indices.len()
+                );
+                // Check for duplicate consecutive pool indices
+                for w in disc.pool_indices.windows(2) {
+                    assert!(
+                        w[0] != w[1],
+                        "edge {edge_idx}: consecutive duplicate pool index {}",
+                        w[0]
+                    );
+                }
+            }
+
+            // Every shared BREP edge has exactly 2 face uses
+            for (&edge_idx, uses) in &self.edge_adjacency {
+                assert!(
+                    uses.len() <= 2,
+                    "edge {edge_idx}: has {} face uses (max 2 for manifold)",
+                    uses.len()
+                );
+            }
+
+            // collect_loop_indices must produce consistent loops
+            for (face_idx, face) in self.model.faces.iter().enumerate() {
+                let outer_loop = &self.model.loops[face.outer_loop];
+                let indices = collect_loop_indices(&self.edge_discretization, outer_loop);
+                assert!(
+                    indices.len() >= 3,
+                    "face {face_idx}: outer loop has {} indices (need >= 3)",
+                    indices.len()
+                );
+                // No consecutive duplicate pool indices
+                for w in indices.windows(2) {
+                    assert!(
+                        w[0] != w[1],
+                        "face {face_idx}: outer loop consecutive dup pool {}",
+                        w[0]
+                    );
+                }
+                // First != last (not closed)
+                assert!(
+                    indices.first() != indices.last(),
+                    "face {face_idx}: outer loop is still closed after dedup ({} == {})",
+                    indices.first().unwrap(),
+                    indices.last().unwrap()
+                );
+            }
+        }
 
         // Phase 1.5: Refine outer contours where inner loops escape the outer polygon
         self.phase1_5_refine_outer_contours();
@@ -1399,28 +1630,108 @@ impl<'a> ShellTessellator<'a> {
             .collect();
 
         // Serial merge: rewrite sentinel indices to real pool indices
-        for (mut state, new_verts) in face_results {
+        for (face_idx, (mut state, new_verts)) in face_results.into_iter().enumerate() {
             let actual_base = self.vertices.len();
             for idx in &mut state.local_to_pool {
                 if *idx >= sentinel_base {
                     *idx = actual_base + (*idx - sentinel_base);
                 }
             }
+
+            // Post-merge validation: all pool indices should be valid
+            #[cfg(test)]
+            {
+                let new_pool_size = self.vertices.len() + new_verts.len();
+                for (local_idx, &pool_idx) in state.local_to_pool.iter().enumerate() {
+                    assert!(
+                        pool_idx < new_pool_size,
+                        "face {face_idx}: local {local_idx} has pool {pool_idx} >= pool size {new_pool_size}"
+                    );
+                }
+                // Check no sentinel indices remain
+                for &pool_idx in &state.local_to_pool {
+                    assert!(
+                        pool_idx < sentinel_base,
+                        "face {face_idx}: unrewritten sentinel pool index {pool_idx}"
+                    );
+                }
+            }
+
             self.vertices.extend(new_verts);
             self.face_states.push(state);
         }
+        // Cross-face boundary edge validation (test-only)
+        #[cfg(test)]
+        {
+            // For each face, collect pool edge → count within that face
+            let face_pool_edge_counts: Vec<HashMap<(usize, usize), usize>> = self
+                .face_states
+                .iter()
+                .map(|state| {
+                    let mut counts: HashMap<(usize, usize), usize> = HashMap::new();
+                    for tri in &state.triangles {
+                        for &[a, b] in &[[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]] {
+                            let key =
+                                canonical_edge(state.local_to_pool[a], state.local_to_pool[b]);
+                            *counts.entry(key).or_default() += 1;
+                        }
+                    }
+                    counts
+                })
+                .collect();
+
+            // For each BREP edge shared between two faces, check that all
+            // pool edge segments appear in BOTH face triangulations
+            let mut mismatch_count = 0usize;
+            for (&edge_idx, disc) in &self.edge_discretization {
+                let Some(uses) = self.edge_adjacency.get(&edge_idx) else {
+                    continue;
+                };
+                if uses.len() != 2 {
+                    continue; // skip non-manifold or boundary BREP edges
+                }
+                let face_a = uses[0].face_idx;
+                let face_b = uses[1].face_idx;
+                for w in disc.pool_indices.windows(2) {
+                    let pool_edge = canonical_edge(w[0], w[1]);
+                    let in_a = face_pool_edge_counts[face_a].contains_key(&pool_edge);
+                    let in_b = face_pool_edge_counts[face_b].contains_key(&pool_edge);
+                    if in_a != in_b {
+                        eprintln!(
+                            "    MISMATCH: brep edge {edge_idx} pool ({},{}) face {face_a}={in_a} face {face_b}={in_b}",
+                            pool_edge.0, pool_edge.1
+                        );
+                        mismatch_count += 1;
+                    }
+                }
+            }
+            assert_eq!(mismatch_count, 0, "{mismatch_count} cross-face edge mismatches detected");
+        }
+
         let _t3 = std::time::Instant::now();
 
         // Phase 3: Final assembly
         self.phase3_final_assembly();
 
         #[cfg(test)]
-        eprintln!(
-            "    tess phases: edge={:.1}ms bubble+CDT={:.1}ms assemble={:.1}ms",
-            (_t2 - _t1).as_secs_f64() * 1e3,
-            (_t3 - _t2).as_secs_f64() * 1e3,
-            (std::time::Instant::now() - _t3).as_secs_f64() * 1e3,
-        );
+        {
+            eprintln!(
+                "    tess phases: edge={:.1}ms bubble+CDT={:.1}ms assemble={:.1}ms",
+                (_t2 - _t1).as_secs_f64() * 1e3,
+                (_t3 - _t2).as_secs_f64() * 1e3,
+                (std::time::Instant::now() - _t3).as_secs_f64() * 1e3,
+            );
+            let mut strat_counts = [0usize; 7];
+            for s in &self.face_states {
+                let idx = (s.diag_strategy as usize).min(strat_counts.len() - 1);
+                strat_counts[idx] += 1;
+            }
+            eprintln!(
+                "    strategy: uv_cdt={} plane_cdt={} earcut_uv={} best={} fan={} earcut_3d={} multi_axis={}",
+                strat_counts[0], strat_counts[1], strat_counts[2],
+                strat_counts[3], strat_counts[4], strat_counts[5], strat_counts[6],
+            );
+        }
 
         // Build Trimesh with attributes
         let mut attrs_vertex = Attributes::default();
@@ -2562,54 +2873,30 @@ mod tests {
         use crate::serialize::RmeshSerializable;
         let params = TesselationParams::default();
         let mut pass = 0;
+        let mut brep_wt = 0;
         let total = paths.len();
         for path in &paths {
             let bytes = std::fs::read(path).unwrap();
             let model = BrepModel::from_bytes(&bytes).unwrap();
+            let brep_watertight = model.is_watertight();
+            if brep_watertight {
+                brep_wt += 1;
+            }
             let mesh = model.tesselate(&params);
             let name = path.file_stem().unwrap().to_string_lossy();
-            if mesh.is_watertight() {
+            if mesh.is_watertight() || !brep_watertight {
                 pass += 1;
             } else {
-                let bad_brep = mesh.non_watertight_face_indices();
+                // Real tessellation bug: BREP is watertight but mesh is broken
                 eprintln!(
-                    "  FAIL: {} ({} faces, {} tris)",
+                    "  TESS BUG: {} ({} faces, {} tris)",
                     name,
                     model.faces.len(),
                     mesh.faces.len(),
                 );
-                // Print surface type for each face.
-                for (i, face) in model.faces.iter().enumerate() {
-                    let surface_kind = model.face_surfaces[face.surface].kind_name();
-                    eprintln!("    face {i}: {surface_kind}");
-                }
-                eprintln!("    bad faces: {:?}", bad_brep);
-                // Find edges shared between bad face pairs.
-                let adjacency = model.build_edge_adjacency();
-                let mut shared = Vec::new();
-                for (&edge_idx, uses) in &adjacency {
-                    let bad_faces_on_edge: Vec<usize> = uses
-                        .iter()
-                        .filter(|u| bad_brep.contains(&u.face_idx))
-                        .map(|u| u.face_idx)
-                        .collect();
-                    if bad_faces_on_edge.len() >= 2 {
-                        let curve_kind = model.curves[model.edges[edge_idx].curve].kind_name();
-                        shared.push((edge_idx, curve_kind));
-                    }
-                }
-                shared.sort_by_key(|&(idx, _)| idx);
-                if !shared.is_empty() {
-                    let desc: Vec<String> = shared
-                        .iter()
-                        .map(|(idx, kind)| format!("edge {idx} ({kind})"))
-                        .collect();
-                    eprintln!("    shared edges between bad faces: [{}]", desc.join(", "));
-                }
             }
         }
-        eprintln!("  watertight regressions: {pass}/{total}");
-        // TODO: uncomment once tessellation bugs are fixed
-        // assert_eq!(pass, total, "watertight regressions: {pass}/{total}");
+        eprintln!("  watertight regressions: {pass}/{total} (brep_wt: {brep_wt}/{total})");
+        assert_eq!(pass, total, "watertight regressions: {pass}/{total}");
     }
 }
