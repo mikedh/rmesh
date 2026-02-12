@@ -10,8 +10,9 @@ use std::io::Read;
 use std::path::Path;
 
 use xsd_parser::{
+    Config, IdentType,
     config::{NamespaceIdent, Schema},
-    generate, Config, IdentType,
+    generate,
 };
 
 const COLLADA_NS: &[u8] = b"http://www.collada.org/2005/11/COLLADASchema";
@@ -105,19 +106,18 @@ fn postprocess(code: &str) -> String {
         // Pattern: #[serde(..., rename = "foo")] followed by `pub foo: ...`
         if let Some(rename) = extract_serde_rename(&lines[i]) {
             // Look ahead for the field name
-            if i + 1 < lines.len() {
-                if let Some(field) = extract_field_name(&lines[i + 1]) {
-                    if rename == field {
-                        // Redundant rename — strip it or simplify the serde attr
-                        let simplified = remove_rename_from_serde(&lines[i]);
-                        if let Some(s) = simplified {
-                            result.push(s);
-                        }
-                        // else: entire serde attr was just the rename, skip it
-                        i += 1;
-                        continue;
-                    }
+            if i + 1 < lines.len()
+                && let Some(field) = extract_field_name(&lines[i + 1])
+                && rename == field
+            {
+                // Redundant rename — strip it or simplify the serde attr
+                let simplified = remove_rename_from_serde(&lines[i]);
+                if let Some(s) = simplified {
+                    result.push(s);
                 }
+                // else: entire serde attr was just the rename, skip it
+                i += 1;
+                continue;
             }
         }
         result.push(lines[i].clone());
@@ -199,16 +199,16 @@ fn flatten_value_structs(file: &mut syn::File) {
     let mut merges: Vec<(usize, String, usize)> = Vec::new();
 
     for (i, item) in file.items.iter().enumerate() {
-        if let syn::Item::Struct(s) = item {
-            if let syn::Fields::Named(ref fields) = s.fields {
-                for (fi, field) in fields.named.iter().enumerate() {
-                    if has_serde_rename(field, "$value") {
-                        // Get the type name of the content field
-                        if let Some(type_name) = extract_type_ident(&field.ty) {
-                            if struct_map.contains_key(&type_name) {
-                                merges.push((i, type_name, fi));
-                            }
-                        }
+        if let syn::Item::Struct(s) = item
+            && let syn::Fields::Named(ref fields) = s.fields
+        {
+            for (fi, field) in fields.named.iter().enumerate() {
+                if has_serde_rename(field, "$value") {
+                    // Get the type name of the content field
+                    if let Some(type_name) = extract_type_ident(&field.ty)
+                        && struct_map.contains_key(&type_name)
+                    {
+                        merges.push((i, type_name, fi));
                     }
                 }
             }
@@ -238,23 +238,23 @@ fn flatten_value_structs(file: &mut syn::File) {
         };
 
         // Modify parent struct: remove $value field, add content fields
-        if let syn::Item::Struct(ref mut s) = file.items[*parent_idx] {
-            if let syn::Fields::Named(ref mut fields) = s.fields {
-                // Rebuild named fields: keep all except the $value field, then add content fields
-                let kept: Vec<syn::Field> = fields
-                    .named
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| i != value_field_idx)
-                    .map(|(_, f)| f.clone())
-                    .collect();
-                fields.named.clear();
-                for field in kept {
-                    fields.named.push(field);
-                }
-                for field in content_fields {
-                    fields.named.push(field);
-                }
+        if let syn::Item::Struct(ref mut s) = file.items[*parent_idx]
+            && let syn::Fields::Named(ref mut fields) = s.fields
+        {
+            // Rebuild named fields: keep all except the $value field, then add content fields
+            let kept: Vec<syn::Field> = fields
+                .named
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i != value_field_idx)
+                .map(|(_, f)| f.clone())
+                .collect();
+            fields.named.clear();
+            for field in kept {
+                fields.named.push(field);
+            }
+            for field in content_fields {
+                fields.named.push(field);
             }
         }
 
@@ -354,35 +354,32 @@ fn strip_fx_bloat(file: &mut syn::File) {
                     return false;
                 }
                 // Also strip if the target type is FX bloat
-                if let syn::Type::Path(p) = &*t.ty {
-                    if let Some(seg) = p.path.segments.last() {
-                        if is_fx_bloat(&seg.ident.to_string()) {
-                            return false;
-                        }
-                    }
+                if let syn::Type::Path(p) = &*t.ty
+                    && let Some(seg) = p.path.segments.last()
+                    && is_fx_bloat(&seg.ident.to_string())
+                {
+                    return false;
                 }
                 return true;
             }
             syn::Item::Impl(i) => {
                 // Check self_ty (e.g., impl Deref for Bool2Type)
-                if let syn::Type::Path(p) = &*i.self_ty {
-                    if let Some(seg) = p.path.segments.last() {
-                        if is_fx_bloat(&seg.ident.to_string()) {
-                            return false;
-                        }
-                    }
+                if let syn::Type::Path(p) = &*i.self_ty
+                    && let Some(seg) = p.path.segments.last()
+                    && is_fx_bloat(&seg.ident.to_string())
+                {
+                    return false;
                 }
                 // Check trait type params (e.g., impl From<Bool2Type> for Vec<bool>)
                 if let Some((_, ref path, _)) = i.trait_ {
                     for seg in &path.segments {
                         if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
                             for arg in &args.args {
-                                if let syn::GenericArgument::Type(syn::Type::Path(p)) = arg {
-                                    if let Some(inner) = p.path.segments.last() {
-                                        if is_fx_bloat(&inner.ident.to_string()) {
-                                            return false;
-                                        }
-                                    }
+                                if let syn::GenericArgument::Type(syn::Type::Path(p)) = arg
+                                    && let Some(inner) = p.path.segments.last()
+                                    && is_fx_bloat(&inner.ident.to_string())
+                                {
+                                    return false;
                                 }
                             }
                         }
@@ -412,11 +409,8 @@ fn simplify_structs(file: &mut syn::File) {
                             .named
                             .iter()
                             .filter(|f| {
-                                let fname = f
-                                    .ident
-                                    .as_ref()
-                                    .map(|i| i.to_string())
-                                    .unwrap_or_default();
+                                let fname =
+                                    f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                                 fname != "setparam" && fname != "technique_hint"
                             })
                             .cloned()
@@ -458,16 +452,16 @@ fn simplify_structs(file: &mut syn::File) {
 fn add_skip_serializing_if(file: &mut syn::File) {
     let mut count = 0;
     for item in &mut file.items {
-        if let syn::Item::Struct(s) = item {
-            if let syn::Fields::Named(ref mut fields) = s.fields {
-                for field in fields.named.iter_mut() {
-                    if is_option_type(&field.ty) && !has_skip_serializing_if(field) {
-                        let attr: syn::Attribute = syn::parse_quote!(
-                            #[serde(skip_serializing_if = "Option::is_none")]
-                        );
-                        field.attrs.push(attr);
-                        count += 1;
-                    }
+        if let syn::Item::Struct(s) = item
+            && let syn::Fields::Named(ref mut fields) = s.fields
+        {
+            for field in fields.named.iter_mut() {
+                if is_option_type(&field.ty) && !has_skip_serializing_if(field) {
+                    let attr: syn::Attribute = syn::parse_quote!(
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                    );
+                    field.attrs.push(attr);
+                    count += 1;
                 }
             }
         }
@@ -477,10 +471,10 @@ fn add_skip_serializing_if(file: &mut syn::File) {
 
 /// Check if a type is `Option<T>`.
 fn is_option_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(p) = ty {
-        if let Some(seg) = p.path.segments.last() {
-            return seg.ident == "Option";
-        }
+    if let syn::Type::Path(p) = ty
+        && let Some(seg) = p.path.segments.last()
+    {
+        return seg.ident == "Option";
     }
     false
 }
@@ -546,12 +540,11 @@ fn deduplicate_and_clean(code: &str) -> String {
                 continue;
             }
             syn::Item::Impl(i) => {
-                if let syn::Type::Path(p) = &*i.self_ty {
-                    if let Some(seg) = p.path.segments.last() {
-                        if preamble_types.contains(seg.ident.to_string().as_str()) {
-                            continue;
-                        }
-                    }
+                if let syn::Type::Path(p) = &*i.self_ty
+                    && let Some(seg) = p.path.segments.last()
+                    && preamble_types.contains(seg.ident.to_string().as_str())
+                {
+                    continue;
                 }
                 // Also skip TryFrom impls for preamble types
                 if let Some((_, ref _trait_path, _)) = i.trait_ {
@@ -944,7 +937,7 @@ pub struct InstanceVisualScene {
 }
 "#;
 
-const POSTAMBLE: &str = r#"
+const POSTAMBLE: &str = r"
 // ── Accessor helpers for content enums ──
 
 impl MeshElementType {
@@ -1084,4 +1077,4 @@ impl PolygonsElementType {
         })
     }
 }
-"#;
+";

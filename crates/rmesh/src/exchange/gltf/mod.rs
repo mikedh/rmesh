@@ -8,6 +8,11 @@ use anyhow::{Context, Result, bail};
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3, Vector4};
 use rayon::prelude::*;
 
+use self::schema::{
+    self as gltf_2, AccessorType, COMPONENT_U8, COMPONENT_U16, COMPONENT_U32, CameraType,
+    GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GL_TRIANGLES, GlTf, GltfAlphaMode, GltfAnimationPath,
+    GltfIndex, GltfInterpolation, GltfLightType, KhrLightsPunctual,
+};
 use crate::attributes::{AlphaMode, Grouping, GroupingKind, Material, PBRMaterial, UNSET};
 use crate::boundary::Surface;
 use crate::geometry::Geometry;
@@ -17,11 +22,6 @@ use crate::resolvers::Resolver;
 use crate::scene::{
     Animation, AnimationChannel, AnimationPath, AnimationSampler, Camera, CameraProjection,
     Interpolation, Light, LightType, Scene, SceneGraph, SceneNode, SceneNodeKind,
-};
-use self::schema::{
-    self as gltf_2, AccessorType, CameraType, GltfAlphaMode, GltfAnimationPath,
-    GltfInterpolation, GltfLightType, COMPONENT_U8, COMPONENT_U16, COMPONENT_U32,
-    GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GL_TRIANGLES, GlTf, GltfIndex, KhrLightsPunctual,
 };
 
 use self::extensions::ExtensionRegistry;
@@ -167,6 +167,7 @@ impl GltfLoader {
     }
 
     /// Get raw bytes for a buffer view.
+    #[allow(clippy::cast_possible_truncation)]
     fn get_buffer_view_data(&self, buffer_view_index: usize) -> Option<&[u8]> {
         let buffer_view = self.header.buffer_views.get(buffer_view_index)?;
         let buffer = self.buffers.get(buffer_view.buffer as usize)?;
@@ -183,6 +184,7 @@ impl GltfLoader {
     }
 
     /// Load an image by index, returning a LazyImage containing raw bytes.
+    #[allow(clippy::cast_possible_truncation)]
     fn load_image(&self, image_index: usize) -> Option<LazyImage> {
         let image = self.header.images.get(image_index)?;
 
@@ -206,6 +208,7 @@ impl GltfLoader {
     }
 
     /// Load a texture by index, resolving through the texture -> image indirection.
+    #[allow(clippy::cast_possible_truncation)]
     fn load_texture(&self, texture_index: usize) -> Option<LazyImage> {
         let texture = self.header.textures.get(texture_index)?;
 
@@ -215,6 +218,7 @@ impl GltfLoader {
     }
 
     /// Convert the loaded GLTF to a Scene.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn to_scene(&self) -> Result<Scene> {
         let mut scene = Scene::new();
 
@@ -438,6 +442,7 @@ impl GltfLoader {
     }
 
     /// Load a single mesh primitive.
+    #[allow(clippy::cast_possible_truncation)]
     fn load_primitive(
         &self,
         primitive: &gltf_2::MeshPrimitive,
@@ -611,6 +616,7 @@ impl GltfLoader {
     }
 
     /// Resolve an accessor to buffer data and metadata.
+    #[allow(clippy::cast_possible_truncation)]
     fn resolve_accessor(
         &self,
         index: GltfIndex,
@@ -623,10 +629,10 @@ impl GltfLoader {
             .get(index)
             .context("Invalid accessor index")?;
 
-        if let Some(expected) = expected_type {
-            if &accessor.type_ != expected {
-                bail!("Expected {:?} accessor, got {:?}", expected, accessor.type_);
-            }
+        if let Some(expected) = expected_type
+            && &accessor.type_ != expected
+        {
+            bail!("Expected {:?} accessor, got {:?}", expected, accessor.type_);
         }
 
         let buffer_view_idx = accessor
@@ -764,11 +770,7 @@ impl GltfLoader {
             CameraProjection::default()
         };
 
-        let name = gltf_cam
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = gltf_cam.name.as_deref().unwrap_or("").to_string();
 
         Camera { name, projection }
     }
@@ -794,11 +796,7 @@ impl GltfLoader {
             GltfLightType::Point => LightType::Point,
         };
 
-        let name = gltf_light
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = gltf_light.name.as_deref().unwrap_or("").to_string();
 
         Light {
             name,
@@ -810,6 +808,7 @@ impl GltfLoader {
     }
 
     /// Build the scene graph from GLTF nodes.
+    #[allow(clippy::cast_possible_truncation)]
     fn build_scene_graph(&self) -> SceneGraph {
         let mut graph = SceneGraph::new();
 
@@ -831,11 +830,7 @@ impl GltfLoader {
                 (SceneNodeKind::Custom, vec![])
             };
 
-            let name = gltf_node
-                .name
-                .as_deref()
-                .unwrap_or("")
-                .to_string();
+            let name = gltf_node.name.as_deref().unwrap_or("").to_string();
 
             let children: Vec<usize> = gltf_node
                 .children
@@ -868,11 +863,7 @@ impl GltfLoader {
                 if nodes_usize.len() == 1 {
                     graph.root = nodes_usize[0];
                 } else {
-                    let scene_name = scene
-                        .name
-                        .as_deref()
-                        .unwrap_or("root")
-                        .to_string();
+                    let scene_name = scene.name.as_deref().unwrap_or("root").to_string();
                     let root = SceneNode {
                         name: scene_name,
                         children: nodes_usize,
@@ -942,6 +933,7 @@ impl GltfLoader {
     }
 
     /// Convert a GLTF material to our Material type.
+    #[allow(clippy::cast_possible_truncation)]
     fn convert_material(&self, mat: &gltf_2::Material) -> Material {
         let pbr = mat.pbr_metallic_roughness.as_ref();
 
@@ -961,11 +953,7 @@ impl GltfLoader {
         };
 
         // Get material name
-        let name = mat
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = mat.name.as_deref().unwrap_or("").to_string();
 
         Material::PBR(Box::new(PBRMaterial {
             name,
@@ -1008,6 +996,7 @@ impl GltfLoader {
     }
 
     /// Convert a GLTF animation.
+    #[allow(clippy::cast_possible_truncation)]
     fn convert_animation(&self, gltf_anim: &gltf_2::GltfAnimation) -> Result<Animation> {
         let mut samplers = Vec::new();
         let mut channels = Vec::new();
@@ -1042,7 +1031,10 @@ impl GltfLoader {
                     let flat: Vec<f64> = v.into_iter().map(f64::from).collect();
                     (flat, 1)
                 }
-                _ => bail!("Unsupported animation output type: {:?}", output_accessor.type_),
+                _ => bail!(
+                    "Unsupported animation output type: {:?}",
+                    output_accessor.type_
+                ),
             };
 
             let interpolation = match gltf_sampler.interpolation {
@@ -1079,11 +1071,7 @@ impl GltfLoader {
             });
         }
 
-        let name = gltf_anim
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = gltf_anim.name.as_deref().unwrap_or("").to_string();
 
         Ok(Animation {
             name,

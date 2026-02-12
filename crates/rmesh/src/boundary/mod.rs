@@ -1,5 +1,6 @@
 pub(crate) mod cdt;
 pub mod faces;
+pub(crate) mod hex_grid;
 pub mod step;
 pub mod tesselate;
 pub mod topology;

@@ -14,8 +14,8 @@ use crate::scene::{
 };
 
 use super::schema::{
-    self as gltf_2, AccessorType, CameraType, GltfAlphaMode, GltfAnimationPath,
-    GltfInterpolation, GltfLightType, COMPONENT_F32, COMPONENT_U16, COMPONENT_U32,
+    self as gltf_2, AccessorType, COMPONENT_F32, COMPONENT_U16, COMPONENT_U32, CameraType,
+    GltfAlphaMode, GltfAnimationPath, GltfInterpolation, GltfLightType,
 };
 
 // GLB constants
@@ -203,15 +203,19 @@ pub fn material_from_scene(mat: &Material) -> gltf_2::Material {
 
 // ─── Animation conversion ────────────────────────────────────────────
 
-pub fn animation_from_scene(
-    anim: &Animation,
-    buf: &mut BufferBuilder,
-) -> gltf_2::Animation {
+#[allow(clippy::cast_possible_truncation)]
+pub fn animation_from_scene(anim: &Animation, buf: &mut BufferBuilder) -> gltf_2::Animation {
     let mut gltf_samplers = Vec::new();
     let mut gltf_channels = Vec::new();
 
     for (sampler_idx, sampler) in anim.samplers.iter().enumerate() {
-        let input_idx = buf.add_scalar_f32(&sampler.timestamps.iter().map(|&v| v as f32).collect::<Vec<_>>());
+        let input_idx = buf.add_scalar_f32(
+            &sampler
+                .timestamps
+                .iter()
+                .map(|&v| v as f32)
+                .collect::<Vec<_>>(),
+        );
         let (output_idx, output_type) = match sampler.components {
             3 => {
                 let vecs: Vec<[f32; 3]> = sampler
@@ -286,9 +290,9 @@ pub fn animation_from_scene(
 
 // ─── Scene graph conversion ──────────────────────────────────────────
 
-pub fn scene_graph_from_scene(
+pub fn scene_graph_from_scene<S: std::hash::BuildHasher>(
     graph: &SceneGraph,
-    geom_index_map: &HashMap<usize, usize>,
+    geom_index_map: &HashMap<usize, usize, S>,
 ) -> Vec<gltf_2::Node> {
     graph
         .nodes
@@ -386,9 +390,8 @@ fn decompose_transform(
             nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0),
         ]);
         let rot3 = rot_mat.fixed_view::<3, 3>(0, 0).into_owned();
-        let q = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(
-            rot3,
-        ));
+        let q =
+            UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(rot3));
         let rotation = [q.i, q.j, q.k, q.w]; // glTF order: x,y,z,w
         (identity, translation, rotation, scale)
     } else {
@@ -405,6 +408,12 @@ pub struct BufferBuilder {
     pub buffer_views: Vec<gltf_2::BufferView>,
 }
 
+impl Default for BufferBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BufferBuilder {
     pub fn new() -> Self {
         Self {
@@ -416,7 +425,7 @@ impl BufferBuilder {
 
     /// Align data to 4-byte boundary.
     fn align(&mut self) {
-        while self.data.len() % 4 != 0 {
+        while !self.data.len().is_multiple_of(4) {
             self.data.push(0);
         }
     }
@@ -541,8 +550,9 @@ impl BufferBuilder {
 
     /// Add triangle indices. Auto-selects u16 or u32 based on vertex count.
     /// Returns accessor index.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn add_indices(&mut self, indices: &[usize], max_vertex: usize) -> usize {
-        if max_vertex <= u16::MAX as usize {
+        if u16::try_from(max_vertex).is_ok() {
             let mut bytes = Vec::with_capacity(indices.len() * 2);
             for &i in indices {
                 bytes.extend_from_slice(&(i as u16).to_le_bytes());
@@ -590,12 +600,9 @@ pub fn from_scene(scene: &Scene) -> Result<Vec<u8>> {
             continue;
         };
 
-        if let Some(mesh) = export_trimesh(
-            trimesh,
-            &mut buf,
-            &mut gltf_materials,
-            &mut material_map,
-        ) {
+        if let Some(mesh) =
+            export_trimesh(trimesh, &mut buf, &mut gltf_materials, &mut material_map)
+        {
             geom_index_map.insert(geom_idx, gltf_meshes.len());
             gltf_meshes.push(mesh);
         }
@@ -689,10 +696,11 @@ pub fn from_scene(scene: &Scene) -> Result<Vec<u8>> {
     let json_bytes = serde_json::to_vec(&gltf)?;
 
     // Pack GLB
-    pack_glb(&json_bytes, &buf.data)
+    Ok(pack_glb(&json_bytes, &buf.data))
 }
 
 /// Export a single Trimesh to a glTF Mesh with primitives.
+#[allow(clippy::cast_possible_truncation)]
 fn export_trimesh(
     trimesh: &Trimesh,
     buf: &mut BufferBuilder,
@@ -737,7 +745,9 @@ fn export_trimesh(
     } else {
         // Single primitive with all faces
         let all_faces: Vec<usize> = (0..trimesh.faces.len()).collect();
-        let mat_idx = if !trimesh.materials.is_empty() {
+        let mat_idx = if trimesh.materials.is_empty() {
+            None
+        } else {
             let m = &trimesh.materials[0];
             let name = m.name().to_string();
             Some(*material_map.entry(name.clone()).or_insert_with(|| {
@@ -745,8 +755,6 @@ fn export_trimesh(
                 materials.push(material_from_scene(m));
                 idx
             }))
-        } else {
-            None
         };
         vec![(mat_idx, all_faces)]
     };
@@ -855,7 +863,8 @@ fn export_trimesh(
 }
 
 /// Pack JSON and binary data into GLB format.
-fn pack_glb(json: &[u8], bin: &[u8]) -> Result<Vec<u8>> {
+#[allow(clippy::cast_possible_truncation)]
+fn pack_glb(json: &[u8], bin: &[u8]) -> Vec<u8> {
     // Pad JSON to 4-byte alignment with spaces
     let json_padding = (4 - (json.len() % 4)) % 4;
     let json_chunk_length = json.len() + json_padding;
@@ -880,21 +889,17 @@ fn pack_glb(json: &[u8], bin: &[u8]) -> Result<Vec<u8>> {
     out.extend_from_slice(&(json_chunk_length as u32).to_le_bytes());
     out.extend_from_slice(&GLB_JSON.to_le_bytes());
     out.extend_from_slice(json);
-    for _ in 0..json_padding {
-        out.push(b' ');
-    }
+    out.extend(std::iter::repeat_n(b' ', json_padding));
 
     // BIN chunk
     if has_bin {
         out.extend_from_slice(&(bin_chunk_length as u32).to_le_bytes());
         out.extend_from_slice(&GLB_BIN.to_le_bytes());
         out.extend_from_slice(bin);
-        for _ in 0..bin_padding {
-            out.push(0);
-        }
+        out.extend(std::iter::repeat_n(0u8, bin_padding));
     }
 
-    Ok(out)
+    out
 }
 
 #[cfg(test)]

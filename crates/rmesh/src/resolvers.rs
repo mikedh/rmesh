@@ -85,12 +85,12 @@ impl ZipResolver {
     /// but does not decompress any entries.
     pub fn from_zip_bytes(data: &[u8]) -> Result<Self> {
         let cursor = std::io::Cursor::new(data);
-        let archive =
-            zip::ZipArchive::new(cursor).context("failed to open ZIP archive")?;
+        let archive = zip::ZipArchive::new(cursor).context("failed to open ZIP archive")?;
 
         let mut index = HashMap::new();
         for i in 0..archive.len() {
-            let name = archive.name_for_index(i)
+            let name = archive
+                .name_for_index(i)
                 .context("failed to read ZIP entry name")?;
             // Key by filename only (strip directory prefixes)
             let key = name.rsplit('/').next().unwrap_or(name);
@@ -106,10 +106,10 @@ impl ZipResolver {
     }
 
     /// Decompress a ZIP entry by its index.
+    #[allow(clippy::cast_possible_truncation)]
     fn read_entry(&self, entry_index: usize) -> Result<Vec<u8>> {
         let cursor = std::io::Cursor::new(&self.data);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .context("failed to reopen ZIP archive")?;
+        let mut archive = zip::ZipArchive::new(cursor).context("failed to reopen ZIP archive")?;
         let mut file = archive.by_index(entry_index)?;
         let mut buf = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut buf)?;
@@ -142,14 +142,14 @@ fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) =
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) =
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
+        {
+            result.push(byte);
+            i += 3;
+            continue;
         }
         result.push(bytes[i]);
         i += 1;

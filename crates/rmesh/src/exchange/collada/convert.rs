@@ -41,6 +41,7 @@ impl SourceData<'_> {
 }
 
 /// Read float source data with stride from accessor.
+#[allow(clippy::cast_possible_truncation)]
 fn read_source(source: &schema::SourceElementType) -> Option<SourceData<'_>> {
     let float_array = source.float_array()?;
     let tc = source.technique_common()?;
@@ -105,25 +106,20 @@ fn root_correction(collada: &schema::Collada) -> Option<Matrix4<f64>> {
             schema::UpAxisType::ZUp => {
                 // Rotate -90° around X: (x, y, z) → (x, z, -y)
                 Some(Matrix4::new(
-                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ))
             }
             schema::UpAxisType::XUp => {
                 // Rotate 90° around Z: (x, y, z) → (-y, x, z)
                 Some(Matrix4::new(
-                    0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0,
+                    0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ))
             }
             schema::UpAxisType::YUp => None,
         });
 
     // Unit scale: asset.unit.meter (1.0 = meters, 0.01 = centimeters, etc.)
-    let meter = asset
-        .and_then(|a| a.unit.as_ref())
-        .map(|u| u.meter)
-        .unwrap_or(1.0);
+    let meter = asset.and_then(|a| a.unit.as_ref()).map_or(1.0, |u| u.meter);
     let unit_scale = if (meter - 1.0).abs() > f64::EPSILON {
         Some(Matrix4::new_scaling(meter))
     } else {
@@ -157,9 +153,8 @@ pub fn to_scene(collada: &schema::Collada, resolver: Option<&dyn Resolver>) -> R
             let geom_id = geom_elem.id.as_deref().unwrap_or("geometry");
             let geom_name = geom_elem.name.as_deref().unwrap_or(geom_id);
 
-            let mesh = match geom_elem.mesh() {
-                Some(m) => m,
-                None => continue,
+            let Some(mesh) = geom_elem.mesh() else {
+                continue;
             };
 
             let trimesh = load_mesh(
@@ -287,9 +282,7 @@ fn collect_bindings_from_node(
 }
 
 /// Resolve the visual scene referenced by the <scene> element.
-fn resolve_visual_scene<'a>(
-    collada: &'a schema::Collada,
-) -> Option<&'a schema::VisualSceneElementType> {
+fn resolve_visual_scene(collada: &schema::Collada) -> Option<&schema::VisualSceneElementType> {
     let scene = collada.scene.as_ref()?;
     let ivs = scene.instance_visual_scene.as_ref()?;
     let url = ivs.url.as_deref()?;
@@ -359,6 +352,7 @@ struct UnmergedPrimitive {
 }
 
 /// Load a complete mesh from all its primitive groups.
+#[allow(clippy::cast_possible_truncation)]
 fn load_mesh(
     mesh: &schema::MeshElementType,
     materials_by_id: &HashMap<&str, &schema::MaterialElementType>,
@@ -371,9 +365,7 @@ fn load_mesh(
         mesh.sources().map(|s| (s.id.as_str(), s)).collect();
 
     // Get vertices element and find POSITION source
-    let vertices = mesh
-        .vertices()
-        .context("mesh has no <vertices> element")?;
+    let vertices = mesh.vertices().context("mesh has no <vertices> element")?;
     let pos_source_id = vertices
         .input
         .iter()
@@ -387,8 +379,16 @@ fn load_mesh(
     // Process <triangles>
     for tri in mesh.triangles() {
         let face_sizes: Vec<usize> = vec![3; tri.count as usize];
-        let p = tri.p.as_ref().map(|p| &p.0[..]).unwrap_or(&[]);
-        let prim = load_primitive(&tri.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
+        let p = tri.p.as_ref().map_or(&[][..], |p| &p.0[..]);
+        let prim = load_primitive(
+            &tri.input,
+            p,
+            &face_sizes,
+            &vertices.id,
+            &source_map,
+            pos_source_id,
+            &mut triangulator,
+        )?;
         parts.push((prim, tri.material.clone()));
     }
 
@@ -399,20 +399,23 @@ fn load_mesh(
             .as_ref()
             .map(|v| v.0.iter().map(|&n| n as usize).collect())
             .unwrap_or_default();
-        let p = poly.p.as_ref().map(|p| &p.0[..]).unwrap_or(&[]);
-        let prim = load_primitive(&poly.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
+        let p = poly.p.as_ref().map_or(&[][..], |p| &p.0[..]);
+        let prim = load_primitive(
+            &poly.input,
+            p,
+            &face_sizes,
+            &vertices.id,
+            &source_map,
+            pos_source_id,
+            &mut triangulator,
+        )?;
         parts.push((prim, poly.material.clone()));
     }
 
     // Process <polygons>
     for polys in mesh.polygons() {
         let inputs: Vec<schema::InputLocalOffsetType> = polys.inputs().cloned().collect();
-        let stride = inputs
-            .iter()
-            .map(|i| i.offset as usize)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let stride = inputs.iter().map(|i| i.offset as usize).max().unwrap_or(0) + 1;
 
         // Each <p> is one polygon
         let mut all_p: Vec<u64> = Vec::new();
@@ -424,7 +427,15 @@ fn load_mesh(
         }
 
         if !face_sizes.is_empty() {
-            let prim = load_primitive(&inputs, &all_p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
+            let prim = load_primitive(
+                &inputs,
+                &all_p,
+                &face_sizes,
+                &vertices.id,
+                &source_map,
+                pos_source_id,
+                &mut triangulator,
+            )?;
             parts.push((prim, polys.material.clone()));
         }
     }
@@ -537,15 +548,14 @@ fn load_mesh(
         };
 
         // Try to load diffuse texture if we can resolve the image
-        if let Some(resolver) = resolver {
-            if let Some(texture) = try_load_texture(name, material_bindings, materials_by_id, images, resolver) {
-                simple.diffuse_texture = Some(texture);
-            }
+        if let Some(resolver) = resolver
+            && let Some(texture) =
+                try_load_texture(name, material_bindings, materials_by_id, images, resolver)
+        {
+            simple.diffuse_texture = Some(texture);
         }
 
-        trimesh
-            .materials
-            .push(Material::Simple(simple));
+        trimesh.materials.push(Material::Simple(simple));
     }
 
     trimesh.source.format = Some(FileType::DAE);
@@ -574,30 +584,29 @@ fn try_load_texture(
     // Try to find an image whose id matches any candidate
     for (img_id, img) in images {
         for candidate in &candidates {
-            if img_id.contains(candidate) || candidate.contains(*img_id) {
-                if let Some(init_from) = img.init_from() {
-                    if let Ok(data) = resolver.resolve(init_from) {
-                        return Some(LazyImage::new(data));
-                    }
-                }
+            if (img_id.contains(candidate) || candidate.contains(*img_id))
+                && let Some(init_from) = img.init_from()
+                && let Ok(data) = resolver.resolve(init_from)
+            {
+                return Some(LazyImage::new(data));
             }
         }
     }
 
     // If there is exactly one image, use it as a last resort
-    if images.len() == 1 {
-        let img = images.values().next().unwrap();
-        if let Some(init_from) = img.init_from() {
-            if let Ok(data) = resolver.resolve(init_from) {
-                return Some(LazyImage::new(data));
-            }
-        }
+    if images.len() == 1
+        && let Some(img) = images.values().next()
+        && let Some(init_from) = img.init_from()
+        && let Ok(data) = resolver.resolve(init_from)
+    {
+        return Some(LazyImage::new(data));
     }
 
     None
 }
 
 /// Process a single primitive group (triangles, polylist, or polygon batch).
+#[allow(clippy::cast_possible_truncation)]
 fn load_primitive(
     inputs: &[schema::InputLocalOffsetType],
     p_data: &[u64],
@@ -608,12 +617,7 @@ fn load_primitive(
     triangulator: &mut crate::creation::Triangulator,
 ) -> Result<UnmergedPrimitive> {
     // Determine stride (tuple width)
-    let stride = inputs
-        .iter()
-        .map(|i| i.offset as usize)
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let stride = inputs.iter().map(|i| i.offset as usize).max().unwrap_or(0) + 1;
 
     // Find source data for each semantic
     let pos_source = source_map
@@ -694,50 +698,49 @@ fn load_primitive(
             };
 
             let key = (pi, ni, ti);
-            let new_idx = match key_map.get(&key) {
-                Some(&idx) => idx,
-                None => {
-                    let idx = new_vertices.len();
+            let new_idx = if let Some(&idx) = key_map.get(&key) {
+                idx
+            } else {
+                let idx = new_vertices.len();
 
-                    // Read position — bail on out-of-bounds
-                    let pos = pos_source
-                        .get(pi)
-                        .context(format!("position index {pi} out of range"))?;
-                    if pos.len() >= 3 {
-                        new_vertices.push(Point3::new(pos[0], pos[1], pos[2]));
-                    } else {
-                        bail!("position data at index {pi} has fewer than 3 components");
-                    }
+                // Read position — bail on out-of-bounds
+                let pos = pos_source
+                    .get(pi)
+                    .context(format!("position index {pi} out of range"))?;
+                if pos.len() >= 3 {
+                    new_vertices.push(Point3::new(pos[0], pos[1], pos[2]));
+                } else {
+                    bail!("position data at index {pi} has fewer than 3 components");
+                }
 
-                    // Read normal
-                    if let Some(ref src) = normal_source {
-                        if let Some(n) = ni.and_then(|i| src.get(i)) {
-                            if n.len() >= 3 {
-                                new_normals.push(Vector3::new(n[0], n[1], n[2]));
-                            } else {
-                                new_normals.push(Vector3::zeros());
-                            }
+                // Read normal
+                if let Some(ref src) = normal_source {
+                    if let Some(n) = ni.and_then(|i| src.get(i)) {
+                        if n.len() >= 3 {
+                            new_normals.push(Vector3::new(n[0], n[1], n[2]));
                         } else {
                             new_normals.push(Vector3::zeros());
                         }
+                    } else {
+                        new_normals.push(Vector3::zeros());
                     }
+                }
 
-                    // Read UV
-                    if let Some(ref src) = uv_source {
-                        if let Some(uv) = ti.and_then(|i| src.get(i)) {
-                            if uv.len() >= 2 {
-                                new_uv.push(Vector2::new(uv[0], uv[1]));
-                            } else {
-                                new_uv.push(Vector2::zeros());
-                            }
+                // Read UV
+                if let Some(ref src) = uv_source {
+                    if let Some(uv) = ti.and_then(|i| src.get(i)) {
+                        if uv.len() >= 2 {
+                            new_uv.push(Vector2::new(uv[0], uv[1]));
                         } else {
                             new_uv.push(Vector2::zeros());
                         }
+                    } else {
+                        new_uv.push(Vector2::zeros());
                     }
-
-                    key_map.insert(key, idx);
-                    idx
                 }
+
+                key_map.insert(key, idx);
+                idx
             };
 
             face_indices.push(new_idx);
@@ -770,7 +773,6 @@ fn load_primitive(
         uv: new_uv,
     })
 }
-
 
 // ── Export ───────────────────────────────────────────────────────────────────
 
@@ -829,18 +831,13 @@ pub fn from_scene(scene: &Scene) -> Result<Vec<u8>> {
         }),
     };
 
-    let xml = quick_xml::se::to_string(&collada)
-        .context("failed to serialize Collada to XML")?;
+    let xml = quick_xml::se::to_string(&collada).context("failed to serialize Collada to XML")?;
     let output = format!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n{xml}");
     Ok(output.into_bytes())
 }
 
 /// Build a Collada geometry element from a Trimesh.
-fn build_geometry(
-    geom_id: &str,
-    name: &str,
-    trimesh: &Trimesh,
-) -> schema::GeometryElementType {
+fn build_geometry(geom_id: &str, name: &str, trimesh: &Trimesh) -> schema::GeometryElementType {
     let pos_source_id = format!("{geom_id}-positions");
     let vertices_id = format!("{geom_id}-vertices");
 
@@ -877,8 +874,8 @@ fn build_geometry(
     }
 
     // Check for UVs
-    let has_uv = !trimesh.attributes_vertex.uv.is_empty()
-        && !trimesh.attributes_vertex.uv[0].is_empty();
+    let has_uv =
+        !trimesh.attributes_vertex.uv.is_empty() && !trimesh.attributes_vertex.uv[0].is_empty();
     if has_uv {
         let uv_source_id = format!("{geom_id}-map-0");
         let uv_data: Vec<f64> = trimesh.attributes_vertex.uv[0]
@@ -888,7 +885,7 @@ fn build_geometry(
         let uv_source = build_source(&uv_source_id, &uv_data, 2, &["S", "T"]);
         content.push(schema::MeshElementTypeContent::Source(uv_source));
 
-        let norm_offset = if has_normals { 1 } else { 0 };
+        let norm_offset = u64::from(has_normals);
         tri_inputs.push(schema::InputLocalOffsetType {
             offset: offset + 1 + norm_offset,
             semantic: "TEXCOORD".to_string(),

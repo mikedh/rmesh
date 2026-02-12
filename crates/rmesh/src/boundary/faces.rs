@@ -1098,60 +1098,6 @@ impl Surface {
         max_kappa
     }
 
-    /// Generate interior UV samples for tessellation.
-    ///
-    /// Uses curvature-based density (chord error formula) with a minimum grid
-    /// for robustness. Returns empty for planar surfaces.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn generate_interior_samples(
-        &self,
-        u_min: f64,
-        u_max: f64,
-        v_min: f64,
-        v_max: f64,
-        tolerance: f64,
-    ) -> Vec<Point2<f64>> {
-        // Planar surfaces don't need interior points
-        if self.is_planar() {
-            return Vec::new();
-        }
-
-        let u_span = u_max - u_min;
-        let v_span = v_max - v_min;
-
-        // Grid size bounds
-        const N_MIN: usize = 1; // Curvature drives density; Phase 3 fills in as needed
-        const N_MAX: usize = 8; // Maximum to avoid excessive triangles
-
-        // Additional density from curvature for quality
-        let max_kappa = self.estimate_max_curvature(u_min, u_max, v_min, v_max);
-        let (n_u_curv, n_v_curv) = if max_kappa > CURVATURE_TOL {
-            let step = (8.0 * tolerance / max_kappa).sqrt();
-            (
-                (u_span / step).ceil() as usize,
-                (v_span / step).ceil() as usize,
-            )
-        } else {
-            (0, 0)
-        };
-
-        // N_MIN=1 lets curvature drive the grid — near-flat curved surfaces
-        // get fewer interior points, with Phase 3 refinement filling in as needed.
-        let n_u = N_MIN.max(n_u_curv).min(N_MAX);
-        let n_v = N_MIN.max(n_v_curv).min(N_MAX);
-
-        // Generate interior grid (not on boundary edges)
-        let mut samples = Vec::with_capacity(n_u * n_v);
-        for i in 1..=n_u {
-            for j in 1..=n_v {
-                let u = u_min + u_span * i as f64 / (n_u + 1) as f64;
-                let v = v_min + v_span * j as f64 / (n_v + 1) as f64;
-                samples.push(Point2::new(u, v));
-            }
-        }
-        samples
-    }
-
     /// If this surface projects as a circle onto the given plane,
     /// return (center_2d, radius).
     ///
@@ -1194,6 +1140,48 @@ impl Surface {
             Surface::Sphere(s) => s.curvature_at(u, v),
             Surface::Torus(t) => t.curvature_at(u, v),
             Surface::BSpline(b) => b.curvature_at(u, v),
+        }
+    }
+
+    /// First fundamental form coefficients (E, F, G) at parameter (u, v).
+    /// Used to convert 3D distances to UV distances: ds² = E·du² + 2F·du·dv + G·dv²
+    pub fn first_fundamental_form(&self, u: f64, v: f64) -> (f64, f64, f64) {
+        match self {
+            // Plane: du and dv map 1:1 to 3D basis vectors
+            Surface::Plane(_) => (1.0, 0.0, 1.0),
+            // Cylinder: u=theta, v=h. dS/du = r*(-sin,cos,0), dS/dv = (0,0,1)
+            // E = r², F = 0, G = 1
+            Surface::Cylinder(c) => (c.radius * c.radius, 0.0, 1.0),
+            // Sphere: u=lon, v=lat. dS/du = r*cos(lat)*(-sin(lon),cos(lon),0), dS/dv = r*(-sin(lat)*cos(lon),...)
+            // E = r²cos²(lat), F = 0, G = r²
+            Surface::Sphere(s) => {
+                let cos_v = v.cos();
+                let r2 = s.radius * s.radius;
+                (r2 * cos_v * cos_v, 0.0, r2)
+            }
+            // Cone: u=theta, v=d (distance from apex). r(d) = d*tan(α)
+            // dS/du = r*(-sin,cos,0), dS/dv = axis + tan(α)*(cos,sin,0)
+            // E = r² = d²tan²(α), F = 0, G = 1 + tan²(α) = 1/cos²(α)
+            Surface::Cone(c) => {
+                let tan_a = c.half_angle.tan();
+                let r = v.abs() * tan_a;
+                let sec2 = 1.0 / (c.half_angle.cos() * c.half_angle.cos());
+                (r * r, 0.0, sec2)
+            }
+            // Torus: u=major, v=minor. R=major_radius, r=minor_radius
+            // E = (R + r*cos(v))², F = 0, G = r²
+            Surface::Torus(t) => {
+                let arm = t.major_radius + t.minor_radius * v.cos();
+                (arm * arm, 0.0, t.minor_radius * t.minor_radius)
+            }
+            // BSpline: compute via finite differences of partial derivatives
+            Surface::BSpline(b) => {
+                let (s_u, s_v) = b.derivatives(u, v);
+                let e = s_u.dot(&s_u);
+                let f = s_u.dot(&s_v);
+                let g = s_v.dot(&s_v);
+                (e, f, g)
+            }
         }
     }
 }

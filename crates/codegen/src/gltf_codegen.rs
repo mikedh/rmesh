@@ -192,38 +192,35 @@ fn preprocess_schema(schema: &mut Value) {
 
             // Remove minimum: 1 from integer type fields to avoid NonZeroU64.
             // glTF uses this for "count" fields but we just want u64.
-            if map.get("type").and_then(|v| v.as_str()) == Some("integer") {
-                if let Some(Value::Number(n)) = map.get("minimum") {
-                    if n.as_u64() == Some(1) {
-                        map.remove("minimum");
-                    }
-                }
+            if map.get("type").and_then(|v| v.as_str()) == Some("integer")
+                && let Some(Value::Number(n)) = map.get("minimum")
+                && n.as_u64() == Some(1)
+            {
+                map.remove("minimum");
             }
 
             // Inline glTFid: replace allOf:[{$ref:"glTFid.schema.json"}] with type:integer
-            if let Some(Value::Array(all_of)) = map.get("allOf") {
-                if all_of.len() == 1 {
-                    if let Some(ref_val) = all_of[0].get("$ref").and_then(|v| v.as_str()) {
-                        if ref_val.contains("glTFid") {
-                            map.remove("allOf");
-                            map.insert("type".to_string(), Value::String("integer".into()));
-                            map.insert("minimum".to_string(), serde_json::json!(0));
-                        }
-                    }
-                }
+            if let Some(Value::Array(all_of)) = map.get("allOf")
+                && all_of.len() == 1
+                && let Some(ref_val) = all_of[0].get("$ref").and_then(|v| v.as_str())
+                && ref_val.contains("glTFid")
+            {
+                map.remove("allOf");
+                map.insert("type".to_string(), Value::String("integer".into()));
+                map.insert("minimum".to_string(), serde_json::json!(0));
             }
 
             // Inline glTFid in direct $ref
-            if let Some(Value::String(ref_val)) = map.get("$ref") {
-                if ref_val.contains("glTFid") {
-                    map.remove("$ref");
-                    let desc = map.remove("description");
-                    map.clear();
-                    map.insert("type".to_string(), Value::String("integer".into()));
-                    map.insert("minimum".to_string(), serde_json::json!(0));
-                    if let Some(d) = desc {
-                        map.insert("description".to_string(), d);
-                    }
+            if let Some(Value::String(ref_val)) = map.get("$ref")
+                && ref_val.contains("glTFid")
+            {
+                map.remove("$ref");
+                let desc = map.remove("description");
+                map.clear();
+                map.insert("type".to_string(), Value::String("integer".into()));
+                map.insert("minimum".to_string(), serde_json::json!(0));
+                if let Some(d) = desc {
+                    map.insert("description".to_string(), d);
                 }
             }
 
@@ -238,11 +235,7 @@ fn preprocess_schema(schema: &mut Value) {
                     .iter()
                     .any(|r| r.contains("glTFProperty") || r.contains("glTFChildOfRootProperty"));
                 let has_child = refs.iter().any(|r| r.contains("glTFChildOfRootProperty"));
-                if is_base {
-                    Some(has_child)
-                } else {
-                    None
-                }
+                if is_base { Some(has_child) } else { None }
             } else {
                 None
             };
@@ -251,13 +244,14 @@ fn preprocess_schema(schema: &mut Value) {
                 let props = map
                     .entry("properties".to_string())
                     .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                if let Value::Object(props_map) = props {
-                    if has_child_of_root && !props_map.contains_key("name") {
-                        props_map.insert(
-                            "name".to_string(),
-                            serde_json::json!({"type": "string", "description": "The user-defined name of this object."}),
-                        );
-                    }
+                if let Value::Object(props_map) = props
+                    && has_child_of_root
+                    && !props_map.contains_key("name")
+                {
+                    props_map.insert(
+                        "name".to_string(),
+                        serde_json::json!({"type": "string", "description": "The user-defined name of this object."}),
+                    );
                 }
             }
 
@@ -274,12 +268,12 @@ fn preprocess_schema(schema: &mut Value) {
             }
 
             // Simplify anyOf with const values to just the base type
-            if let Some(Value::Array(any_of)) = map.get("anyOf") {
-                if let Some(simplified) = simplify_any_of(any_of) {
-                    map.remove("anyOf");
-                    for (k, v) in simplified {
-                        map.insert(k, v);
-                    }
+            if let Some(Value::Array(any_of)) = map.get("anyOf")
+                && let Some(simplified) = simplify_any_of(any_of)
+            {
+                map.remove("anyOf");
+                for (k, v) in simplified {
+                    map.insert(k, v);
                 }
             }
 
@@ -291,28 +285,28 @@ fn preprocess_schema(schema: &mut Value) {
             // Replace empty {} sub-schemas in properties with proper inline types
             if let Some(Value::Object(props)) = map.get_mut("properties") {
                 for (key, prop_schema) in props.iter_mut() {
-                    if let Value::Object(obj) = prop_schema {
-                        if obj.is_empty() {
-                            match key.as_str() {
-                                "extensions" => {
-                                    *prop_schema = serde_json::json!({
-                                        "type": "object",
-                                        "additionalProperties": true
-                                    });
-                                }
-                                "extras" => {
-                                    // Any type
-                                    *prop_schema = Value::Bool(true);
-                                }
-                                "name" => {
-                                    *prop_schema = serde_json::json!({
-                                        "type": "string",
-                                        "description": "The user-defined name of this object."
-                                    });
-                                }
-                                _ => {
-                                    *prop_schema = Value::Bool(true);
-                                }
+                    if let Value::Object(obj) = prop_schema
+                        && obj.is_empty()
+                    {
+                        match key.as_str() {
+                            "extensions" => {
+                                *prop_schema = serde_json::json!({
+                                    "type": "object",
+                                    "additionalProperties": true
+                                });
+                            }
+                            "extras" => {
+                                // Any type
+                                *prop_schema = Value::Bool(true);
+                            }
+                            "name" => {
+                                *prop_schema = serde_json::json!({
+                                    "type": "string",
+                                    "description": "The user-defined name of this object."
+                                });
+                            }
+                            _ => {
+                                *prop_schema = Value::Bool(true);
                             }
                         }
                     }
@@ -365,10 +359,7 @@ fn simplify_any_of(variants: &[Value]) -> Option<Vec<(String, Value)>> {
     }
 
     let base = base_type?;
-    Some(vec![(
-        "type".to_string(),
-        Value::String(base.to_string()),
-    )])
+    Some(vec![("type".to_string(), Value::String(base.to_string()))])
 }
 
 /// Recursively rewrite $ref values from relative filenames to #/definitions/...
@@ -376,11 +367,14 @@ fn simplify_any_of(variants: &[Value]) -> Option<Vec<(String, Value)>> {
 fn rewrite_refs(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(ref_path)) = map.get_mut("$ref") {
-                if !ref_path.starts_with('#') && ref_path.ends_with(".json") {
-                    let key = ref_path.trim_end_matches(".schema.json");
-                    *ref_path = format!("#/definitions/{}", key);
-                }
+            if let Some(Value::String(ref_path)) = map.get_mut("$ref")
+                && !ref_path.starts_with('#')
+                && Path::new(ref_path.as_str())
+                    .extension()
+                    .is_some_and(|e| e == "json")
+            {
+                let key = ref_path.trim_end_matches(".schema.json");
+                *ref_path = format!("#/definitions/{}", key);
             }
             for v in map.values_mut() {
                 rewrite_refs(v);
@@ -408,7 +402,10 @@ fn postprocess(code: &str) -> String {
             "::serde_json::Map<::std::string::String, ::serde_json::Value>",
             "serde_json::Map<String, serde_json::Value>",
         ),
-        ("::std::collections::HashMap<::std::string::String,", "HashMap<String,"),
+        (
+            "::std::collections::HashMap<::std::string::String,",
+            "HashMap<String,",
+        ),
         ("::std::option::Option", "Option"),
         ("::std::string::String", "String"),
         ("::std::vec::Vec", "Vec"),
@@ -441,7 +438,10 @@ fn postprocess(code: &str) -> String {
         ("pub component_type: i64", "pub component_type: u32"),
         ("pub count: i64", "pub count: u64"),
         ("pub byte_length: i64", "pub byte_length: u64"),
-        ("pub byte_stride: Option<i64>", "pub byte_stride: Option<u32>"),
+        (
+            "pub byte_stride: Option<i64>",
+            "pub byte_stride: Option<u32>",
+        ),
         ("pub target: Option<i64>", "pub target: Option<u32>"),
         ("pub mode: i64", "pub mode: u32"),
         ("pub mag_filter: Option<i64>", "pub mag_filter: Option<u32>"),
@@ -464,14 +464,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "Material",
         "alpha_cutoff",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "alphaCutoff",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub alpha_cutoff: Option<f64>,"#,
-        ],
+    pub alpha_cutoff: Option<f64>,"#],
         r#"    ///The alpha cutoff value of the material.
     #[serde(rename = "alphaCutoff", default = "defaults::material_alpha_cutoff")]
     pub alpha_cutoff: f64,"#,
@@ -488,14 +486,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "MaterialPbrMetallicRoughness",
         "metallic_factor",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "metallicFactor",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub metallic_factor: Option<f64>,"#,
-        ],
+    pub metallic_factor: Option<f64>,"#],
         r#"    ///The factor for the metalness of the material.
     #[serde(rename = "metallicFactor", default = "defaults::pbr_metallic_factor")]
     pub metallic_factor: f64,"#,
@@ -506,14 +502,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "MaterialPbrMetallicRoughness",
         "roughness_factor",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "roughnessFactor",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub roughness_factor: Option<f64>,"#,
-        ],
+    pub roughness_factor: Option<f64>,"#],
         r#"    ///The factor for the roughness of the material.
     #[serde(rename = "roughnessFactor", default = "defaults::pbr_roughness_factor")]
     pub roughness_factor: f64,"#,
@@ -541,14 +535,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "LightSpot",
         "inner_cone_angle",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "innerConeAngle",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub inner_cone_angle: Option<f64>,"#,
-        ],
+    pub inner_cone_angle: Option<f64>,"#],
         r#"    ///Angle in radians from centre of spotlight where falloff begins.
     #[serde(rename = "innerConeAngle", default = "defaults::light_spot_inner_cone_angle")]
     pub inner_cone_angle: f64,"#,
@@ -559,14 +551,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "LightSpot",
         "outer_cone_angle",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "outerConeAngle",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub outer_cone_angle: Option<f64>,"#,
-        ],
+    pub outer_cone_angle: Option<f64>,"#],
         r#"    ///Angle in radians from centre of spotlight where falloff ends.
     #[serde(rename = "outerConeAngle", default = "defaults::light_spot_outer_cone_angle")]
     pub outer_cone_angle: f64,"#,
@@ -627,7 +617,7 @@ fn postprocess(code: &str) -> String {
     code = remove_default_impls(&code);
 
     // 8. Inject new default functions into the defaults module
-    let new_defaults = r#"
+    let new_defaults = r"
     pub(super) fn material_alpha_cutoff() -> f64 {
         0.5
     }
@@ -645,7 +635,7 @@ fn postprocess(code: &str) -> String {
     }
     pub(super) fn light_spot_outer_cone_angle() -> f64 {
         std::f64::consts::FRAC_PI_4
-    }"#;
+    }";
 
     // Find the closing brace of the defaults module and inject before it
     if let Some(pos) = code.rfind("\n}\n") {
@@ -664,8 +654,8 @@ fn postprocess(code: &str) -> String {
 /// `old_patterns` is a list of possible patterns to try (handles formatting variations).
 fn replace_field_in_struct(
     code: &str,
-    _struct_name: &str,
-    _field_name: &str,
+    struct_name: &str,
+    field_name: &str,
     old_patterns: &[&str],
     new_field: &str,
 ) -> String {
@@ -678,7 +668,7 @@ fn replace_field_in_struct(
     }
     eprintln!(
         "WARNING: Could not find field {} in struct {}",
-        _field_name, _struct_name
+        field_name, struct_name
     );
     code
 }
@@ -721,7 +711,7 @@ fn replace_field_type_in_struct(
     let old_field = format!("pub {}: {}", field_name, old_type);
     let new_field = format!("pub {}: {}", field_name, new_type);
 
-    if let Some(_) = struct_body.find(&old_field) {
+    if struct_body.contains(&old_field) {
         let new_body = struct_body.replacen(&old_field, &new_field, 1);
         let mut result = String::with_capacity(code.len());
         result.push_str(&code[..struct_start]);
@@ -783,7 +773,7 @@ fn remove_default_impls(code: &str) -> String {
 }
 
 /// Static preamble prepended to the generated code.
-const PREAMBLE: &str = r#"//! glTF 2.0 schema - AUTO-GENERATED from JSON Schema
+const PREAMBLE: &str = r"//! glTF 2.0 schema - AUTO-GENERATED from JSON Schema
 //! Do not edit manually. Run `cargo run -p codegen --bin gltf-codegen` to regenerate.
 
 #![allow(unused_imports)]
@@ -826,7 +816,7 @@ pub fn component_size(t: u32) -> usize {
 pub fn accessor_type_count(t: &AccessorType) -> usize {
     t.component_count()
 }
-"#;
+";
 
 /// Static postamble appended to the generated code.
 const POSTAMBLE: &str = r#"

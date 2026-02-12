@@ -1,3 +1,4 @@
+pub mod convert;
 #[allow(
     clippy::all,
     clippy::pedantic,
@@ -7,7 +8,6 @@
     unreachable_pub
 )]
 pub mod schema;
-pub mod convert;
 
 use std::io::Read;
 
@@ -21,22 +21,21 @@ use crate::resolvers::ZipResolver;
 /// (textures, images, etc.).
 pub fn load_zae(data: &[u8]) -> Result<(schema::Collada, ZipResolver)> {
     let cursor = std::io::Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).context("failed to open ZAE as ZIP archive")?;
+    let mut archive = zip::ZipArchive::new(cursor).context("failed to open ZAE as ZIP archive")?;
 
     // Find and read the .dae file
     let dae_index = (0..archive.len())
         .find(|&i| {
-            archive
-                .by_index(i)
-                .is_ok_and(|f| f.name().ends_with(".dae"))
+            archive.by_index(i).is_ok_and(|f| {
+                std::path::Path::new(f.name())
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("dae"))
+            })
         })
         .context("no .dae file found in ZAE archive")?;
 
     let mut dae_xml = String::new();
-    archive
-        .by_index(dae_index)?
-        .read_to_string(&mut dae_xml)?;
+    archive.by_index(dae_index)?.read_to_string(&mut dae_xml)?;
 
     let collada: schema::Collada =
         quick_xml::de::from_str(&dae_xml).context("failed to parse Collada XML from ZAE")?;
@@ -207,7 +206,8 @@ mod tests {
             return;
         }
         let data = std::fs::read(&path).unwrap();
-        let scene = crate::exchange::load(&data, Some(crate::exchange::FileType::ZAE), None).unwrap();
+        let scene =
+            crate::exchange::load(&data, Some(crate::exchange::FileType::ZAE), None).unwrap();
         assert!(!scene.geometry.is_empty(), "expected geometry from load()");
     }
 
@@ -237,7 +237,10 @@ mod tests {
             .as_ref()
             .map(|lg| lg.geometry.len())
             .unwrap_or(0);
-        assert_eq!(geom_count, geom_count2, "geometry count should match after roundtrip");
+        assert_eq!(
+            geom_count, geom_count2,
+            "geometry count should match after roundtrip"
+        );
     }
 
     #[test]

@@ -1,34 +1,26 @@
 //! BREP surface tessellation.
 //!
 //! Converts BREP faces (analytical surfaces + edge loops) into triangle meshes.
-//! The [`ShellTessellator`] produces watertight output through a 5-phase pipeline:
+//! The [`ShellTessellator`] produces watertight output through a 3-phase pipeline:
 //!
 //! 1. **Edge discretization** — Each BREP edge is discretized once and assigned pool
 //!    indices. Adjacent faces sharing an edge get the same vertices by construction
 //!    (not by post-hoc merging), guaranteeing watertight seams.
-//! 2. **Contour refinement** (Phase 1.5) — For faces with holes, outer contour edges
-//!    are refined until all inner loop vertices fall inside the outer polygon in UV space.
-//! 3. **Face triangulation** — Each face is triangulated via constrained Delaunay
-//!    triangulation (CDT) in UV space. Fallback chain: UV CDT → plane projection CDT
-//!    (multiple candidate planes scored by projection quality) → fan triangulation.
-//! 4. **Adaptive refinement** — Triangles exceeding the chord tolerance are subdivided
-//!    by splitting the worst edge. Boundary edges are split globally across all adjacent
-//!    faces to maintain watertightness.
-//! 5. **Final assembly** — Per-face triangulations are assembled into a single `Trimesh`
+//!    Phase 1.5 refines outer contours where inner loop vertices escape the polygon.
+//! 2. **Bubble pack + CDT** — For each face: bubble packing (Shimada & Gossard)
+//!    generates well-distributed interior points in UV space, then CDT triangulates
+//!    the boundary + interior points. A single-pass chord error check splits any
+//!    edge still exceeding tolerance.
+//! 3. **Final assembly** — Per-face triangulations are assembled into a single `Trimesh`
 //!    with per-vertex normals and face-to-surface grouping attributes.
-//!
-//! Known limitations: a small fraction of faces fall back to plane-projection
-//! CDT or fan triangulation. All Rosetta benchmark bodies produce watertight
-//! output at default tolerance.
 
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::manual_midpoint)]
-#![allow(clippy::cloned_instead_of_copied)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use kiddo::{ImmutableKdTree, SquaredEuclidean};
 use nalgebra::{Point2, Point3, Vector3};
 
 use super::Surface;
@@ -36,7 +28,7 @@ use super::cdt;
 use super::faces::{CURVATURE_TOL, Cone, Cylinder, GEOMETRY_TOL, Sphere, SurfacePlane, Torus};
 use super::topology::{BrepEdge, BrepModel, Curve, EdgeUse, OrientedEdge};
 use crate::attributes::{Attributes, Grouping, GroupingKind};
-use crate::creation::{Plane, perpendicular};
+use crate::creation::{Plane, Triangulator};
 use crate::mesh::Trimesh;
 
 /// Parameters controlling tessellation quality.
@@ -46,7 +38,7 @@ use crate::mesh::Trimesh;
 /// independent of model units (mm, inches, meters). A 1mm screw and a 10m
 /// beam both get the same visual fidelity at the same `tolerance_relative`.
 ///
-/// The adaptive refinement loop (phase 4) subdivides any triangle whose
+/// The per-face chord error pass subdivides any triangle edge whose
 /// midpoint deviates from the true surface by more than the effective
 /// tolerance. Boundary edges are split globally across adjacent faces to
 /// maintain watertightness.
@@ -58,7 +50,6 @@ use crate::mesh::Trimesh;
 /// | `tolerance_relative` | 0.001 | 0.1% of bbox diagonal — visually smooth |
 /// | `min_segments` | 16 | Full circles always get >= 16 segments |
 /// | `max_segments` | 256 | Caps subdivision on very tight tolerances |
-/// | `merge_tolerance` | 1e-8 | UV-space snap for near-duplicate vertices |
 #[derive(Debug, Clone)]
 pub struct TesselationParams {
     /// Chord error as fraction of bounding-box diagonal.
@@ -67,10 +58,6 @@ pub struct TesselationParams {
     pub min_segments: usize,
     /// Maximum segments per curved edge.
     pub max_segments: usize,
-    /// Vertex merge tolerance in UV parameter space for snapping nearly-identical
-    /// vertices before CDT. This is an absolute distance (not scaled per-face)
-    /// because UV parametrizations are surface-intrinsic.
-    pub merge_tolerance: f64,
 }
 
 impl Default for TesselationParams {
@@ -79,30 +66,13 @@ impl Default for TesselationParams {
             tolerance_relative: 0.001, // 0.1% of bounding-box diagonal
             min_segments: 16,          // ensures circles always look circular
             max_segments: 256,
-            merge_tolerance: 1e-8, // Small enough to not affect geometry
         }
     }
 }
 
-/// UV aspect ratio above which angular surfaces skip UV-space CDT and fall back
-/// to plane projection. Empirically derived: cone/sphere faces spanning nearly the
-/// full circle produce aspect ratios of 100–215:1 that always cause CDT failure.
-/// The value 50 catches these extreme cases while allowing moderate angular spans
-/// (e.g. 3–4 radians) to still attempt UV CDT, which produces better results.
-const UV_ASPECT_SKIP_THRESHOLD: f64 = 50.0;
-
 /// Threshold for considering a surface normal vector as near-zero (degenerate).
 /// Used when normalizing normals and checking projection validity.
 const NEAR_ZERO_NORMAL: f64 = 1e-12;
-
-/// Threshold for considering a cross product as degenerate.
-/// Used when building candidate projection planes to skip near-parallel edge pairs.
-const DEGENERATE_CROSS: f64 = 1e-10;
-
-/// Minimum error reduction ratio per refinement iteration.
-/// If the maximum error doesn't decrease by at least this factor, refinement stops
-/// to avoid wasting iterations on diminishing returns.
-const ERROR_REDUCTION_BAIL: f64 = 0.5;
 
 /// Return an ordered (min, max) edge key for use in hash/set lookups.
 #[inline]
@@ -110,21 +80,96 @@ fn canonical_edge(a: usize, b: usize) -> (usize, usize) {
     (a.min(b), a.max(b))
 }
 
-/// Error analysis for a single triangle during adaptive subdivision.
+/// Build the set of expected contour edges from closed contour index lists.
+fn contour_edge_set(contours: &[Vec<usize>]) -> HashSet<(usize, usize)> {
+    let mut expected = HashSet::new();
+    for contour in contours {
+        for w in contour.windows(2) {
+            expected.insert(canonical_edge(w[0], w[1]));
+        }
+    }
+    expected
+}
+
+/// Check that all expected contour edges appear in the triangulation output.
+fn contours_complete_with(triangles: &[[usize; 3]], expected: &HashSet<(usize, usize)>) -> bool {
+    let mut tri_edges: HashSet<(usize, usize)> = HashSet::new();
+    for tri in triangles {
+        tri_edges.insert(canonical_edge(tri[0], tri[1]));
+        tri_edges.insert(canonical_edge(tri[1], tri[2]));
+        tri_edges.insert(canonical_edge(tri[2], tri[0]));
+    }
+    expected.iter().all(|e| tri_edges.contains(e))
+}
+
+/// Fan triangulation: connect every contour edge to a central vertex.
+/// Works for any contour shape but produces poor element quality.
+/// Used as a last resort when CDT fails in both UV and 3D.
+fn fan_triangulate(contours: &[Vec<usize>]) -> Vec<[usize; 3]> {
+    let mut triangles = Vec::new();
+    // Use vertex 0 as the fan center for the outer contour
+    if let Some(outer) = contours.first()
+        && outer.len() >= 4
+    {
+        // outer contour is [0, 1, 2, ..., n-1, 0], fan from vertex 0
+        for w in outer.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if a == 0 || b == 0 {
+                continue; // skip edges incident on the fan center
+            }
+            triangles.push([0, a, b]);
+        }
+    }
+    triangles
+}
+
+/// Deduplicate local vertices that share the same pool index.
 ///
-/// Multi-point error checking examines chord error at the centroid and all three
-/// edge midpoints. This ensures tolerance is maintained everywhere, not just
-/// at the centroid.
-#[derive(Debug, Clone)]
-struct TriangleError {
-    /// Chord error at triangle centroid
-    _centroid_error: f64,
-    /// Maximum chord error across all three edge midpoints
-    max_edge_midpoint_error: f64,
-    /// Index of the edge with maximum error (0, 1, or 2)
-    max_error_edge: usize,
-    /// Whether this triangle needs subdivision
-    needs_subdivision: bool,
+/// Returns (deduplicated UV points, remapped contours, mapping from dedup index → original local index).
+/// This prevents CDT from producing degenerate triangles when two local vertices
+/// have the same 3D position.
+#[allow(clippy::type_complexity)]
+fn dedup_by_pool(
+    state: &FaceTriangulation,
+    contours: &[Vec<usize>],
+) -> (Vec<(f64, f64)>, Vec<Vec<usize>>, Vec<usize>) {
+    let n = state.local_to_pool.len();
+
+    // Map each pool index to the first local index that uses it
+    let mut pool_to_dedup: HashMap<usize, usize> = HashMap::new();
+    let mut local_to_dedup: Vec<usize> = vec![0; n];
+    let mut dedup_pts: Vec<(f64, f64)> = Vec::new();
+    let mut dedup_to_local: Vec<usize> = Vec::new();
+
+    for (local_idx, &pool_idx) in state.local_to_pool.iter().enumerate() {
+        if let Some(&dedup_idx) = pool_to_dedup.get(&pool_idx) {
+            local_to_dedup[local_idx] = dedup_idx;
+        } else {
+            let dedup_idx = dedup_pts.len();
+            pool_to_dedup.insert(pool_idx, dedup_idx);
+            local_to_dedup[local_idx] = dedup_idx;
+            let uv = state.vertices_uv[local_idx];
+            dedup_pts.push((uv.x, uv.y));
+            dedup_to_local.push(local_idx);
+        }
+    }
+
+    // Remap contours and remove consecutive duplicates
+    let dedup_contours: Vec<Vec<usize>> = contours
+        .iter()
+        .map(|contour| {
+            let mut remapped: Vec<usize> = contour.iter().map(|&idx| local_to_dedup[idx]).collect();
+            // Remove consecutive duplicates
+            remapped.dedup();
+            // Ensure closure
+            if remapped.len() > 1 && remapped.first() != remapped.last() {
+                remapped.push(remapped[0]);
+            }
+            remapped
+        })
+        .collect();
+
+    (dedup_pts, dedup_contours, dedup_to_local)
 }
 
 /// State for a face during the global refinement process.
@@ -139,8 +184,6 @@ struct FaceTriangulation {
     triangles: Vec<[usize; 3]>,
     /// Maps local vertex index -> pool (global) vertex index
     local_to_pool: Vec<usize>,
-    /// Maps pool (global) vertex index -> local vertex index
-    pool_to_local: HashMap<usize, usize>,
     /// Set of local edge pairs that lie on BREP boundaries (edges shared between faces)
     /// Stored as (min_local_idx, max_local_idx) for canonical ordering
     boundary_edges: HashSet<(usize, usize)>,
@@ -156,33 +199,18 @@ impl FaceTriangulation {
         let local_idx = self.vertices_uv.len();
         self.vertices_uv.push(uv);
         self.local_to_pool.push(pool_idx);
-        self.pool_to_local.insert(pool_idx, local_idx);
         local_idx
-    }
-
-    /// Get local index for a pool index, if this face has that vertex.
-    fn get_local(&self, pool_idx: usize) -> Option<usize> {
-        self.pool_to_local.get(&pool_idx).copied()
     }
 
     /// Mark an edge as being on the BREP boundary.
     fn mark_boundary_edge(&mut self, local_a: usize, local_b: usize) {
-        let edge = if local_a < local_b {
-            (local_a, local_b)
-        } else {
-            (local_b, local_a)
-        };
-        self.boundary_edges.insert(edge);
+        self.boundary_edges.insert(canonical_edge(local_a, local_b));
     }
 
     /// Check if an edge is on the BREP boundary.
     fn is_boundary_edge(&self, local_a: usize, local_b: usize) -> bool {
-        let edge = if local_a < local_b {
-            (local_a, local_b)
-        } else {
-            (local_b, local_a)
-        };
-        self.boundary_edges.contains(&edge)
+        self.boundary_edges
+            .contains(&canonical_edge(local_a, local_b))
     }
 
     /// Build the edge→triangle adjacency map from current triangles.
@@ -217,17 +245,7 @@ impl FaceTriangulation {
         for &tri_idx in &tri_indices {
             let tri = self.triangles[tri_idx];
             // Find the opposite vertex
-            let v_opp = if (tri[0] == local_a && tri[1] == local_b)
-                || (tri[0] == local_b && tri[1] == local_a)
-            {
-                tri[2]
-            } else if (tri[1] == local_a && tri[2] == local_b)
-                || (tri[1] == local_b && tri[2] == local_a)
-            {
-                tri[0]
-            } else {
-                tri[1]
-            };
+            let v_opp = *tri.iter().find(|&&v| v != local_a && v != local_b).unwrap();
 
             // Split: replace original with [local_a, local_mid, v_opp],
             //         append [local_mid, local_b, v_opp]
@@ -477,30 +495,6 @@ impl Surface {
             Surface::BSpline(b) => b.normal_at(u, v),
         }
     }
-
-    /// Return a projection hint normal for plane projection fallback.
-    ///
-    /// For elementary surfaces with a known axis (cylinder, cone, torus),
-    /// projecting along the axis gives a clean annular/circular layout.
-    /// For spheres, use the normal at the UV centroid of the boundary.
-    /// For BSplines, use the normal at the UV centroid.
-    /// Returns `None` for planes (which shouldn't need projection fallback).
-    fn projection_hint(&self, u_mid: f64, v_mid: f64) -> Option<Vector3<f64>> {
-        match self {
-            Surface::Plane(_) => None,
-            Surface::Cylinder(c) => Some(c.axis_unit()),
-            Surface::Cone(c) => Some(c.axis_unit()),
-            Surface::Torus(t) => Some(t.axis_unit()),
-            Surface::Sphere(_) | Surface::BSpline(_) => {
-                let n = self.normal_at(u_mid, v_mid);
-                if n.norm() > NEAR_ZERO_NORMAL {
-                    Some(n.normalize())
-                } else {
-                    None
-                }
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -509,7 +503,7 @@ impl Surface {
 
 /// Check if a 2D point is inside a polygon using the ray-casting algorithm.
 /// The polygon is given as a slice of UV points (not closed — last != first).
-fn point_in_polygon(point: &Point2<f64>, polygon: &[Point2<f64>]) -> bool {
+pub(super) fn point_in_polygon(point: &Point2<f64>, polygon: &[Point2<f64>]) -> bool {
     let n = polygon.len();
     if n < 3 {
         return false;
@@ -612,12 +606,12 @@ impl Surface {
         if self.is_angular() {
             let p_a = self.evaluate(uv_a.x, uv_a.y);
             let p_b = self.evaluate(uv_b.x, uv_b.y);
-            let p_mid_3d = Point3::from((p_a.coords + p_b.coords) / 2.0);
+            let p_mid_3d = p_a.lerp(&p_b, 0.5);
             let uv_mid = self.to_parametric(&p_mid_3d);
             let p_on_surface = self.evaluate(uv_mid.x, uv_mid.y);
             (uv_mid, p_on_surface)
         } else {
-            let uv_mid = Point2::from((uv_a.coords + uv_b.coords) / 2.0);
+            let uv_mid = uv_a.lerp(uv_b, 0.5);
             let p_mid = self.evaluate(uv_mid.x, uv_mid.y);
             (uv_mid, p_mid)
         }
@@ -655,464 +649,6 @@ fn unwrap_angular_coords_both(uvs: &mut [Point2<f64>]) {
 }
 
 // ============================================================================
-// Vertex merging
-// ============================================================================
-
-/// Result of vertex merging operation.
-struct MergeResult {
-    /// Merged UV coordinates (deduplicated)
-    merged_uvs: Vec<Point2<f64>>,
-    /// Remapped contour indices referencing merged_uvs
-    merged_contours: Vec<Vec<usize>>,
-    /// Maps original index -> merged index
-    original_to_merged: Vec<usize>,
-    /// Maps merged index -> first original index that mapped to it
-    merged_to_original: Vec<usize>,
-}
-
-/// Merge near-duplicate vertices in UV space to prevent CDT failures.
-///
-/// When contours have nearly-collinear or nearly-coincident points, CDT can fail
-/// to find a valid seed triangle. This function merges vertices that are within
-/// the given tolerance, ensuring the triangulator sees a cleaner input.
-///
-/// Uses O(n log n) KD-tree + union-find algorithm instead of O(n²) grid search.
-fn merge_near_vertices(
-    uvs: &[Point2<f64>],
-    contours: &[Vec<usize>],
-    tolerance: f64,
-) -> MergeResult {
-    if tolerance <= 0.0 || uvs.is_empty() {
-        // No merging needed
-        let n = uvs.len();
-        return MergeResult {
-            merged_uvs: uvs.to_vec(),
-            merged_contours: contours.to_vec(),
-            original_to_merged: (0..n).collect(),
-            merged_to_original: (0..n).collect(),
-        };
-    }
-
-    let n = uvs.len();
-    let tolerance_sq = tolerance * tolerance;
-
-    // Build KD-tree once from all input points - O(n log n)
-    let entries: Vec<[f64; 2]> = uvs.iter().map(|p| [p.x, p.y]).collect();
-    let tree: ImmutableKdTree<f64, 2> = ImmutableKdTree::new_from_slice(&entries);
-
-    // Union-find data structure to track merged clusters
-    let mut parent: Vec<usize> = (0..n).collect();
-
-    // Find with path compression
-    fn find(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]]; // path compression
-            i = parent[i];
-        }
-        i
-    }
-
-    // For each point, find all neighbors within tolerance and union them - O(n log n) average
-    for (i, uv) in uvs.iter().enumerate() {
-        // Use within_unsorted for speed (we don't need sorted results)
-        for neighbor in tree.within_unsorted::<SquaredEuclidean>(&[uv.x, uv.y], tolerance_sq) {
-            let j = neighbor.item as usize;
-            if j > i {
-                // Only union with later points to avoid double-processing
-                let pi = find(&mut parent, i);
-                let pj = find(&mut parent, j);
-                if pi != pj {
-                    // Always merge to lower index (canonical representative)
-                    if pi < pj {
-                        parent[pj] = pi;
-                    } else {
-                        parent[pi] = pj;
-                    }
-                }
-            }
-        }
-    }
-
-    // Build merged vertex list from representatives
-    let mut repr_to_merged: HashMap<usize, usize> = HashMap::new();
-    let mut merged_uvs = Vec::new();
-    let mut merged_to_original = Vec::new();
-
-    let original_to_merged: Vec<usize> = (0..n)
-        .map(|i| {
-            let repr = find(&mut parent, i);
-            *repr_to_merged.entry(repr).or_insert_with(|| {
-                let idx = merged_uvs.len();
-                merged_uvs.push(uvs[repr]);
-                merged_to_original.push(repr);
-                idx
-            })
-        })
-        .collect();
-
-    // Remap contour indices, removing consecutive duplicates
-    let merged_contours = contours
-        .iter()
-        .map(|contour| {
-            let remapped: Vec<usize> = contour.iter().map(|&i| original_to_merged[i]).collect();
-            // Remove consecutive duplicates (important for closed contours)
-            let mut deduped = Vec::with_capacity(remapped.len());
-            for &idx in &remapped {
-                if deduped.last() != Some(&idx) {
-                    deduped.push(idx);
-                }
-            }
-            // If contour became too small (< 3 unique points), keep it anyway
-            // CDT will handle the error properly
-            deduped
-        })
-        .collect();
-
-    MergeResult {
-        merged_uvs,
-        merged_contours,
-        original_to_merged,
-        merged_to_original,
-    }
-}
-
-// ============================================================================
-// Fallbacks for self-intersecting UV boundaries
-// ============================================================================
-
-/// Log a CDT failure case to `/tmp/cdt_failures.jsonl` for diagnosis.
-///
-/// Each line is a JSON object with the face index, surface type, hole count,
-/// error description, 2D points, and contour indices. These can be loaded into
-/// unit tests for fast CDT iteration without needing STEP files.
-#[cfg(test)]
-fn log_cdt_failure(
-    face_idx: usize,
-    surface_type: &str,
-    holes: usize,
-    error: &str,
-    pts: &[(f64, f64)],
-    contours: &[Vec<usize>],
-) {
-    use std::io::Write;
-    use std::sync::Mutex;
-
-    static LOG_FILE: Mutex<()> = Mutex::new(());
-
-    let pts_vec: Vec<[f64; 2]> = pts.iter().map(|&(x, y)| [x, y]).collect();
-    let contours_vec: Vec<Vec<usize>> = contours.to_vec();
-    let case = serde_json::json!({
-        "face": format!("face_{}", face_idx),
-        "surface_type": surface_type,
-        "holes": holes,
-        "error": error,
-        "pts": pts_vec,
-        "contours": contours_vec,
-    });
-    let line = format!("{}\n", case);
-    let _guard = LOG_FILE.lock().unwrap();
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/cdt_failures.jsonl")
-    {
-        let _ = f.write_all(line.as_bytes());
-    }
-}
-
-/// Check if all edges from all contours (outer + holes) are present in the triangulation.
-///
-/// This validates that the CDT result properly preserves all boundary constraints,
-/// including inner loops (holes). When `original_to_merged` is provided, contour edges
-/// where both vertices map to the same merged index are skipped — these edges were
-/// collapsed by vertex merging and cannot appear in the triangulation.
-fn check_all_contour_edges_present(
-    triangles: &[(usize, usize, usize)],
-    contours: &[Vec<usize>],
-    original_to_merged: Option<&[usize]>,
-) -> bool {
-    // Build set of all triangle edges
-    let mut tri_edges: HashSet<(usize, usize)> = HashSet::new();
-    for &(a, b, c) in triangles {
-        tri_edges.insert(canonical_edge(a, b));
-        tri_edges.insert(canonical_edge(b, c));
-        tri_edges.insert(canonical_edge(c, a));
-    }
-
-    // Check all contour edges (outer and all holes)
-    for contour in contours {
-        if contour.is_empty() {
-            continue;
-        }
-
-        // Closed contours have first == last, so iterate windows
-        for window in contour.windows(2) {
-            let a = window[0];
-            let b = window[1];
-            // Skip edges collapsed by vertex merging (both endpoints merged to same vertex)
-            if let Some(mapping) = original_to_merged
-                && mapping[a] == mapping[b]
-            {
-                continue;
-            }
-            let edge = canonical_edge(a, b);
-            if !tri_edges.contains(&edge) {
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-/// Triangulate by projecting 3D points onto a best-fit plane.
-///
-/// This is a fallback for when UV parametrization creates a self-intersecting
-/// boundary (common with certain B-spline surfaces). We project the 3D points
-/// onto a plane and triangulate in that 2D space instead.
-///
-/// `hint_normals` provides surface-specific projection directions
-/// (e.g., the axis of a cone/sphere/cylinder, surface normals at boundary vertices)
-/// that are likely to produce good results.
-fn triangulate_with_plane_projection(
-    pts_3d: &[Point3<f64>],
-    contours: &[Vec<usize>],
-    merge_tolerance: f64,
-    hint_normals: &[Vector3<f64>],
-) -> Result<Vec<(usize, usize, usize)>, cdt::Error> {
-    // Try multiple plane orientations and pick the best result by projection quality.
-    // Quality is measured by min_dim / max_dim aspect ratio of the projected bounding box —
-    // a more square projection means less distortion and better triangulation.
-    let mut planes: Vec<Plane> = Vec::with_capacity(20);
-
-    // Surface-specific hint normals from caller
-    for n in hint_normals {
-        planes.push(Plane::new(*n, pts_3d[0]));
-    }
-
-    // PCA best-fit planes
-    if let Ok(p) = Plane::from_points(pts_3d, false) {
-        planes.push(p);
-    }
-    if let Ok(p) = Plane::from_points(pts_3d, true) {
-        planes.push(p);
-    }
-
-    // Axis-aligned planes
-    planes.push(Plane::new(Vector3::new(0.0, 0.0, 1.0), pts_3d[0]));
-    planes.push(Plane::new(Vector3::new(0.0, 1.0, 0.0), pts_3d[0]));
-    planes.push(Plane::new(Vector3::new(1.0, 0.0, 0.0), pts_3d[0]));
-
-    // Diagonal planes (45-degree between axis pairs)
-    let s = std::f64::consts::FRAC_1_SQRT_2;
-    planes.push(Plane::new(Vector3::new(s, s, 0.0), pts_3d[0]));
-    planes.push(Plane::new(Vector3::new(s, 0.0, s), pts_3d[0]));
-    planes.push(Plane::new(Vector3::new(0.0, s, s), pts_3d[0]));
-
-    // Edge cross-product planes (normals perpendicular to boundary edge pairs)
-    if let Some(contour) = contours.first() {
-        let cn = contour.len();
-        if cn >= 4 {
-            for &(i, j) in &[(0, cn / 4), (0, cn / 2), (cn / 4, cn / 2)] {
-                let d1 = pts_3d[contour[(i + 1) % cn]] - pts_3d[contour[i]];
-                let d2 = pts_3d[contour[(j + 1) % cn]] - pts_3d[contour[j]];
-                let cross = d1.cross(&d2);
-                if cross.norm() > DEGENERATE_CROSS {
-                    planes.push(Plane::new(cross.normalize(), pts_3d[0]));
-                }
-            }
-        }
-    }
-
-    // Rotated hint planes (45-degree tilts of each hint)
-    for n in hint_normals {
-        let perp = perpendicular(n);
-        let cos45 = std::f64::consts::FRAC_1_SQRT_2;
-        let rotated = *n * cos45 + perp * cos45;
-        if rotated.norm() > DEGENERATE_CROSS {
-            planes.push(Plane::new(rotated.normalize(), pts_3d[0]));
-        }
-        let perp2 = n.cross(&perp);
-        if perp2.norm() > DEGENERATE_CROSS {
-            let rotated2 = *n * cos45 + perp2.normalize() * cos45;
-            planes.push(Plane::new(rotated2.normalize(), pts_3d[0]));
-        }
-    }
-
-    let mut best_tris: Option<Vec<(usize, usize, usize)>> = None;
-    let mut best_score: f64 = -1.0;
-
-    for plane_opt in &planes {
-        let pts_2d = plane_opt.to_2d(pts_3d);
-        let pts_tuples: Vec<(f64, f64)> = pts_2d.iter().map(|p| (p.x, p.y)).collect();
-
-        // Check if projection is degenerate (very thin bounding box)
-        let (min_x, max_x) = pts_tuples
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), &(x, _)| {
-                (mn.min(x), mx.max(x))
-            });
-        let (min_y, max_y) = pts_tuples
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), &(_, y)| {
-                (mn.min(y), mx.max(y))
-            });
-        let dx = max_x - min_x;
-        let dy = max_y - min_y;
-
-        let min_dim = dx.min(dy);
-        let max_dim = dx.max(dy);
-
-        if min_dim < DEGENERATE_CROSS || (max_dim / min_dim > 100.0) {
-            continue; // Skip degenerate projections
-        }
-
-        // Aspect ratio component of the projection score (1.0 = perfectly square)
-        let aspect_score = min_dim / max_dim;
-
-        // Compute composite score from aspect ratio + triangle quality.
-        // Triangle quality (min/max area ratio) penalizes sliver triangles that
-        // cause manifold issues, breaking ties when aspect ratios are similar.
-        let composite_score = |mapped_tris: &[(usize, usize, usize)]| -> f64 {
-            if mapped_tris.is_empty() {
-                return aspect_score * 0.6;
-            }
-            let mut max_area = 0.0_f64;
-            let mut min_area = f64::MAX;
-            for &(a, b, c) in mapped_tris {
-                let (ax, ay) = pts_tuples[a];
-                let (bx, by) = pts_tuples[b];
-                let (cx, cy) = pts_tuples[c];
-                let area = ((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)).abs();
-                max_area = max_area.max(area);
-                min_area = min_area.min(area);
-            }
-            let area_ratio = if max_area > 1e-20 {
-                min_area / max_area
-            } else {
-                0.0
-            };
-            aspect_score * 0.6 + area_ratio * 0.4
-        };
-
-        // Apply vertex merging
-        let pts_as_point2: Vec<Point2<f64>> =
-            pts_tuples.iter().map(|&(x, y)| Point2::new(x, y)).collect();
-        let merge_result = merge_near_vertices(&pts_as_point2, contours, merge_tolerance);
-        let merged_pts: Vec<(f64, f64)> =
-            merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
-
-        // Try CDT with contours first
-        if let Ok(tris) = cdt::triangulate_contours(&merged_pts, &merge_result.merged_contours) {
-            let mapped_tris: Vec<(usize, usize, usize)> = tris
-                .iter()
-                .filter_map(|&(a, b, c)| {
-                    let (oa, ob, oc) = (
-                        merge_result.merged_to_original[a],
-                        merge_result.merged_to_original[b],
-                        merge_result.merged_to_original[c],
-                    );
-                    if oa == ob || ob == oc || oc == oa {
-                        None
-                    } else {
-                        Some((oa, ob, oc))
-                    }
-                })
-                .collect();
-
-            let score = composite_score(&mapped_tris);
-            if check_all_contour_edges_present(
-                &mapped_tris,
-                contours,
-                Some(&merge_result.original_to_merged),
-            ) && score > best_score
-            {
-                best_score = score;
-                best_tris = Some(mapped_tris);
-                continue;
-            }
-        }
-
-        // CDT with contours failed — try triangulate_with_edges which takes
-        // explicit edge constraints and guarantees they're preserved
-        let boundary_edges: Vec<(usize, usize)> = merge_result
-            .merged_contours
-            .iter()
-            .flat_map(|contour| contour.windows(2).map(|w| (w[0], w[1])))
-            .collect();
-
-        if let Ok(tris) = cdt::triangulate_with_edges(&merged_pts, &boundary_edges) {
-            let mapped_tris: Vec<(usize, usize, usize)> = tris
-                .iter()
-                .filter_map(|&(a, b, c)| {
-                    let (oa, ob, oc) = (
-                        merge_result.merged_to_original[a],
-                        merge_result.merged_to_original[b],
-                        merge_result.merged_to_original[c],
-                    );
-                    if oa == ob || ob == oc || oc == oa {
-                        None
-                    } else {
-                        Some((oa, ob, oc))
-                    }
-                })
-                .collect();
-
-            let score = composite_score(&mapped_tris);
-            if check_all_contour_edges_present(
-                &mapped_tris,
-                contours,
-                Some(&merge_result.original_to_merged),
-            ) && score > best_score
-            {
-                best_score = score;
-                best_tris = Some(mapped_tris);
-            }
-        }
-    }
-
-    if let Some(tris) = best_tris {
-        return Ok(tris);
-    }
-
-    // All CDT approaches failed - use fan triangulation as last resort.
-    // This guarantees all boundary edges are included but may produce poor quality triangles.
-    // NOTE: We only triangulate the outer contour using fan; holes are not handled properly.
-    // This is a known limitation when CDT fails.
-    #[cfg(test)]
-    if contours.len() > 1 {
-        eprintln!(
-            "WARNING: fan triangulation fallback on face with {} holes — holes will be filled in",
-            contours.len() - 1
-        );
-    }
-    if !contours.is_empty() && !contours[0].is_empty() {
-        let outer_contour = &contours[0];
-        // Closed contour has first == last, so actual vertex count is len - 1
-        // If not closed (first != last), use full length
-        let is_closed = outer_contour.first() == outer_contour.last();
-        let vertex_count = if is_closed && outer_contour.len() > 1 {
-            outer_contour.len() - 1
-        } else {
-            outer_contour.len()
-        };
-        if vertex_count >= 3 {
-            // Create fan triangles using actual contour indices (not synthetic coordinates)
-            // Fan triangulation: vertex 0 connects to all other edges
-            let mut tris = Vec::with_capacity(vertex_count - 2);
-            for i in 1..(vertex_count - 1) {
-                tris.push((outer_contour[0], outer_contour[i], outer_contour[i + 1]));
-            }
-            if !tris.is_empty() {
-                return Ok(tris);
-            }
-        }
-    }
-
-    Err(cdt::Error::CannotInitialize)
-}
-
-// ============================================================================
 // Model tesselation
 // ============================================================================
 
@@ -1127,28 +663,10 @@ struct EdgeDiscretization {
 ///
 /// The key insight: edges are discretized ONCE with pool indices assigned immediately.
 /// Adjacent faces sharing an edge get the SAME pool indices by lookup, not by matching.
-/// When refinement is needed, edges are refined GLOBALLY so all faces sharing that edge
-/// receive the same midpoint.
 ///
-/// Phase 1: Global edge discretization
-///   - Add all BREP vertices to pool (by vertex_idx)
-///   - Discretize each edge and add interior points to pool (by edge_idx)
-///   - Store edge_idx → [pool_indices] mapping
-///
-/// Phase 2: Initial face triangulation (NO subdivision)
-///   - Look up boundary vertices from edge pool (already have pool IDs)
-///   - Project to UV and triangulate
-///   - Build FaceTriangulation state for each face
-///
-/// Phase 3: Global refinement loop
-///   - Collect edges needing refinement from ANY face
-///   - For BOUNDARY edges: refine in BOTH adjacent faces simultaneously
-///   - For INTERIOR edges: refine within single face
-///   - Single midpoint added to pool, shared by all faces using that edge
-///
-/// Phase 4: Final assembly
-///   - Convert local indices to pool indices
-///   - Assign normals
+/// Phase 1: Global edge discretization + contour refinement
+/// Phase 2: Bubble pack + CDT per face (with inline chord error pass)
+/// Phase 3: Final assembly (normals, Trimesh construction)
 struct ShellTessellator<'a> {
     model: &'a BrepModel,
     params: &'a TesselationParams,
@@ -1167,11 +685,11 @@ struct ShellTessellator<'a> {
     /// Maps pool edge (min, max) → BREP edge index (for boundary edge lookup)
     pool_edge_to_brep: HashMap<(usize, usize), usize>,
 
-    // Phase 2/3 results
+    // Phase 2 results
     /// Per-face triangulation state
     face_states: Vec<FaceTriangulation>,
 
-    // Phase 4 results
+    // Phase 3 results
     /// Triangles output
     triangles: Vec<[usize; 3]>,
     /// Normals at each vertex
@@ -1348,16 +866,16 @@ impl<'a> ShellTessellator<'a> {
     /// Returns the COMPLETE sequence including both endpoints.
     /// Deduplication happens at the contour assembly level to ensure faces sharing
     /// an edge with opposite orientations have matching vertex sets.
-    fn get_edge_pool_indices(&self, oe: &OrientedEdge) -> Vec<usize> {
+    fn get_edge_pool_indices(&self, oe: &OrientedEdge) -> Cow<'_, [usize]> {
         let disc = self
             .edge_discretization
             .get(&oe.edge)
             .expect("edge not pre-discretized");
 
         if oe.same_sense {
-            disc.pool_indices.clone()
+            Cow::Borrowed(&disc.pool_indices)
         } else {
-            disc.pool_indices.iter().rev().cloned().collect()
+            Cow::Owned(disc.pool_indices.iter().rev().copied().collect())
         }
     }
 
@@ -1367,7 +885,7 @@ impl<'a> ShellTessellator<'a> {
     fn collect_loop_indices(&self, loop_: &super::topology::BrepLoop) -> Vec<usize> {
         let mut indices = Vec::new();
         for oe in &loop_.edges {
-            for &idx in &self.get_edge_pool_indices(oe) {
+            for &idx in self.get_edge_pool_indices(oe).as_ref() {
                 if indices.last() != Some(&idx) {
                     indices.push(idx);
                 }
@@ -1528,43 +1046,35 @@ impl<'a> ShellTessellator<'a> {
     // Phase 2: Initial Face Triangulation (NO subdivision)
     // =========================================================================
 
-    /// Phase 2: Triangulate a single face without subdivision.
+    /// Phase 2: Triangulate a single face using bubble packing for interior points.
     /// Returns a FaceTriangulation struct with boundary edges marked.
-    fn phase2_initial_triangulation(&mut self, face_idx: usize) -> FaceTriangulation {
+    fn phase2_bubble_triangulation(&mut self, face_idx: usize) -> FaceTriangulation {
         let face = &self.model.faces[face_idx];
         let surface = &self.model.face_surfaces[face.surface];
         let outer_loop = &self.model.loops[face.outer_loop];
 
         let mut state = FaceTriangulation::default();
 
+        // 1. Collect boundary vertices (same as before)
         let outer_pool_indices = self.collect_loop_indices(outer_loop);
 
-        // Add outer boundary vertices to local state
-        // First, collect raw UV coordinates
         let mut raw_uvs: Vec<Point2<f64>> = outer_pool_indices
             .iter()
             .map(|&pool_idx| surface.to_parametric(&self.vertices[pool_idx]))
             .collect();
-
-        // Unwrap angular coordinates to avoid discontinuities at ±π.
         surface.unwrap_uvs(&mut raw_uvs);
 
         for (i, &pool_idx) in outer_pool_indices.iter().enumerate() {
             state.add_vertex(raw_uvs[i], pool_idx);
         }
 
-        // Mark outer boundary edges
         let outer_len = outer_pool_indices.len();
         for i in 0..outer_len {
-            let local_a = i;
-            let local_b = (i + 1) % outer_len;
-            state.mark_boundary_edge(local_a, local_b);
+            state.mark_boundary_edge(i, (i + 1) % outer_len);
         }
 
-        // Collect inner loop pool indices
-        // Apply same deduplication logic as outer loop for consistency
-        // Track both hole starts and their lengths for contour building
-        let mut hole_info: Vec<(usize, usize)> = Vec::new(); // (start, length)
+        // Collect inner loop (hole) vertices
+        let mut hole_info: Vec<(usize, usize)> = Vec::new();
         for &inner_loop_idx in &face.inner_loops {
             let inner_loop = &self.model.loops[inner_loop_idx];
             let loop_indices = self.collect_loop_indices(inner_loop);
@@ -1573,7 +1083,6 @@ impl<'a> ShellTessellator<'a> {
             let hole_len = loop_indices.len();
             hole_info.push((hole_start, hole_len));
 
-            // Add inner boundary vertices with angular unwrapping
             let mut inner_uvs: Vec<Point2<f64>> = loop_indices
                 .iter()
                 .map(|&pool_idx| surface.to_parametric(&self.vertices[pool_idx]))
@@ -1584,562 +1093,215 @@ impl<'a> ShellTessellator<'a> {
                 state.add_vertex(inner_uvs[i], pool_idx);
             }
 
-            // Mark inner boundary edges
             for i in 0..hole_len {
-                let local_a = hole_start + i;
-                let local_b = hole_start + (i + 1) % hole_len;
-                state.mark_boundary_edge(local_a, local_b);
+                state.mark_boundary_edge(hole_start + i, hole_start + (i + 1) % hole_len);
             }
         }
 
-        // Build contours for CDT triangulation (references only boundary points)
-        // Each contour must be closed (last index == first index)
+        // Build contours for CDT
         let outer_len = outer_pool_indices.len();
-        let boundary_len = state.vertices_uv.len();
-
-        // Build outer contour: [0, 1, 2, ..., n-1, 0] (closed)
         let mut outer_contour: Vec<usize> = (0..outer_len).collect();
-        outer_contour.push(0); // Close the contour
+        outer_contour.push(0);
 
-        // Build inner contours (holes) using stored hole_info
         let mut contours: Vec<Vec<usize>> = vec![outer_contour];
         for &(hole_start, hole_len) in &hole_info {
             let mut inner_contour: Vec<usize> = (hole_start..hole_start + hole_len).collect();
-            inner_contour.push(hole_start); // Close the contour
+            inner_contour.push(hole_start);
             contours.push(inner_contour);
         }
 
-        // Compute UV bounds from boundary vertices
-        let (u_min, u_max) = state
-            .vertices_uv
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), p| {
-                (mn.min(p.x), mx.max(p.x))
-            });
-        let (v_min, v_max) = state
-            .vertices_uv
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(mn, mx), p| {
-                (mn.min(p.y), mx.max(p.y))
-            });
-
-        // Generate interior samples for non-planar surfaces
-        let interior_uvs =
-            surface.generate_interior_samples(u_min, u_max, v_min, v_max, self.effective_tolerance);
-
-        // Add interior points to vertex lists
-        // Interior points are unconstrained - CDT will connect them appropriately
-        for uv in &interior_uvs {
-            let p_3d = surface.evaluate(uv.x, uv.y);
-            // Interior points get their own pool index (not shared with other faces)
-            // This is fine because they're inside the face, not on boundaries
-            let pool_idx = self.add_vertex(p_3d);
-            state.add_vertex(*uv, pool_idx);
-        }
-
-        // Check if UV CDT is likely to fail for angular surfaces with extreme distortion.
-        // Cone/Sphere faces spanning nearly the full circle produce UV aspect ratios
-        // of 100-215:1 that always cause CDT failure. Only skip for truly extreme cases
-        // (nearly full circle or very thin UV ribbon) — moderate spans (e.g. 3-4 radians)
-        // may still succeed and produce better results than plane projection.
-        let u_span = u_max - u_min;
-        let v_span = v_max - v_min;
-        let aspect = if v_span > NEAR_ZERO_NORMAL {
-            u_span / v_span
-        } else {
-            f64::MAX
-        };
-        let skip_uv_cdt = surface.is_angular() && aspect > UV_ASPECT_SKIP_THRESHOLD;
-
-        if !skip_uv_cdt {
-            // Convert UV points for CDT
-            let pts: Vec<(f64, f64)> = state.vertices_uv.iter().map(|p| (p.x, p.y)).collect();
-
-            // Apply vertex merging to prevent CDT failures on near-collinear points
-            let pts_as_point2: Vec<Point2<f64>> =
-                pts.iter().map(|&(x, y)| Point2::new(x, y)).collect();
-            let merge_result =
-                merge_near_vertices(&pts_as_point2, &contours, self.params.merge_tolerance);
-            let merged_pts_tuples: Vec<(f64, f64)> =
-                merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
-
-            // Use CDT to triangulate with merged vertices and contours
-            state.triangles = match cdt::triangulate_contours(
-                &merged_pts_tuples,
-                &merge_result.merged_contours,
-            ) {
-                Ok(tris) => {
-                    // Convert CDT output (tuples) to arrays
-                    // Map triangles back to original indices using merged_to_original
-                    // Use filter_map with bounds checking to avoid panics on invalid indices
-                    // Also skip degenerate triangles where merging collapsed two vertices
-                    let filtered: Vec<[usize; 3]> = tris
-                        .iter()
-                        .filter_map(|&(a, b, c)| {
-                            let orig_a = *merge_result.merged_to_original.get(a)?;
-                            let orig_b = *merge_result.merged_to_original.get(b)?;
-                            let orig_c = *merge_result.merged_to_original.get(c)?;
-                            // Skip degenerate triangles (two or more vertices collapsed)
-                            if orig_a == orig_b || orig_b == orig_c || orig_c == orig_a {
-                                return None;
-                            }
-                            Some([orig_a, orig_b, orig_c])
-                        })
-                        .collect();
-
-                    // Validate all contour edges are present in the triangulation.
-                    // Merging may have collapsed boundary vertices, creating edges
-                    // that don't match their neighbors.
-                    let as_tuples: Vec<(usize, usize, usize)> =
-                        filtered.iter().map(|t| (t[0], t[1], t[2])).collect();
-                    if check_all_contour_edges_present(
-                        &as_tuples,
-                        &contours,
-                        Some(&merge_result.original_to_merged),
-                    ) {
-                        filtered
-                    } else {
-                        #[cfg(test)]
-                        log_cdt_failure(
-                            face_idx,
-                            surface.kind_name(),
-                            face.inner_loops.len(),
-                            "boundary_check_failed",
-                            &merged_pts_tuples,
-                            &merge_result.merged_contours,
-                        );
-                        // CDT succeeded but boundary not preserved — fall through to fallback
-                        Vec::new()
-                    }
-                }
-                Err(_cdt_err) => {
-                    #[cfg(test)]
-                    log_cdt_failure(
-                        face_idx,
-                        surface.kind_name(),
-                        face.inner_loops.len(),
-                        &format!("{_cdt_err}"),
-                        &merged_pts_tuples,
-                        &merge_result.merged_contours,
-                    );
-                    // CDT failed — fall through to recovery below
-                    Vec::new()
-                }
-            };
-        }
-
-        // If UV CDT failed with interior samples, retry with boundary-only vertices.
-        // Interior detail will be recovered by Phase 3 adaptive refinement.
-        if state.triangles.is_empty() && !skip_uv_cdt && !interior_uvs.is_empty() {
-            let boundary_pts: Vec<(f64, f64)> = state.vertices_uv[..boundary_len]
+        // 2. Bubble packing for non-planar faces
+        if !surface.is_planar() {
+            let hole_uv_slices: Vec<&[Point2<f64>]> = hole_info
                 .iter()
-                .map(|p| (p.x, p.y))
+                .map(|&(start, len)| &state.vertices_uv[start..start + len])
                 .collect();
-            let boundary_pts_p2: Vec<Point2<f64>> = boundary_pts
-                .iter()
-                .map(|&(x, y)| Point2::new(x, y))
-                .collect();
-            let merge_result =
-                merge_near_vertices(&boundary_pts_p2, &contours, self.params.merge_tolerance);
-            let merged: Vec<(f64, f64)> =
-                merge_result.merged_uvs.iter().map(|p| (p.x, p.y)).collect();
 
-            if let Ok(tris) = cdt::triangulate_contours(&merged, &merge_result.merged_contours) {
-                let filtered: Vec<[usize; 3]> = tris
-                    .iter()
-                    .filter_map(|&(a, b, c)| {
-                        let oa = *merge_result.merged_to_original.get(a)?;
-                        let ob = *merge_result.merged_to_original.get(b)?;
-                        let oc = *merge_result.merged_to_original.get(c)?;
-                        if oa == ob || ob == oc || oc == oa {
-                            return None;
-                        }
-                        Some([oa, ob, oc])
-                    })
-                    .collect();
-                let as_tuples: Vec<(usize, usize, usize)> =
-                    filtered.iter().map(|t| (t[0], t[1], t[2])).collect();
-                if check_all_contour_edges_present(
-                    &as_tuples,
-                    &contours,
-                    Some(&merge_result.original_to_merged),
-                ) {
-                    state.triangles = filtered;
-                }
+            let interior_uvs = super::hex_grid::generate_interior_points(
+                surface,
+                &state.vertices_uv[..outer_len],
+                &hole_uv_slices,
+                self.effective_tolerance,
+            );
+
+            for uv in &interior_uvs {
+                let p_3d = surface.evaluate(uv.x, uv.y);
+                let pool_idx = self.add_vertex(p_3d);
+                state.add_vertex(*uv, pool_idx);
             }
         }
 
-        // Recovery: if CDT produced no triangles (either CDT failed, or boundary
-        // validation failed), try plane projection then fan triangulation.
-        if state.triangles.is_empty() && boundary_len >= 3 {
-            // Try plane projection with all points (boundary + interior)
-            let pts_3d: Vec<Point3<f64>> = state
-                .local_to_pool
-                .iter()
-                .map(|&pool_idx| self.vertices[pool_idx])
-                .collect();
+        // 2.5. Deduplicate vertices that share the same pool index.
+        // Two local vertices with the same pool index produce degenerate CDT triangles
+        // (e.g. [pool_A, pool_A, pool_B]) that double-count edges, breaking watertightness.
+        let (dedup_pts, dedup_contours, dedup_map) = dedup_by_pool(&state, &contours);
 
-            // Build multiple hint normals for plane projection candidates.
-            let u_mid = (u_min + u_max) / 2.0;
-            let v_mid = (v_min + v_max) / 2.0;
-            let mut hint_normals: Vec<Vector3<f64>> = Vec::new();
+        // 3. CDT triangulation — try UV space, check completeness, fall back as needed
+        let dedup_tris = self.triangulate_face_robust_pts(&dedup_pts, &dedup_contours, &state);
 
-            // Primary: surface projection hint (axis for cylinder/cone/torus,
-            // surface normal at centroid for sphere/bspline)
-            if let Some(n) = surface.projection_hint(u_mid, v_mid) {
-                hint_normals.push(n);
-            }
+        // Map dedup triangles back to original local indices
+        state.triangles = dedup_tris
+            .into_iter()
+            .map(|[a, b, c]| [dedup_map[a], dedup_map[b], dedup_map[c]])
+            .collect();
 
-            // Secondary: surface normals at evenly-spaced boundary vertices
-            let n_samples = state.vertices_uv.len().min(8);
-            if n_samples >= 4 {
-                let step = n_samples / 4;
-                for i in (0..n_samples).step_by(step.max(1)) {
-                    let uv = state.vertices_uv[i];
-                    let n = surface.normal_at(uv.x, uv.y);
-                    if n.norm() > NEAR_ZERO_NORMAL {
-                        hint_normals.push(n.normalize());
-                    }
-                }
-            }
-
-            if let Ok(tris) = triangulate_with_plane_projection(
-                &pts_3d,
-                &contours,
-                self.params.merge_tolerance,
-                &hint_normals,
-            ) {
-                state.triangles = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
-            }
+        // 4. Inline chord error pass (absorbs old Phase 3 for this face)
+        if !surface.is_planar() && !state.triangles.is_empty() {
+            self.chord_error_pass(face_idx, &mut state);
         }
 
         state
     }
 
-    // =========================================================================
-    // Phase 3: Global Refinement Loop
-    // =========================================================================
+    /// Triangulate a face with a 4-strategy fallback chain:
+    /// 1. CDT in UV space
+    /// 2. CDT in 3D plane projection
+    /// 3. Earcut in UV space (loses interior points and edge constraints)
+    /// 4. Fan triangulation (wrong for non-convex, last resort)
+    fn triangulate_face_robust_pts(
+        &self,
+        pts: &[(f64, f64)],
+        contours: &[Vec<usize>],
+        state: &FaceTriangulation,
+    ) -> Vec<[usize; 3]> {
+        // Build contour edge set once — invariant across all CDT attempts
+        let expected = contour_edge_set(contours);
 
-    /// Phase 3: Refine edges globally until all triangles meet tolerance.
-    ///
-    /// The key insight: when an edge needs refinement, ALL faces using that edge
-    /// must be updated with the SAME midpoint vertex. This ensures watertightness.
-    ///
-    /// Uses incremental tracking: only checks faces that were modified in the previous
-    /// iteration, reducing complexity from O(F × T × I) to O(M × T_avg × I) where M << F.
-    fn phase3_global_refinement(&mut self) {
-        const MAX_ITERATIONS: usize = 5;
-        const MAX_VERTICES: usize = 200_000;
+        // Try 1: CDT in UV space
+        if let Ok(tris) = cdt::triangulate_contours(pts, contours) {
+            let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
+            if contours_complete_with(&result, &expected) {
+                return result;
+            }
+        }
 
-        // Initially, all non-planar faces need checking
-        let mut faces_to_check: BTreeSet<usize> = self
-            .face_states
+        // Try 2: CDT in 3D plane projection
+        let result = self.cdt_plane_fallback(state, contours);
+        if !result.is_empty() && contours_complete_with(&result, &expected) {
+            return result;
+        }
+
+        // Try 3: Earcut in UV space
+        {
+            // Convert closed contours (last == first) to open for earcut
+            let exterior: Vec<usize> = contours[0][..contours[0].len() - 1].to_vec();
+            let interiors: Vec<Vec<usize>> = contours[1..]
+                .iter()
+                .map(|c| c[..c.len() - 1].to_vec())
+                .collect();
+            let vertices: Vec<Point2<f64>> = pts.iter().map(|&(x, y)| Point2::new(x, y)).collect();
+            let mut tri = Triangulator::new();
+            let result = tri.triangulate_2d(&exterior, &interiors, &vertices, false);
+            if !result.is_empty() && contours_complete_with(&result, &expected) {
+                return result;
+            }
+        }
+
+        // Try 4: Fan triangulation (always produces something, wrong for non-convex)
+        fan_triangulate(contours)
+    }
+
+    /// Single-pass chord error check for a face's triangulation.
+    /// Splits edges that exceed tolerance. At most 2 iterations since
+    /// bubble packing gives good distribution up front.
+    fn chord_error_pass(&mut self, face_idx: usize, state: &mut FaceTriangulation) {
+        const MAX_PASS_ITERS: usize = 2;
+
+        let face = &self.model.faces[face_idx];
+        let surface = &self.model.face_surfaces[face.surface];
+
+        state.build_edge_tris();
+
+        for _ in 0..MAX_PASS_ITERS {
+            // Collect edges to split, caching the midpoint to avoid recomputing
+            let mut edges_to_split: HashMap<(usize, usize), (Point2<f64>, Point3<f64>)> =
+                HashMap::new();
+
+            for tri in &state.triangles {
+                let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+
+                for (la, lb) in edges {
+                    // Skip boundary edges — splitting them per-face creates
+                    // T-junctions with adjacent faces, breaking watertightness.
+                    if state.is_boundary_edge(la, lb) {
+                        continue;
+                    }
+
+                    let key = canonical_edge(la, lb);
+                    if edges_to_split.contains_key(&key) {
+                        continue;
+                    }
+
+                    let uv_a = state.vertices_uv[la];
+                    let uv_b = state.vertices_uv[lb];
+
+                    let (uv_mid, p_mid_surface) = surface.midpoint_uv(&uv_a, &uv_b);
+
+                    let pool_a = state.local_to_pool[la];
+                    let pool_b = state.local_to_pool[lb];
+                    let p_a = self.vertices[pool_a];
+                    let p_b = self.vertices[pool_b];
+                    let p_mid_linear = p_a.lerp(&p_b, 0.5);
+
+                    let error = (p_mid_surface - p_mid_linear).norm();
+                    if error > self.effective_tolerance {
+                        edges_to_split.insert(key, (uv_mid, p_mid_surface));
+                    }
+                }
+            }
+
+            if edges_to_split.is_empty() {
+                break;
+            }
+
+            for ((la, lb), (uv_mid, p_mid)) in edges_to_split {
+                let pool_mid = self.add_vertex(p_mid);
+                let local_mid = state.add_vertex(uv_mid, pool_mid);
+                let _ = state.split_triangles_at_edge(la, lb, local_mid);
+            }
+        }
+    }
+
+    /// Fallback when UV-space CDT fails (self-intersecting contour).
+    /// Projects all vertices to a best-fit 3D plane and does CDT there.
+    fn cdt_plane_fallback(
+        &self,
+        state: &FaceTriangulation,
+        contours: &[Vec<usize>],
+    ) -> Vec<[usize; 3]> {
+        let n = state.local_to_pool.len();
+        if n < 3 {
+            return Vec::new();
+        }
+
+        // Collect 3D positions
+        let positions: Vec<Point3<f64>> = state
+            .local_to_pool
             .iter()
-            .enumerate()
-            .filter_map(|(idx, _)| {
-                let face = &self.model.faces[idx];
-                let surface = &self.model.face_surfaces[face.surface];
-                if surface.is_planar() { None } else { Some(idx) }
-            })
+            .map(|&pool_idx| self.vertices[pool_idx])
             .collect();
 
-        // Build edge→triangle adjacency maps for Phase 3 refinement.
-        // Build for ALL faces, not just non-planar, because planar neighbors
-        // of curved faces also get split when sharing BREP boundary edges.
-        for state in &mut self.face_states {
-            state.build_edge_tris();
-        }
-
-        let mut prev_max_error = f64::MAX;
-
-        for _iteration in 0..MAX_ITERATIONS {
-            // Safety: bail if we've exceeded the vertex budget
-            if self.vertices.len() > MAX_VERTICES {
-                break;
-            }
-
-            // 3a. Collect all edges needing refinement from faces in the work set
-            // Map: (pool_a, pool_b) -> first face_idx that requested it (for UV computation)
-            let mut edges_to_refine: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-            let mut iteration_max_error = 0.0_f64;
-
-            for &face_idx in &faces_to_check {
-                let state = &self.face_states[face_idx];
-                let face = &self.model.faces[face_idx];
-                let surface = &self.model.face_surfaces[face.surface];
-
-                // Pre-evaluate all vertex positions for this face (read-only phase).
-                // Each vertex is shared by ~5-6 triangles, so this avoids redundant
-                // surface.evaluate() calls.
-                let positions: Vec<Point3<f64>> = state
-                    .vertices_uv
-                    .iter()
-                    .map(|uv| surface.evaluate(uv.x, uv.y))
-                    .collect();
-
-                for tri in &state.triangles {
-                    let error = self.check_triangle_error_state(face_idx, state, tri, &positions);
-
-                    if error.needs_subdivision {
-                        iteration_max_error =
-                            iteration_max_error.max(error.max_edge_midpoint_error);
-
-                        // Find the edge with maximum error
-                        let (local_a, local_b) = match error.max_error_edge {
-                            0 => (tri[0], tri[1]),
-                            1 => (tri[1], tri[2]),
-                            _ => (tri[2], tri[0]),
-                        };
-
-                        let pool_a = state.local_to_pool[local_a];
-                        let pool_b = state.local_to_pool[local_b];
-                        let pool_edge = canonical_edge(pool_a, pool_b);
-
-                        // Record all faces that request this edge
-                        edges_to_refine.entry(pool_edge).or_default().push(face_idx);
-                    }
-                }
-            }
-
-            if edges_to_refine.is_empty() {
-                break;
-            }
-
-            // Error-based bail: stop if max error didn't decrease by at least 50%
-            if iteration_max_error > prev_max_error * ERROR_REDUCTION_BAIL {
-                break;
-            }
-            prev_max_error = iteration_max_error;
-
-            // Track which faces get modified for next iteration
-            let mut modified_faces: BTreeSet<usize> = BTreeSet::new();
-
-            // 3b. Refine each edge ONCE, update ALL faces that use it
-            for ((pool_a, pool_b), requesting_faces) in edges_to_refine {
-                // Pick the face with highest curvature at the edge midpoint
-                // so that curved surfaces evaluate the midpoint rather than planar neighbors.
-                let best_face_idx = *requesting_faces
-                    .iter()
-                    .max_by(|&&fi_a, &&fi_b| {
-                        let ka = self.edge_midpoint_curvature(fi_a, pool_a, pool_b);
-                        let kb = self.edge_midpoint_curvature(fi_b, pool_a, pool_b);
-                        ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-
-                // Look up the local indices from the best face's current state
-                let best_state = &self.face_states[best_face_idx];
-
-                // Get local indices for this edge in the best face
-                let Some(local_a) = best_state.get_local(pool_a) else {
-                    continue; // Edge not in this face anymore (shouldn't happen)
-                };
-                let Some(local_b) = best_state.get_local(pool_b) else {
-                    continue;
-                };
-
-                let best_face = &self.model.faces[best_face_idx];
-                let best_surface = &self.model.face_surfaces[best_face.surface];
-
-                let uv_a = best_state.vertices_uv[local_a];
-                let uv_b = best_state.vertices_uv[local_b];
-
-                let (_uv_mid, p_mid) = best_surface.midpoint_uv(&uv_a, &uv_b);
-
-                let pool_mid = self.add_vertex(p_mid);
-
-                // Check if this is a BREP boundary edge
-                let brep_edge_idx = self.pool_edge_to_brep.get(&(pool_a, pool_b)).copied();
-
-                // Collect ALL face indices that need to be updated
-                let mut faces_to_update: HashSet<usize> = HashSet::new();
-                // Include all faces that requested this edge
-                for &fi in &requesting_faces {
-                    faces_to_update.insert(fi);
-                }
-
-                // If this is a BREP boundary edge, add all adjacent faces
-                if let Some(edge_idx) = brep_edge_idx
-                    && let Some(edge_uses) = self.edge_adjacency.get(&edge_idx)
-                {
-                    for edge_use in edge_uses {
-                        faces_to_update.insert(edge_use.face_idx);
-                    }
-                }
-
-                // Verify all faces have both endpoints before splitting.
-                // If any face is missing an endpoint, skip this edge entirely
-                // to prevent T-junctions from partial splits.
-                let all_faces_have_edge = faces_to_update.iter().all(|&fi| {
-                    let s = &self.face_states[fi];
-                    s.get_local(pool_a).is_some() && s.get_local(pool_b).is_some()
-                });
-                if !all_faces_have_edge {
-                    continue;
-                }
-
-                // Split the edge in ALL faces that use it
-                for &face_idx in &faces_to_update {
-                    let success = self.split_edge_in_face(face_idx, pool_a, pool_b, pool_mid);
-                    debug_assert!(success, "split_edge_in_face failed for face {face_idx}");
-
-                    // Track modified faces for next iteration (only non-planar ones)
-                    let face = &self.model.faces[face_idx];
-                    let surface = &self.model.face_surfaces[face.surface];
-                    if !surface.is_planar() {
-                        modified_faces.insert(face_idx);
-                    }
-                }
-
-                // Update pool_edge_to_brep for the new edges
-                if let Some(edge_idx) = brep_edge_idx {
-                    let key_a = canonical_edge(pool_a, pool_mid);
-                    let key_b = canonical_edge(pool_mid, pool_b);
-                    self.pool_edge_to_brep.insert(key_a, edge_idx);
-                    self.pool_edge_to_brep.insert(key_b, edge_idx);
-                }
-            }
-
-            // Next iteration only checks faces that were modified
-            faces_to_check = modified_faces;
-        }
-    }
-
-    /// Compute maximum curvature at the midpoint of an edge for a given face.
-    /// Used to select the highest-curvature face when multiple faces share an edge,
-    /// so that the curved surface evaluates the midpoint rather than a planar neighbor.
-    fn edge_midpoint_curvature(&self, face_idx: usize, pool_a: usize, pool_b: usize) -> f64 {
-        let state = &self.face_states[face_idx];
-        let Some(local_a) = state.get_local(pool_a) else {
-            return 0.0;
+        // Fit a plane and project all points to 2D
+        let Ok(plane) = Plane::from_points(&positions, true) else {
+            return Vec::new();
         };
-        let Some(local_b) = state.get_local(pool_b) else {
-            return 0.0;
-        };
-        let face = &self.model.faces[face_idx];
-        let surface = &self.model.face_surfaces[face.surface];
-        let uv_a = state.vertices_uv[local_a];
-        let uv_b = state.vertices_uv[local_b];
-        let (uv_mid, _) = surface.midpoint_uv(&uv_a, &uv_b);
-        let kappa = surface.curvature_at(uv_mid.x, uv_mid.y).kappa_max();
-        if kappa.is_finite() { kappa } else { 1e6 }
+        let pts_2d: Vec<(f64, f64)> = plane
+            .to_2d(&positions)
+            .into_iter()
+            .map(|p| (p.x, p.y))
+            .collect();
+
+        cdt::triangulate_contours(&pts_2d, contours)
+            .map(|tris| tris.iter().map(|&(a, b, c)| [a, b, c]).collect())
+            .unwrap_or_default()
     }
 
     // =========================================================================
-    // Phase 3.5: Merge Duplicate 3D Vertices
+    // Phase 3: Final Assembly
     // =========================================================================
 
-    /// Check triangle error using face state and pre-evaluated vertex positions.
-    fn check_triangle_error_state(
-        &self,
-        face_idx: usize,
-        state: &FaceTriangulation,
-        tri: &[usize; 3],
-        positions: &[Point3<f64>],
-    ) -> TriangleError {
-        let face = &self.model.faces[face_idx];
-        let surface = &self.model.face_surfaces[face.surface];
-
-        let uv0 = state.vertices_uv[tri[0]];
-        let uv1 = state.vertices_uv[tri[1]];
-        let uv2 = state.vertices_uv[tri[2]];
-
-        let p0 = positions[tri[0]];
-        let p1 = positions[tri[1]];
-        let p2 = positions[tri[2]];
-
-        // Check centroid error
-        let uv_center = Point2::from((uv0.coords + uv1.coords + uv2.coords) / 3.0);
-        let p_center_surface = surface.evaluate(uv_center.x, uv_center.y);
-        let p_center_linear = Point3::from((p0.coords + p1.coords + p2.coords) / 3.0);
-        let centroid_error = (p_center_surface - p_center_linear).norm();
-
-        // Check edge midpoint errors
-        let edges = [(uv0, uv1, p0, p1), (uv1, uv2, p1, p2), (uv2, uv0, p2, p0)];
-
-        let mut max_edge_error = 0.0;
-        let mut max_error_edge = 0;
-
-        for (edge_idx, (uv_a, uv_b, p_a, p_b)) in edges.iter().enumerate() {
-            let (_, p_mid_surface) = surface.midpoint_uv(uv_a, uv_b);
-            let p_mid_linear = Point3::from((p_a.coords + p_b.coords) / 2.0);
-            let edge_error = (p_mid_surface - p_mid_linear).norm();
-
-            if edge_error > max_edge_error {
-                max_edge_error = edge_error;
-                max_error_edge = edge_idx;
-            }
-        }
-
-        let max_error = centroid_error.max(max_edge_error);
-        let needs_subdivision = max_error > self.effective_tolerance;
-
-        TriangleError {
-            _centroid_error: centroid_error,
-            max_edge_midpoint_error: max_edge_error,
-            max_error_edge,
-            needs_subdivision,
-        }
-    }
-
-    /// Split an edge in a face's triangulation.
-    /// Updates the face state with the new vertex and re-triangulates affected triangles.
-    ///
-    /// Returns true if the edge was successfully split, false if the edge wasn't found
-    /// in this face (which may indicate an inconsistent edge adjacency).
-    #[must_use]
-    fn split_edge_in_face(
-        &mut self,
-        face_idx: usize,
-        pool_a: usize,
-        pool_b: usize,
-        pool_mid: usize,
-    ) -> bool {
-        let state = &mut self.face_states[face_idx];
-
-        // Check if this face has both endpoints
-        let Some(local_a) = state.get_local(pool_a) else {
-            // This face doesn't have vertex pool_a - edge not in this face
-            return false;
-        };
-        let Some(local_b) = state.get_local(pool_b) else {
-            // Face has pool_a but not pool_b - this indicates inconsistent edge adjacency
-            return false;
-        };
-
-        let face = &self.model.faces[face_idx];
-        let surface = &self.model.face_surfaces[face.surface];
-
-        let uv_a = state.vertices_uv[local_a];
-        let uv_b = state.vertices_uv[local_b];
-        let (uv_mid, _) = surface.midpoint_uv(&uv_a, &uv_b);
-
-        // Add the midpoint to local state
-        let local_mid = state.add_vertex(uv_mid, pool_mid);
-
-        // Update boundary edge tracking if this was a boundary edge
-        if state.is_boundary_edge(local_a, local_b) {
-            state
-                .boundary_edges
-                .remove(&canonical_edge(local_a, local_b));
-            state.mark_boundary_edge(local_a, local_mid);
-            state.mark_boundary_edge(local_mid, local_b);
-        }
-
-        // Split triangles using edge_tris adjacency map (O(1) lookup, not O(T) scan).
-        // Return value intentionally ignored: edge may not appear in any triangle
-        // if the face's CDT failed and used a fallback triangulation.
-        let _ = state.split_triangles_at_edge(local_a, local_b, local_mid);
-
-        true
-    }
-
-    // =========================================================================
-    // Phase 4: Final Assembly
-    // =========================================================================
-
-    /// Phase 4: Convert face states to final triangles and compute normals.
-    fn phase4_final_assembly(&mut self) {
+    /// Phase 3: Convert face states to final triangles and compute normals.
+    fn phase3_final_assembly(&mut self) {
         // Initialize normals for all vertices
         self.normals = vec![Vector3::zeros(); self.vertices.len()];
 
@@ -2179,10 +1341,7 @@ impl<'a> ShellTessellator<'a> {
 
         // Normalize accumulated normals
         for n in &mut self.normals {
-            let len = n.norm();
-            if len > NEAR_ZERO_NORMAL {
-                *n /= len;
-            }
+            n.try_normalize_mut(NEAR_ZERO_NORMAL);
         }
     }
 
@@ -2197,27 +1356,22 @@ impl<'a> ShellTessellator<'a> {
         self.phase1_5_refine_outer_contours();
         let _t2 = std::time::Instant::now();
 
-        // Phase 2: Initial triangulation for each face (no subdivision)
+        // Phase 2: Bubble pack + CDT triangulation for each face
         for face_idx in 0..self.model.faces.len() {
-            let state = self.phase2_initial_triangulation(face_idx);
+            let state = self.phase2_bubble_triangulation(face_idx);
             self.face_states.push(state);
         }
         let _t3 = std::time::Instant::now();
 
-        // Phase 3: Global refinement loop
-        self.phase3_global_refinement();
-        let _t4 = std::time::Instant::now();
-
-        // Phase 4: Final assembly
-        self.phase4_final_assembly();
+        // Phase 3: Final assembly
+        self.phase3_final_assembly();
 
         #[cfg(test)]
         eprintln!(
-            "    tess phases: edge={:.1}ms CDT={:.1}ms refine={:.1}ms assemble={:.1}ms",
+            "    tess phases: edge={:.1}ms bubble+CDT={:.1}ms assemble={:.1}ms",
             (_t2 - _t1).as_secs_f64() * 1e3,
             (_t3 - _t2).as_secs_f64() * 1e3,
-            (_t4 - _t3).as_secs_f64() * 1e3,
-            (std::time::Instant::now() - _t4).as_secs_f64() * 1e3,
+            (std::time::Instant::now() - _t3).as_secs_f64() * 1e3,
         );
 
         // Build Trimesh with attributes
@@ -3228,41 +2382,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_near_vertices_no_duplicates() {
-        // When no points are within tolerance, nothing should be merged
-        let uvs = vec![
-            Point2::new(0.0, 0.0),
-            Point2::new(1.0, 0.0),
-            Point2::new(1.0, 1.0),
-            Point2::new(0.0, 1.0),
-        ];
-        let contours = vec![vec![0, 1, 2, 3, 0]];
-        let result = merge_near_vertices(&uvs, &contours, 1e-8);
-
-        assert_eq!(result.merged_uvs.len(), 4);
-        assert_eq!(result.merged_contours.len(), 1);
-        assert_eq!(result.merged_contours[0], vec![0, 1, 2, 3, 0]);
-    }
-
-    #[test]
-    fn test_merge_near_vertices_with_duplicates() {
-        // Points within tolerance should be merged
-        let uvs = vec![
-            Point2::new(0.0, 0.0),
-            Point2::new(1.0, 0.0),
-            Point2::new(1.0 + 1e-10, 0.0 + 1e-10), // Near duplicate of index 1
-            Point2::new(0.0, 1.0),
-        ];
-        let contours = vec![vec![0, 1, 2, 3, 0]];
-        let result = merge_near_vertices(&uvs, &contours, 1e-8);
-
-        // Index 2 should merge with index 1
-        assert_eq!(result.merged_uvs.len(), 3);
-        // Contour should have consecutive duplicates removed
-        assert_eq!(result.merged_contours[0].len(), 4); // [0, 1, 2, 0] with 2 mapped to 1 -> [0, 1, 2, 0]
-    }
-
-    #[test]
     fn test_surface_is_angular() {
         // Test that is_angular correctly identifies angular surfaces
         let plane = Surface::Plane(SurfacePlane::new(Point3::origin(), Vector3::z()));
@@ -3282,13 +2401,6 @@ mod tests {
 
         let torus = Surface::Torus(Torus::new(Point3::origin(), Vector3::z(), 2.0, 0.5));
         assert!(torus.is_angular());
-    }
-
-    #[test]
-    fn test_tesselation_params_default_has_merge_tolerance() {
-        let params = TesselationParams::default();
-        assert!(params.merge_tolerance > 0.0);
-        assert!(params.merge_tolerance < 1e-6); // Should be small
     }
 
     #[test]
