@@ -238,11 +238,7 @@ fn preprocess_schema(schema: &mut Value) {
                     .iter()
                     .any(|r| r.contains("glTFProperty") || r.contains("glTFChildOfRootProperty"));
                 let has_child = refs.iter().any(|r| r.contains("glTFChildOfRootProperty"));
-                if is_base {
-                    Some(has_child)
-                } else {
-                    None
-                }
+                if is_base { Some(has_child) } else { None }
             } else {
                 None
             };
@@ -365,10 +361,7 @@ fn simplify_any_of(variants: &[Value]) -> Option<Vec<(String, Value)>> {
     }
 
     let base = base_type?;
-    Some(vec![(
-        "type".to_string(),
-        Value::String(base.to_string()),
-    )])
+    Some(vec![("type".to_string(), Value::String(base.to_string()))])
 }
 
 /// Recursively rewrite $ref values from relative filenames to #/definitions/...
@@ -408,7 +401,10 @@ fn postprocess(code: &str) -> String {
             "::serde_json::Map<::std::string::String, ::serde_json::Value>",
             "serde_json::Map<String, serde_json::Value>",
         ),
-        ("::std::collections::HashMap<::std::string::String,", "HashMap<String,"),
+        (
+            "::std::collections::HashMap<::std::string::String,",
+            "HashMap<String,",
+        ),
         ("::std::option::Option", "Option"),
         ("::std::string::String", "String"),
         ("::std::vec::Vec", "Vec"),
@@ -441,7 +437,10 @@ fn postprocess(code: &str) -> String {
         ("pub component_type: i64", "pub component_type: u32"),
         ("pub count: i64", "pub count: u64"),
         ("pub byte_length: i64", "pub byte_length: u64"),
-        ("pub byte_stride: Option<i64>", "pub byte_stride: Option<u32>"),
+        (
+            "pub byte_stride: Option<i64>",
+            "pub byte_stride: Option<u32>",
+        ),
         ("pub target: Option<i64>", "pub target: Option<u32>"),
         ("pub mode: i64", "pub mode: u32"),
         ("pub mag_filter: Option<i64>", "pub mag_filter: Option<u32>"),
@@ -464,14 +463,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "Material",
         "alpha_cutoff",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "alphaCutoff",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub alpha_cutoff: Option<f64>,"#,
-        ],
+    pub alpha_cutoff: Option<f64>,"#],
         r#"    ///The alpha cutoff value of the material.
     #[serde(rename = "alphaCutoff", default = "defaults::material_alpha_cutoff")]
     pub alpha_cutoff: f64,"#,
@@ -488,14 +485,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "MaterialPbrMetallicRoughness",
         "metallic_factor",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "metallicFactor",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub metallic_factor: Option<f64>,"#,
-        ],
+    pub metallic_factor: Option<f64>,"#],
         r#"    ///The factor for the metalness of the material.
     #[serde(rename = "metallicFactor", default = "defaults::pbr_metallic_factor")]
     pub metallic_factor: f64,"#,
@@ -506,14 +501,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "MaterialPbrMetallicRoughness",
         "roughness_factor",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "roughnessFactor",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub roughness_factor: Option<f64>,"#,
-        ],
+    pub roughness_factor: Option<f64>,"#],
         r#"    ///The factor for the roughness of the material.
     #[serde(rename = "roughnessFactor", default = "defaults::pbr_roughness_factor")]
     pub roughness_factor: f64,"#,
@@ -541,14 +534,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "LightSpot",
         "inner_cone_angle",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "innerConeAngle",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub inner_cone_angle: Option<f64>,"#,
-        ],
+    pub inner_cone_angle: Option<f64>,"#],
         r#"    ///Angle in radians from centre of spotlight where falloff begins.
     #[serde(rename = "innerConeAngle", default = "defaults::light_spot_inner_cone_angle")]
     pub inner_cone_angle: f64,"#,
@@ -559,14 +550,12 @@ fn postprocess(code: &str) -> String {
         &code,
         "LightSpot",
         "outer_cone_angle",
-        &[
-            r#"    #[serde(
+        &[r#"    #[serde(
         rename = "outerConeAngle",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub outer_cone_angle: Option<f64>,"#,
-        ],
+    pub outer_cone_angle: Option<f64>,"#],
         r#"    ///Angle in radians from centre of spotlight where falloff ends.
     #[serde(rename = "outerConeAngle", default = "defaults::light_spot_outer_cone_angle")]
     pub outer_cone_angle: f64,"#,

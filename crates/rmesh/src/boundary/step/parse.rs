@@ -86,7 +86,61 @@ pub struct Derived;
 
 impl Parse<'_> for Derived {
     fn parse(s: &str) -> IResult<'_, Self> {
-        map(char('*'), |_| Derived)(s)
+        // Accept `*` (derived marker), `$` (null), or `#digits` (entity ref).
+        // Complex entities may use any of these for inherited attributes.
+        alt((
+            map(char('*'), |_| Derived),
+            map(char('$'), |_| Derived),
+            map(preceded(char('#'), digit1), |_| Derived),
+        ))(s)
+    }
+}
+
+/// A raw SELECT-type value from a STEP entity parameter.
+/// Handles enum tags (`.UNSPECIFIED.`), typed values (`LENGTH_MEASURE(0.0254)`),
+/// quoted strings (`'text'`), null refs (`$`), and derived markers (`*`).
+#[derive(Debug, Clone, Copy)]
+pub struct Select<'a>(pub &'a str);
+
+impl<'a> Parse<'a> for Select<'a> {
+    fn parse(s: &'a str) -> IResult<'a, Self> {
+        alt((
+            map(<&str>::parse, Select),
+            map(char('*'), |_| Select("*")),
+            map(parse_select_raw, Select),
+        ))(s)
+    }
+}
+
+/// Captures raw text with balanced parentheses, stopping at `,` or `)` at depth 0.
+fn parse_select_raw(s: &str) -> IResult<'_, &str> {
+    let mut depth = 0usize;
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' if depth == 0 => {
+                return if i == 0 {
+                    nom_err(s, ErrorKind::Alpha)
+                } else {
+                    Ok((&s[i..], &s[..i]))
+                };
+            }
+            b')' => depth -= 1,
+            b',' if depth == 0 => {
+                return if i == 0 {
+                    nom_err(s, ErrorKind::Alpha)
+                } else {
+                    Ok((&s[i..], &s[..i]))
+                };
+            }
+            _ => {}
+        }
+    }
+    if s.is_empty() {
+        nom_err(s, ErrorKind::Alpha)
+    } else {
+        Ok(("", s))
     }
 }
 
@@ -451,6 +505,54 @@ mod tests {
         let (remaining, value) = bool::parse(".F.)").unwrap();
         assert!(!value);
         assert_eq!(remaining, ")");
+    }
+
+    #[test]
+    fn test_parse_select() {
+        // Enum tag
+        let (r, v) = Select::parse(".UNSPECIFIED.,").unwrap();
+        assert_eq!(v.0, "UNSPECIFIED");
+        assert_eq!(r, ",");
+
+        // Function-call syntax (the key new case)
+        let (r, v) = Select::parse("LENGTH_MEASURE(0.0254),#6050)").unwrap();
+        assert_eq!(v.0, "LENGTH_MEASURE(0.0254)");
+        assert_eq!(r, ",#6050)");
+
+        // Null ref
+        let (r, v) = Select::parse("$,").unwrap();
+        assert_eq!(v.0, "");
+        assert_eq!(r, ",");
+
+        // Derived marker
+        let (r, v) = Select::parse("*,").unwrap();
+        assert_eq!(v.0, "*");
+        assert_eq!(r, ",");
+
+        // Quoted string
+        let (r, v) = Select::parse("'hello',").unwrap();
+        assert_eq!(v.0, "hello");
+        assert_eq!(r, ",");
+
+        // Nested parens
+        let (r, v) = Select::parse("A(B(1),C(2)),next").unwrap();
+        assert_eq!(v.0, "A(B(1),C(2))");
+        assert_eq!(r, ",next");
+    }
+
+    #[test]
+    fn test_parse_derived() {
+        // Standard derived marker
+        let (r, _) = Derived::parse("*,").unwrap();
+        assert_eq!(r, ",");
+
+        // Entity reference (common in complex entities)
+        let (r, _) = Derived::parse("#5184,").unwrap();
+        assert_eq!(r, ",");
+
+        // Null
+        let (r, _) = Derived::parse("$,").unwrap();
+        assert_eq!(r, ",");
     }
 
     #[test]

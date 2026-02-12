@@ -181,6 +181,7 @@ pub fn create_icosphere(radius: f64, subdivisions: usize) -> Trimesh {
     Trimesh::new(vertices, faces, None, None).unwrap()
 }
 
+mod earcut;
 use earcut::Earcut;
 
 /// A wrapper object for a triangulator
@@ -312,11 +313,10 @@ impl Triangulator {
         // find a plane for the vertices in our exterior as not every vertex may be referenced
         let fittable: Vec<Point3<f64>> = exterior.iter().map(|i| vertices[*i]).collect();
         // use the cross product method to find a plane which works well for exactly planar points
-        let result = Plane::from_points(&fittable, true)
-            .map(|plane| {
-                let on_plane = plane.to_2d(vertices);
-                self.trianglate_2d(exterior, interiors, &on_plane, local_indices)
-            });
+        let result = Plane::from_points(&fittable, true).map(|plane| {
+            let on_plane = plane.to_2d(vertices);
+            self.trianglate_2d(exterior, interiors, &on_plane, local_indices)
+        });
 
         match result {
             Ok(tris) => Ok(tris),

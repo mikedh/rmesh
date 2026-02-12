@@ -85,12 +85,12 @@ impl ZipResolver {
     /// but does not decompress any entries.
     pub fn from_zip_bytes(data: &[u8]) -> Result<Self> {
         let cursor = std::io::Cursor::new(data);
-        let archive =
-            zip::ZipArchive::new(cursor).context("failed to open ZIP archive")?;
+        let archive = zip::ZipArchive::new(cursor).context("failed to open ZIP archive")?;
 
         let mut index = HashMap::new();
         for i in 0..archive.len() {
-            let name = archive.name_for_index(i)
+            let name = archive
+                .name_for_index(i)
                 .context("failed to read ZIP entry name")?;
             // Key by filename only (strip directory prefixes)
             let key = name.rsplit('/').next().unwrap_or(name);
@@ -108,8 +108,7 @@ impl ZipResolver {
     /// Decompress a ZIP entry by its index.
     fn read_entry(&self, entry_index: usize) -> Result<Vec<u8>> {
         let cursor = std::io::Cursor::new(&self.data);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .context("failed to reopen ZIP archive")?;
+        let mut archive = zip::ZipArchive::new(cursor).context("failed to reopen ZIP archive")?;
         let mut file = archive.by_index(entry_index)?;
         let mut buf = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut buf)?;

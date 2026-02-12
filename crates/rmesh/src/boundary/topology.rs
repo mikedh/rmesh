@@ -617,7 +617,6 @@ pub struct BrepModel {
     pub solids: Vec<BrepSolid>,
 }
 
-
 /// Errors found during BREP model validation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrepError {

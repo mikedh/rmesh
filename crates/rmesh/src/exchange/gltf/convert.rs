@@ -14,8 +14,8 @@ use crate::scene::{
 };
 
 use super::schema::{
-    self as gltf_2, AccessorType, CameraType, GltfAlphaMode, GltfAnimationPath,
-    GltfInterpolation, GltfLightType, COMPONENT_F32, COMPONENT_U16, COMPONENT_U32,
+    self as gltf_2, AccessorType, COMPONENT_F32, COMPONENT_U16, COMPONENT_U32, CameraType,
+    GltfAlphaMode, GltfAnimationPath, GltfInterpolation, GltfLightType,
 };
 
 // GLB constants
@@ -203,15 +203,18 @@ pub fn material_from_scene(mat: &Material) -> gltf_2::Material {
 
 // ─── Animation conversion ────────────────────────────────────────────
 
-pub fn animation_from_scene(
-    anim: &Animation,
-    buf: &mut BufferBuilder,
-) -> gltf_2::Animation {
+pub fn animation_from_scene(anim: &Animation, buf: &mut BufferBuilder) -> gltf_2::Animation {
     let mut gltf_samplers = Vec::new();
     let mut gltf_channels = Vec::new();
 
     for (sampler_idx, sampler) in anim.samplers.iter().enumerate() {
-        let input_idx = buf.add_scalar_f32(&sampler.timestamps.iter().map(|&v| v as f32).collect::<Vec<_>>());
+        let input_idx = buf.add_scalar_f32(
+            &sampler
+                .timestamps
+                .iter()
+                .map(|&v| v as f32)
+                .collect::<Vec<_>>(),
+        );
         let (output_idx, output_type) = match sampler.components {
             3 => {
                 let vecs: Vec<[f32; 3]> = sampler
@@ -386,9 +389,8 @@ fn decompose_transform(
             nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0),
         ]);
         let rot3 = rot_mat.fixed_view::<3, 3>(0, 0).into_owned();
-        let q = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(
-            rot3,
-        ));
+        let q =
+            UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(rot3));
         let rotation = [q.i, q.j, q.k, q.w]; // glTF order: x,y,z,w
         (identity, translation, rotation, scale)
     } else {
@@ -590,12 +592,9 @@ pub fn from_scene(scene: &Scene) -> Result<Vec<u8>> {
             continue;
         };
 
-        if let Some(mesh) = export_trimesh(
-            trimesh,
-            &mut buf,
-            &mut gltf_materials,
-            &mut material_map,
-        ) {
+        if let Some(mesh) =
+            export_trimesh(trimesh, &mut buf, &mut gltf_materials, &mut material_map)
+        {
             geom_index_map.insert(geom_idx, gltf_meshes.len());
             gltf_meshes.push(mesh);
         }

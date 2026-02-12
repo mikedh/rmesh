@@ -8,6 +8,11 @@ use anyhow::{Context, Result, bail};
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3, Vector4};
 use rayon::prelude::*;
 
+use self::schema::{
+    self as gltf_2, AccessorType, COMPONENT_U8, COMPONENT_U16, COMPONENT_U32, CameraType,
+    GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GL_TRIANGLES, GlTf, GltfAlphaMode, GltfAnimationPath,
+    GltfIndex, GltfInterpolation, GltfLightType, KhrLightsPunctual,
+};
 use crate::attributes::{AlphaMode, Grouping, GroupingKind, Material, PBRMaterial, UNSET};
 use crate::boundary::Surface;
 use crate::geometry::Geometry;
@@ -17,11 +22,6 @@ use crate::resolvers::Resolver;
 use crate::scene::{
     Animation, AnimationChannel, AnimationPath, AnimationSampler, Camera, CameraProjection,
     Interpolation, Light, LightType, Scene, SceneGraph, SceneNode, SceneNodeKind,
-};
-use self::schema::{
-    self as gltf_2, AccessorType, CameraType, GltfAlphaMode, GltfAnimationPath,
-    GltfInterpolation, GltfLightType, COMPONENT_U8, COMPONENT_U16, COMPONENT_U32,
-    GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GL_TRIANGLES, GlTf, GltfIndex, KhrLightsPunctual,
 };
 
 use self::extensions::ExtensionRegistry;
@@ -764,11 +764,7 @@ impl GltfLoader {
             CameraProjection::default()
         };
 
-        let name = gltf_cam
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = gltf_cam.name.as_deref().unwrap_or("").to_string();
 
         Camera { name, projection }
     }
@@ -794,11 +790,7 @@ impl GltfLoader {
             GltfLightType::Point => LightType::Point,
         };
 
-        let name = gltf_light
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = gltf_light.name.as_deref().unwrap_or("").to_string();
 
         Light {
             name,
@@ -831,11 +823,7 @@ impl GltfLoader {
                 (SceneNodeKind::Custom, vec![])
             };
 
-            let name = gltf_node
-                .name
-                .as_deref()
-                .unwrap_or("")
-                .to_string();
+            let name = gltf_node.name.as_deref().unwrap_or("").to_string();
 
             let children: Vec<usize> = gltf_node
                 .children
@@ -868,11 +856,7 @@ impl GltfLoader {
                 if nodes_usize.len() == 1 {
                     graph.root = nodes_usize[0];
                 } else {
-                    let scene_name = scene
-                        .name
-                        .as_deref()
-                        .unwrap_or("root")
-                        .to_string();
+                    let scene_name = scene.name.as_deref().unwrap_or("root").to_string();
                     let root = SceneNode {
                         name: scene_name,
                         children: nodes_usize,
@@ -961,11 +945,7 @@ impl GltfLoader {
         };
 
         // Get material name
-        let name = mat
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = mat.name.as_deref().unwrap_or("").to_string();
 
         Material::PBR(Box::new(PBRMaterial {
             name,
@@ -1042,7 +1022,10 @@ impl GltfLoader {
                     let flat: Vec<f64> = v.into_iter().map(f64::from).collect();
                     (flat, 1)
                 }
-                _ => bail!("Unsupported animation output type: {:?}", output_accessor.type_),
+                _ => bail!(
+                    "Unsupported animation output type: {:?}",
+                    output_accessor.type_
+                ),
             };
 
             let interpolation = match gltf_sampler.interpolation {
@@ -1079,11 +1062,7 @@ impl GltfLoader {
             });
         }
 
-        let name = gltf_anim
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .to_string();
+        let name = gltf_anim.name.as_deref().unwrap_or("").to_string();
 
         Ok(Animation {
             name,

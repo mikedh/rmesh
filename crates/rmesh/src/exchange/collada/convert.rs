@@ -105,15 +105,13 @@ fn root_correction(collada: &schema::Collada) -> Option<Matrix4<f64>> {
             schema::UpAxisType::ZUp => {
                 // Rotate -90° around X: (x, y, z) → (x, z, -y)
                 Some(Matrix4::new(
-                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ))
             }
             schema::UpAxisType::XUp => {
                 // Rotate 90° around Z: (x, y, z) → (-y, x, z)
                 Some(Matrix4::new(
-                    0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0,
+                    0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ))
             }
             schema::UpAxisType::YUp => None,
@@ -371,9 +369,7 @@ fn load_mesh(
         mesh.sources().map(|s| (s.id.as_str(), s)).collect();
 
     // Get vertices element and find POSITION source
-    let vertices = mesh
-        .vertices()
-        .context("mesh has no <vertices> element")?;
+    let vertices = mesh.vertices().context("mesh has no <vertices> element")?;
     let pos_source_id = vertices
         .input
         .iter()
@@ -388,7 +384,15 @@ fn load_mesh(
     for tri in mesh.triangles() {
         let face_sizes: Vec<usize> = vec![3; tri.count as usize];
         let p = tri.p.as_ref().map(|p| &p.0[..]).unwrap_or(&[]);
-        let prim = load_primitive(&tri.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
+        let prim = load_primitive(
+            &tri.input,
+            p,
+            &face_sizes,
+            &vertices.id,
+            &source_map,
+            pos_source_id,
+            &mut triangulator,
+        )?;
         parts.push((prim, tri.material.clone()));
     }
 
@@ -400,19 +404,22 @@ fn load_mesh(
             .map(|v| v.0.iter().map(|&n| n as usize).collect())
             .unwrap_or_default();
         let p = poly.p.as_ref().map(|p| &p.0[..]).unwrap_or(&[]);
-        let prim = load_primitive(&poly.input, p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
+        let prim = load_primitive(
+            &poly.input,
+            p,
+            &face_sizes,
+            &vertices.id,
+            &source_map,
+            pos_source_id,
+            &mut triangulator,
+        )?;
         parts.push((prim, poly.material.clone()));
     }
 
     // Process <polygons>
     for polys in mesh.polygons() {
         let inputs: Vec<schema::InputLocalOffsetType> = polys.inputs().cloned().collect();
-        let stride = inputs
-            .iter()
-            .map(|i| i.offset as usize)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let stride = inputs.iter().map(|i| i.offset as usize).max().unwrap_or(0) + 1;
 
         // Each <p> is one polygon
         let mut all_p: Vec<u64> = Vec::new();
@@ -424,7 +431,15 @@ fn load_mesh(
         }
 
         if !face_sizes.is_empty() {
-            let prim = load_primitive(&inputs, &all_p, &face_sizes, &vertices.id, &source_map, pos_source_id, &mut triangulator)?;
+            let prim = load_primitive(
+                &inputs,
+                &all_p,
+                &face_sizes,
+                &vertices.id,
+                &source_map,
+                pos_source_id,
+                &mut triangulator,
+            )?;
             parts.push((prim, polys.material.clone()));
         }
     }
@@ -538,14 +553,14 @@ fn load_mesh(
 
         // Try to load diffuse texture if we can resolve the image
         if let Some(resolver) = resolver {
-            if let Some(texture) = try_load_texture(name, material_bindings, materials_by_id, images, resolver) {
+            if let Some(texture) =
+                try_load_texture(name, material_bindings, materials_by_id, images, resolver)
+            {
                 simple.diffuse_texture = Some(texture);
             }
         }
 
-        trimesh
-            .materials
-            .push(Material::Simple(simple));
+        trimesh.materials.push(Material::Simple(simple));
     }
 
     trimesh.source.format = Some(FileType::DAE);
@@ -608,12 +623,7 @@ fn load_primitive(
     triangulator: &mut crate::creation::Triangulator,
 ) -> Result<UnmergedPrimitive> {
     // Determine stride (tuple width)
-    let stride = inputs
-        .iter()
-        .map(|i| i.offset as usize)
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let stride = inputs.iter().map(|i| i.offset as usize).max().unwrap_or(0) + 1;
 
     // Find source data for each semantic
     let pos_source = source_map
@@ -771,7 +781,6 @@ fn load_primitive(
     })
 }
 
-
 // ── Export ───────────────────────────────────────────────────────────────────
 
 /// Convert an rmesh Scene to Collada XML bytes.
@@ -829,18 +838,13 @@ pub fn from_scene(scene: &Scene) -> Result<Vec<u8>> {
         }),
     };
 
-    let xml = quick_xml::se::to_string(&collada)
-        .context("failed to serialize Collada to XML")?;
+    let xml = quick_xml::se::to_string(&collada).context("failed to serialize Collada to XML")?;
     let output = format!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n{xml}");
     Ok(output.into_bytes())
 }
 
 /// Build a Collada geometry element from a Trimesh.
-fn build_geometry(
-    geom_id: &str,
-    name: &str,
-    trimesh: &Trimesh,
-) -> schema::GeometryElementType {
+fn build_geometry(geom_id: &str, name: &str, trimesh: &Trimesh) -> schema::GeometryElementType {
     let pos_source_id = format!("{geom_id}-positions");
     let vertices_id = format!("{geom_id}-vertices");
 
@@ -877,8 +881,8 @@ fn build_geometry(
     }
 
     // Check for UVs
-    let has_uv = !trimesh.attributes_vertex.uv.is_empty()
-        && !trimesh.attributes_vertex.uv[0].is_empty();
+    let has_uv =
+        !trimesh.attributes_vertex.uv.is_empty() && !trimesh.attributes_vertex.uv[0].is_empty();
     if has_uv {
         let uv_source_id = format!("{geom_id}-map-0");
         let uv_data: Vec<f64> = trimesh.attributes_vertex.uv[0]

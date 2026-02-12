@@ -15,13 +15,39 @@ const TYPED_ENTITIES: &[&str] = &[
     "direction",
     "vector",
     "axis2_placement_3d",
+    "axis1_placement",
+    "axis2_placement_2d",
     // Curves
     "line",
     "circle",
     "ellipse",
+    "hyperbola",
+    "parabola",
+    "trimmed_curve",
+    "composite_curve",
+    "composite_curve_segment",
+    "pcurve",
+    "bounded_pcurve",
+    "seam_curve",
+    "intersection_curve",
+    "surface_curve",
+    "bounded_surface_curve",
+    "offset_curve_2d",
+    "offset_curve_3d",
+    "polyline",
     "b_spline_curve",
     "b_spline_curve_with_knots",
     "rational_b_spline_curve",
+    "bezier_curve",
+    "quasi_uniform_curve",
+    "uniform_curve",
+    "reparametrised_composite_curve_segment",
+    "outer_boundary_curve",
+    "boundary_curve",
+    "curve_replica",
+    "degenerate_pcurve",
+    "evaluated_degenerate_pcurve",
+    "composite_curve_on_surface",
     // Surfaces
     "plane",
     "cylindrical_surface",
@@ -30,6 +56,19 @@ const TYPED_ENTITIES: &[&str] = &[
     "toroidal_surface",
     "b_spline_surface_with_knots",
     "rational_b_spline_surface",
+    "surface_of_linear_extrusion",
+    "surface_of_revolution",
+    "offset_surface",
+    "degenerate_toroidal_surface",
+    "curve_bounded_surface",
+    "rectangular_trimmed_surface",
+    "quasi_uniform_surface",
+    "bezier_surface",
+    "uniform_surface",
+    "swept_surface",
+    "surface_replica",
+    "oriented_surface",
+    "rectangular_composite_surface",
     // Topology
     "vertex_point",
     "edge_curve",
@@ -39,18 +78,79 @@ const TYPED_ENTITIES: &[&str] = &[
     "face_outer_bound",
     "advanced_face",
     "closed_shell",
+    "open_shell",
+    "oriented_closed_shell",
+    "oriented_open_shell",
+    "face_surface",
+    "face",
+    "subface",
+    "edge",
+    "subedge",
+    "vertex",
+    "vertex_loop",
+    "poly_loop",
+    "path",
+    "oriented_path",
+    "oriented_face",
+    "connected_face_set",
+    "connected_face_sub_set",
+    "connected_edge_set",
     "manifold_solid_brep",
+    // Solids
+    "brep_with_voids",
+    "faceted_brep",
+    "shell_based_surface_model",
+    "face_based_surface_model",
+    "csg_solid",
+    "boolean_result",
+    "half_space_solid",
+    "boxed_half_space",
+    "extruded_area_solid",
+    "revolved_area_solid",
+    "swept_disk_solid",
+    "solid_replica",
+    "block",
+    "right_circular_cone",
+    "right_circular_cylinder",
+    "sphere",
+    "torus",
     // Representations
     "shape_representation",
     "advanced_brep_shape_representation",
+    "mapped_item",
+    "representation_map",
+    "representation",
+    "representation_item",
+    "representation_context",
+    "representation_relationship",
+    "geometric_representation_context",
+    "geometric_representation_item",
+    "shape_definition_representation",
+    "shape_aspect",
+    "shape_aspect_relationship",
+    "item_identified_representation_usage",
+    "next_assembly_usage_occurrence",
+    "product_definition_shape",
     // Assembly / transforms
     "representation_relationship_with_transformation",
     "shape_representation_relationship",
     "item_defined_transformation",
+    "cartesian_transformation_operator_3d",
+    "cartesian_transformation_operator",
+    "functionally_defined_transformation",
     // Units
     "si_unit",
     "conversion_based_unit",
     "length_unit",
+    "named_unit",
+    "derived_unit",
+    "measure_with_unit",
+    "plane_angle_unit",
+    "length_measure_with_unit",
+    "plane_angle_measure_with_unit",
+    "global_unit_assigned_context",
+    "global_uncertainty_assigned_context",
+    "uncertainty_measure_with_unit",
 ];
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -205,8 +305,8 @@ impl<'a> TypeMap<'a> {
                 }
                 // Enum → &'a str (parsed as enum tag string)
                 Type::Enum(_) => return "&'a str".to_string(),
-                // Non-entity SELECT → &'a str (rare)
-                Type::Select(_) => return "&'a str".to_string(),
+                // Non-entity SELECT → Select<'a> (handles function-call syntax)
+                Type::Select(_) => return "Select<'a>".to_string(),
                 // Aggregation → resolve inner
                 Type::Aggregation { optional, type_ } => {
                     let inner = self.to_flat_inner_type(type_);
@@ -249,7 +349,7 @@ impl<'a> TypeMap<'a> {
             Type::Select(members) if members.iter().all(|m| self.is_entity(m)) => {
                 "usize".to_string()
             }
-            Type::Select(_) => "&'a str".to_string(),
+            Type::Select(_) => "Select<'a>".to_string(),
         }
     }
 
@@ -376,7 +476,7 @@ pub fn generate(s: &mut Syntax) -> Result<String, std::fmt::Error> {
 #![allow(clippy::nursery)]
 
 use super::parse::{{
-    Derived, IResult, Logical, Parse,
+    Derived, IResult, Logical, Parse, Select,
     param_from_chunks, parse_complex_mapping,
 }};
 use arrayvec::ArrayVec;

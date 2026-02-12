@@ -241,7 +241,9 @@ impl ObjFaces {
         } else if f.len() == 4 {
             vec![[0, 1, 2], [0, 2, 3]]
         } else if f.len() > 4 {
-            triangulator.triangulate_3d(&f, &[], vertices, true, true).unwrap()
+            triangulator
+                .triangulate_3d(&f, &[], vertices, true, true)
+                .unwrap()
         } else {
             vec![]
         };

@@ -285,7 +285,7 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
         .par_iter()
         .filter_map(|(msb_id, (name, transforms))| {
             if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[**msb_id]
-                && let Ok(brep) = convert_manifold_solid_brep(step, msb)
+                && let Ok((brep, _skipped)) = convert_manifold_solid_brep(step, msb)
             {
                 Some((
                     name.clone(),
@@ -327,7 +327,7 @@ fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError>
     let results: Vec<_> = work
         .par_iter()
         .filter_map(|(name, msb)| {
-            let brep = convert_manifold_solid_brep(step, msb).ok()?;
+            let (brep, _skipped) = convert_manifold_solid_brep(step, msb).ok()?;
             Some((name.clone(), Geometry::Brep(Box::new(brep))))
         })
         .collect();
@@ -339,11 +339,14 @@ fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError>
     Ok(scene)
 }
 
-/// Convert a MANIFOLD_SOLID_BREP to a BrepModel
+/// Convert a MANIFOLD_SOLID_BREP to a BrepModel.
+///
+/// Returns `(BrepModel, skipped_faces)` where `skipped_faces` is the number
+/// of faces that were dropped due to unsupported surface or curve types.
 fn convert_manifold_solid_brep<'a>(
     step: &'a StepFile<'a>,
     msb: &'a ap214::ManifoldSolidBrep_<'a>,
-) -> Result<BrepModel, StepError> {
+) -> Result<(BrepModel, usize), StepError> {
     let mut model = BrepModel::new();
 
     // Maps from STEP entity IDs to our indices
@@ -361,6 +364,7 @@ fn convert_manifold_solid_brep<'a>(
 
     // Process all faces in the shell (skip faces with unsupported surface/curve types)
     let mut face_indices = Vec::new();
+    let mut skipped_faces = 0usize;
     for face_id in &shell.cfs_faces {
         match convert_face(
             step,
@@ -375,7 +379,7 @@ fn convert_manifold_solid_brep<'a>(
                 face_indices.push(face_idx);
             }
             Err(StepError::UnsupportedEntity(_)) => {
-                // Skip faces with unsupported geometry types silently
+                skipped_faces += 1;
                 continue;
             }
             Err(e) => return Err(e),
@@ -386,7 +390,7 @@ fn convert_manifold_solid_brep<'a>(
     let shell_idx = model.add_shell(face_indices);
     model.add_solid(shell_idx, vec![]);
 
-    Ok(model)
+    Ok((model, skipped_faces))
 }
 
 /// Convert an ADVANCED_FACE to a BrepFace
@@ -1991,5 +1995,560 @@ mod tests {
             total_wt_pass >= 154,
             "Watertight regression: {total_wt_pass}/{total_wt_total} (expected at least 154)"
         );
+    }
+
+    /// Corpus-scale STEP loading test with BREP vs tessellation diagnosis.
+    ///
+    /// Classifies every body into 4 buckets:
+    /// - `both_ok`: BREP watertight + mesh watertight (working)
+    /// - `tess_bug`: BREP watertight but mesh broken (tessellator bug)
+    /// - `brep_bad`: BREP incomplete + mesh broken (BREP construction issue)
+    /// - `brep_bad_mesh_ok`: BREP incomplete but mesh closed anyway
+    ///
+    /// Streams per-file results with per-body detail to a JSONL file,
+    /// and writes an aggregate summary JSON at the end.
+    ///
+    /// Configuration via environment variables:
+    /// - `STEP_CORPUS_PATH` — root directory to walk (required, skip test if unset)
+    /// - `STEP_CORPUS_LIMIT` — optional cap on file count for quick runs
+    ///
+    /// Run with:
+    /// ```bash
+    /// STEP_CORPUS_PATH=~/Downloads/abc STEP_CORPUS_LIMIT=100 \
+    ///   cargo test --lib -p rmesh --release -- boundary::step::tests::test_step_corpus --nocapture --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_step_corpus() {
+        use crate::boundary::tesselate::TesselationParams;
+        use std::io::Write;
+        use std::time::Instant;
+
+        struct BodyResult {
+            step_faces: usize,
+            skipped_faces: usize,
+            brep_faces: usize,
+            brep_watertight: bool,
+            unmatched_edges: usize,
+            mesh_triangles: usize,
+            mesh_watertight: bool,
+            mesh_defect_faces: usize,
+        }
+
+        // Debug mode guard: timings are meaningless and corpus is too large
+        if cfg!(debug_assertions) {
+            eprintln!("Skipping corpus test in debug mode — run with --release");
+            return;
+        }
+
+        let corpus_path = match std::env::var("STEP_CORPUS_PATH") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => {
+                eprintln!("Skipping: STEP_CORPUS_PATH not set");
+                return;
+            }
+        };
+        if !corpus_path.is_dir() {
+            eprintln!("Skipping: {:?} is not a directory", corpus_path);
+            return;
+        }
+
+        let limit: Option<usize> = std::env::var("STEP_CORPUS_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok());
+
+        // Collect all .step files recursively
+        let mut step_files: Vec<std::path::PathBuf> = Vec::new();
+        let mut dirs = vec![corpus_path.clone()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("step") || ext.eq_ignore_ascii_case("stp")
+                }) {
+                    step_files.push(path);
+                }
+            }
+        }
+        step_files.sort();
+        if let Some(cap) = limit {
+            step_files.truncate(cap);
+        }
+
+        eprintln!(
+            "Corpus: {} STEP files from {:?}",
+            step_files.len(),
+            corpus_path
+        );
+
+        // Open JSONL output for streaming results
+        let report_dir = std::path::Path::new("test/regression");
+        let _ = std::fs::create_dir_all(report_dir);
+        let jsonl_path = report_dir.join("step_corpus_report.jsonl");
+        let mut jsonl_file = std::io::BufWriter::new(
+            std::fs::File::create(&jsonl_path).expect("Failed to create JSONL report"),
+        );
+
+        let params = TesselationParams::default();
+
+        // Aggregate counters
+        let mut total_files = 0usize;
+        let mut count_ok = 0usize;
+        let mut count_parse_error = 0usize;
+        let mut count_convert_error = 0usize;
+        let mut count_no_bodies = 0usize;
+        let mut count_panic = 0usize;
+        let mut total_bodies = 0usize;
+        let mut total_step_faces = 0usize;
+        let mut total_skipped_faces = 0usize;
+        let mut total_brep_faces = 0usize;
+        let mut total_triangles = 0usize;
+        let mut total_brep_watertight = 0usize;
+        let mut total_mesh_watertight = 0usize;
+        let mut total_both_ok = 0usize;
+        let mut total_tess_bug = 0usize;
+        let mut total_brep_bad = 0usize;
+        let mut total_brep_bad_mesh_ok = 0usize;
+        let mut total_defect_faces = 0usize;
+        let mut total_parse_ms = 0.0f64;
+        let mut total_convert_ms = 0.0f64;
+        let mut total_tess_ms = 0.0f64;
+
+        let corpus_start = Instant::now();
+
+        for (file_idx, path) in step_files.iter().enumerate() {
+            total_files += 1;
+
+            let rel_path = path
+                .strip_prefix(&corpus_path)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            let file_bytes = path.metadata().map(|m| m.len() as usize).unwrap_or(0);
+
+            // Wrap everything in catch_unwind for resilience
+            let result: Result<Result<_, String>, _> =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let data = std::fs::read(path).map_err(|e| format!("io: {e}"))?;
+
+                    // Phase 1: parse
+                    let t = Instant::now();
+                    let processed = strip_flatten(&data);
+                    let step_file = StepFile::parse(&processed);
+                    let parse_ms = t.elapsed().as_secs_f64() * 1e3;
+
+                    // Phase 2: convert + analyze each MSB directly
+                    let t = Instant::now();
+                    let mut body_results: Vec<BodyResult> = Vec::new();
+
+                    for entity in &step_file.entities {
+                        let ap214::Entity::ManifoldSolidBrep(msb) = entity else {
+                            continue;
+                        };
+
+                        // Get STEP face count from the outer ClosedShell
+                        let step_faces = match &step_file.entities[msb.outer] {
+                            ap214::Entity::ClosedShell(s) => s.cfs_faces.len(),
+                            _ => 0,
+                        };
+
+                        // Convert MSB to BrepModel
+                        let (brep, skipped_faces) =
+                            match convert_manifold_solid_brep(&step_file, msb) {
+                                Ok(pair) => pair,
+                                Err(_) => continue,
+                            };
+
+                        let brep_faces = brep.faces.len();
+
+                        // BREP topology validation
+                        let edge_errors = brep.errors_edge_sharing();
+                        let brep_watertight = edge_errors.is_empty();
+                        let unmatched_edges = edge_errors.len();
+
+                        // Tessellate
+                        let mesh = brep.tesselate(&params);
+                        let mesh_triangles = mesh.faces.len();
+                        let mesh_watertight = mesh.is_watertight();
+
+                        // Compute defect faces only for tess_bug cases
+                        let mesh_defect_faces = if brep_watertight && !mesh_watertight {
+                            mesh.non_watertight_face_indices().len()
+                        } else {
+                            0
+                        };
+
+                        body_results.push(BodyResult {
+                            step_faces,
+                            skipped_faces,
+                            brep_faces,
+                            brep_watertight,
+                            unmatched_edges,
+                            mesh_triangles,
+                            mesh_watertight,
+                            mesh_defect_faces,
+                        });
+                    }
+                    let convert_ms = t.elapsed().as_secs_f64() * 1e3;
+
+                    if body_results.is_empty() {
+                        return Ok((
+                            "no_bodies".to_string(),
+                            None::<String>,
+                            parse_ms,
+                            convert_ms,
+                            0.0f64,
+                            Vec::new(),
+                        ));
+                    }
+
+                    Ok((
+                        "ok".to_string(),
+                        None,
+                        parse_ms,
+                        convert_ms,
+                        0.0f64,
+                        body_results,
+                    ))
+                }));
+
+            // Unpack result
+            let (status, error, parse_ms, convert_ms, tess_ms, body_results): (
+                String,
+                Option<String>,
+                f64,
+                f64,
+                f64,
+                Vec<BodyResult>,
+            ) = match result {
+                Ok(Ok((st, err, pm, cm, tm, br))) => (st, err, pm, cm, tm, br),
+                Ok(Err(e)) => {
+                    let status = if e.starts_with("Parse error") {
+                        "parse_error"
+                    } else {
+                        "convert_error"
+                    };
+                    (status.to_string(), Some(e), 0.0, 0.0, 0.0, Vec::new())
+                }
+                Err(panic_info) => {
+                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    ("panic".to_string(), Some(msg), 0.0, 0.0, 0.0, Vec::new())
+                }
+            };
+
+            // Classify bodies into 4 buckets and accumulate per-file stats
+            let mut file_step_faces = 0usize;
+            let mut file_skipped_faces = 0usize;
+            let mut file_brep_faces = 0usize;
+            let mut file_brep_wt = 0usize;
+            let mut file_mesh_wt = 0usize;
+            let mut file_both_ok = 0usize;
+            let mut file_tess_bug = 0usize;
+            let mut file_brep_bad = 0usize;
+            let mut file_brep_bad_mesh_ok = 0usize;
+            let mut file_triangles = 0usize;
+            let mut file_defect_faces = 0usize;
+
+            for br in &body_results {
+                file_step_faces += br.step_faces;
+                file_skipped_faces += br.skipped_faces;
+                file_brep_faces += br.brep_faces;
+                file_triangles += br.mesh_triangles;
+                file_defect_faces += br.mesh_defect_faces;
+
+                if br.brep_watertight {
+                    file_brep_wt += 1;
+                }
+                if br.mesh_watertight {
+                    file_mesh_wt += 1;
+                }
+
+                match (br.brep_watertight, br.mesh_watertight) {
+                    (true, true) => file_both_ok += 1,
+                    (true, false) => file_tess_bug += 1,
+                    (false, false) => file_brep_bad += 1,
+                    (false, true) => file_brep_bad_mesh_ok += 1,
+                }
+            }
+
+            let bodies = body_results.len();
+
+            // Update aggregates
+            match status.as_str() {
+                "ok" => count_ok += 1,
+                "parse_error" => count_parse_error += 1,
+                "convert_error" => count_convert_error += 1,
+                "no_bodies" => count_no_bodies += 1,
+                "panic" => count_panic += 1,
+                _ => {}
+            }
+            total_bodies += bodies;
+            total_step_faces += file_step_faces;
+            total_skipped_faces += file_skipped_faces;
+            total_brep_faces += file_brep_faces;
+            total_triangles += file_triangles;
+            total_brep_watertight += file_brep_wt;
+            total_mesh_watertight += file_mesh_wt;
+            total_both_ok += file_both_ok;
+            total_tess_bug += file_tess_bug;
+            total_brep_bad += file_brep_bad;
+            total_brep_bad_mesh_ok += file_brep_bad_mesh_ok;
+            total_defect_faces += file_defect_faces;
+            total_parse_ms += parse_ms;
+            total_convert_ms += convert_ms;
+            total_tess_ms += tess_ms;
+
+            // Build per-body detail JSON array
+            let mut detail_parts: Vec<String> = Vec::new();
+            for br in &body_results {
+                detail_parts.push(format!(
+                    r#"{{"step_faces":{},"skipped":{},"brep_faces":{},"brep_wt":{},"unmatched":{},"triangles":{},"mesh_wt":{},"defect":{}}}"#,
+                    br.step_faces,
+                    br.skipped_faces,
+                    br.brep_faces,
+                    br.brep_watertight,
+                    br.unmatched_edges,
+                    br.mesh_triangles,
+                    br.mesh_watertight,
+                    br.mesh_defect_faces,
+                ));
+            }
+            let detail_json = format!("[{}]", detail_parts.join(","));
+
+            // Write JSONL line
+            let error_json = match &error {
+                Some(e) => {
+                    let escaped = e
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n");
+                    format!("\"{}\"", escaped)
+                }
+                None => "null".to_string(),
+            };
+            writeln!(
+                jsonl_file,
+                r#"{{"path":"{}","bytes":{},"status":"{}","error":{},"parse_ms":{:.1},"convert_ms":{:.1},"tess_ms":{:.1},"bodies":{},"step_faces":{},"skipped_faces":{},"brep_faces":{},"brep_wt":{},"mesh_wt":{},"both_ok":{},"tess_bug":{},"brep_bad":{},"brep_bad_mesh_ok":{},"triangles":{},"defect_faces":{},"bodies_detail":{}}}"#,
+                rel_path.replace('\\', "/").replace('"', "\\\""),
+                file_bytes,
+                status,
+                error_json,
+                parse_ms,
+                convert_ms,
+                tess_ms,
+                bodies,
+                file_step_faces,
+                file_skipped_faces,
+                file_brep_faces,
+                file_brep_wt,
+                file_mesh_wt,
+                file_both_ok,
+                file_tess_bug,
+                file_brep_bad,
+                file_brep_bad_mesh_ok,
+                file_triangles,
+                file_defect_faces,
+                detail_json,
+            ).unwrap();
+            jsonl_file.flush().unwrap();
+
+            // Progress report every 500 files
+            if (file_idx + 1) % 500 == 0 {
+                let elapsed = corpus_start.elapsed().as_secs_f64();
+                let rate = (file_idx + 1) as f64 / elapsed;
+                eprintln!(
+                    "  [{}/{}] {:.0} files/sec, {:.0}s elapsed, ok={} err={} panic={} both_ok={} tess_bug={} brep_bad={}",
+                    file_idx + 1,
+                    step_files.len(),
+                    rate,
+                    elapsed,
+                    count_ok,
+                    count_parse_error + count_convert_error,
+                    count_panic,
+                    total_both_ok,
+                    total_tess_bug,
+                    total_brep_bad,
+                );
+            }
+        }
+
+        let total_elapsed = corpus_start.elapsed().as_secs_f64();
+
+        // Write summary JSON
+        let summary_path = report_dir.join("step_corpus_summary.json");
+        let summary = format!(
+            r#"{{
+  "corpus_path": "{}",
+  "total_files": {},
+  "ok": {},
+  "parse_error": {},
+  "convert_error": {},
+  "no_bodies": {},
+  "panic": {},
+  "total_bodies": {},
+  "total_step_faces": {},
+  "total_skipped_faces": {},
+  "total_brep_faces": {},
+  "total_brep_watertight": {},
+  "total_mesh_watertight": {},
+  "total_both_ok": {},
+  "total_tess_bug": {},
+  "total_brep_bad": {},
+  "total_brep_bad_mesh_ok": {},
+  "total_triangles": {},
+  "total_defect_faces": {},
+  "total_parse_ms": {:.1},
+  "total_convert_ms": {:.1},
+  "total_tess_ms": {:.1},
+  "total_elapsed_s": {:.1},
+  "pass_rate_pct": {:.2},
+  "brep_watertight_rate_pct": {:.2},
+  "mesh_watertight_rate_pct": {:.2}
+}}"#,
+            corpus_path.display(),
+            total_files,
+            count_ok,
+            count_parse_error,
+            count_convert_error,
+            count_no_bodies,
+            count_panic,
+            total_bodies,
+            total_step_faces,
+            total_skipped_faces,
+            total_brep_faces,
+            total_brep_watertight,
+            total_mesh_watertight,
+            total_both_ok,
+            total_tess_bug,
+            total_brep_bad,
+            total_brep_bad_mesh_ok,
+            total_triangles,
+            total_defect_faces,
+            total_parse_ms,
+            total_convert_ms,
+            total_tess_ms,
+            total_elapsed,
+            if total_files > 0 {
+                count_ok as f64 / total_files as f64 * 100.0
+            } else {
+                0.0
+            },
+            if total_bodies > 0 {
+                total_brep_watertight as f64 / total_bodies as f64 * 100.0
+            } else {
+                0.0
+            },
+            if total_bodies > 0 {
+                total_mesh_watertight as f64 / total_bodies as f64 * 100.0
+            } else {
+                0.0
+            },
+        );
+        std::fs::write(&summary_path, &summary).expect("Failed to write summary JSON");
+
+        // Print summary
+        println!();
+        println!("=== STEP Corpus Summary ===");
+        println!("  Files:          {}", total_files);
+        println!(
+            "  OK:             {} ({:.1}%)",
+            count_ok,
+            if total_files > 0 {
+                count_ok as f64 / total_files as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!("  Parse errors:   {}", count_parse_error);
+        println!("  Convert errors: {}", count_convert_error);
+        println!("  No bodies:      {}", count_no_bodies);
+        println!("  Panics:         {}", count_panic);
+        println!();
+        println!("  Bodies:         {}", total_bodies);
+        println!(
+            "  STEP faces:     {} ({} skipped → {} BREP faces)",
+            total_step_faces, total_skipped_faces, total_brep_faces
+        );
+        println!("  Triangles:      {}", total_triangles);
+        println!();
+        println!("  === Body Classification ===");
+        println!("  {:20} {:>6} {:>7}", "Category", "Count", "Pct");
+        println!("  {}", "-".repeat(35));
+        let pct = |n: usize| {
+            if total_bodies > 0 {
+                n as f64 / total_bodies as f64 * 100.0
+            } else {
+                0.0
+            }
+        };
+        println!(
+            "  {:20} {:>6} {:>6.1}%  BREP ok + mesh ok",
+            "both_ok",
+            total_both_ok,
+            pct(total_both_ok)
+        );
+        println!(
+            "  {:20} {:>6} {:>6.1}%  BREP ok, mesh BROKEN",
+            "tess_bug",
+            total_tess_bug,
+            pct(total_tess_bug)
+        );
+        println!(
+            "  {:20} {:>6} {:>6.1}%  BREP bad + mesh bad",
+            "brep_bad",
+            total_brep_bad,
+            pct(total_brep_bad)
+        );
+        println!(
+            "  {:20} {:>6} {:>6.1}%  BREP bad, mesh ok",
+            "brep_bad_mesh_ok",
+            total_brep_bad_mesh_ok,
+            pct(total_brep_bad_mesh_ok)
+        );
+        println!("  {}", "-".repeat(35));
+        println!("  {:20} {:>6}", "total", total_bodies);
+        println!();
+        println!(
+            "  BREP watertight:  {}/{} ({:.1}%)",
+            total_brep_watertight,
+            total_bodies,
+            pct(total_brep_watertight)
+        );
+        println!(
+            "  Mesh watertight:  {}/{} ({:.1}%)",
+            total_mesh_watertight,
+            total_bodies,
+            pct(total_mesh_watertight)
+        );
+        println!(
+            "  Defect faces:     {} (from tess_bug bodies)",
+            total_defect_faces
+        );
+        println!();
+        println!(
+            "  Time:           {:.1}s ({:.0} files/sec)",
+            total_elapsed,
+            if total_elapsed > 0.0 {
+                total_files as f64 / total_elapsed
+            } else {
+                0.0
+            }
+        );
+        println!("  Parse:          {:.1}s", total_parse_ms / 1e3);
+        println!("  Convert+Tess:   {:.1}s", total_convert_ms / 1e3);
+        println!("  Report:         {:?}", jsonl_path);
+        println!("  Summary:        {:?}", summary_path);
+        println!();
     }
 }

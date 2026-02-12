@@ -48,18 +48,12 @@ pub mod error {
     pub struct ConversionError(std::borrow::Cow<'static, str>);
     impl std::error::Error for ConversionError {}
     impl std::fmt::Display for ConversionError {
-        fn fmt(
-            &self,
-            f: &mut std::fmt::Formatter<'_>,
-        ) -> Result<(), std::fmt::Error> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
             std::fmt::Display::fmt(&self.0, f)
         }
     }
     impl std::fmt::Debug for ConversionError {
-        fn fmt(
-            &self,
-            f: &mut std::fmt::Formatter<'_>,
-        ) -> Result<(), std::fmt::Error> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
             std::fmt::Debug::fmt(&self.0, f)
         }
     }
@@ -361,11 +355,7 @@ pub struct GlTf {
     ///Metadata about the glTF asset.
     pub asset: Asset,
     ///An array of bufferViews.
-    #[serde(
-        rename = "bufferViews",
-        default,
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(rename = "bufferViews", default, skip_serializing_if = "Vec::is_empty")]
     pub buffer_views: Vec<BufferView>,
     ///An array of buffers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -445,11 +435,7 @@ pub struct Image {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extras: Option<serde_json::Value>,
     ///The image's media type. This field **MUST** be defined when `bufferView` is defined.
-    #[serde(
-        rename = "mimeType",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     ///The user-defined name of this object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -492,10 +478,16 @@ pub struct LightSpot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extras: Option<serde_json::Value>,
     ///Angle in radians from centre of spotlight where falloff begins.
-    #[serde(rename = "innerConeAngle", default = "defaults::light_spot_inner_cone_angle")]
+    #[serde(
+        rename = "innerConeAngle",
+        default = "defaults::light_spot_inner_cone_angle"
+    )]
     pub inner_cone_angle: f64,
     ///Angle in radians from centre of spotlight where falloff ends.
-    #[serde(rename = "outerConeAngle", default = "defaults::light_spot_outer_cone_angle")]
+    #[serde(
+        rename = "outerConeAngle",
+        default = "defaults::light_spot_outer_cone_angle"
+    )]
     pub outer_cone_angle: f64,
 }
 ///The material appearance of a primitive.
@@ -512,7 +504,10 @@ pub struct Material {
     #[serde(rename = "doubleSided", default)]
     pub double_sided: bool,
     ///The factors for the emissive color of the material.
-    #[serde(rename = "emissiveFactor", default = "defaults::material_emissive_factor")]
+    #[serde(
+        rename = "emissiveFactor",
+        default = "defaults::material_emissive_factor"
+    )]
     pub emissive_factor: [f64; 3usize],
     ///The emissive texture.
     #[serde(
@@ -655,9 +650,7 @@ pub struct MeshPrimitive {
     pub mode: u32,
     ///An array of morph targets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub targets: Vec<
-        HashMap<String, u64>,
-    >,
+    pub targets: Vec<HashMap<String, u64>>,
 }
 ///A node in the node hierarchy.  When the node contains `skin`, all `mesh.primitives` **MUST** contain `JOINTS_0` and `WEIGHTS_0` attributes.  A node **MAY** have either a `matrix` or any combination of `translation`/`rotation`/`scale` (TRS) properties. TRS properties are converted to matrices and postmultiplied in the `T * R * S` order to compose the transformation matrix; first the scale is applied to the vertices, then the rotation, and then the translation. If none are provided, the transform is the identity. When a node is targeted for animation (referenced by an animation.channel.target), `matrix` **MUST NOT** be present.
 ///
@@ -718,18 +711,10 @@ pub struct Sampler {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extras: Option<serde_json::Value>,
     ///Magnification filter.
-    #[serde(
-        rename = "magFilter",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "magFilter", default, skip_serializing_if = "Option::is_none")]
     pub mag_filter: Option<u32>,
     ///Minification filter.
-    #[serde(
-        rename = "minFilter",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "minFilter", default, skip_serializing_if = "Option::is_none")]
     pub min_filter: Option<u32>,
     ///The user-defined name of this object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -838,22 +823,8 @@ pub mod defaults {
     }
     pub(super) fn node_matrix() -> [f64; 16usize] {
         [
-            1.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            1.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            1.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            1.0_f64,
+            1.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 1.0_f64, 0.0_f64, 0.0_f64, 0.0_f64,
+            0.0_f64, 1.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 1.0_f64,
         ]
     }
     pub(super) fn node_rotation() -> [f64; 4usize] {
@@ -884,7 +855,6 @@ pub mod defaults {
         std::f64::consts::FRAC_PI_4
     }
 }
-
 
 // Type aliases for extension convenience
 pub type KhrLightsPunctual = GlTfKhrLightsPunctual;

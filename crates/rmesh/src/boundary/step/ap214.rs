@@ -17,7 +17,9 @@
 #![allow(clippy::restriction)]
 #![allow(clippy::nursery)]
 
-use super::parse::{Derived, IResult, Logical, Parse, param_from_chunks, parse_complex_mapping};
+use super::parse::{
+    Derived, IResult, Logical, Parse, Select, param_from_chunks, parse_complex_mapping,
+};
 use arrayvec::ArrayVec;
 use nom::{
     bytes::complete::tag,
@@ -129,6 +131,58 @@ impl<'a> Axis2Placement3d_<'a> {
 }
 
 #[derive(Debug)]
+pub struct Axis1Placement_<'a> {
+    pub name: &'a str,
+    pub location: usize,
+    pub axis: Option<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Axis1Placement_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("AXIS1_PLACEMENT(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, location) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, axis) = param_from_chunks::<Option<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                location,
+                axis,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Axis2Placement2d_<'a> {
+    pub name: &'a str,
+    pub location: usize,
+    pub ref_direction: Option<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Axis2Placement2d_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("AXIS2_PLACEMENT_2D(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, location) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, ref_direction) = param_from_chunks::<Option<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                location,
+                ref_direction,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
 pub struct Line_<'a> {
     pub name: &'a str,
     pub pnt: usize,
@@ -203,6 +257,404 @@ impl<'a> Ellipse_<'a> {
                 position,
                 semi_axis_1,
                 semi_axis_2,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Hyperbola_<'a> {
+    pub name: &'a str,
+    pub position: usize,
+    pub semi_axis: f64,
+    pub semi_imag_axis: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Hyperbola_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("HYPERBOLA(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, position) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, semi_axis) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, semi_imag_axis) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                position,
+                semi_axis,
+                semi_imag_axis,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Parabola_<'a> {
+    pub name: &'a str,
+    pub position: usize,
+    pub focal_dist: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Parabola_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("PARABOLA(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, position) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, focal_dist) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                position,
+                focal_dist,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct TrimmedCurve_<'a> {
+    pub name: &'a str,
+    pub basis_curve: usize,
+    pub trim_1: ArrayVec<Select<'a>, 2>,
+    pub trim_2: ArrayVec<Select<'a>, 2>,
+    pub sense_agreement: bool,
+    pub master_representation: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> TrimmedCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("TRIMMED_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, trim_1) = param_from_chunks::<ArrayVec<Select<'a>, 2>>(false, s, &mut i, strs)?;
+        let (s, trim_2) = param_from_chunks::<ArrayVec<Select<'a>, 2>>(false, s, &mut i, strs)?;
+        let (s, sense_agreement) = param_from_chunks::<bool>(false, s, &mut i, strs)?;
+        let (s, master_representation) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_curve,
+                trim_1,
+                trim_2,
+                sense_agreement,
+                master_representation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CompositeCurve_<'a> {
+    pub name: &'a str,
+    pub segments: Vec<usize>,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CompositeCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("COMPOSITE_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, segments) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                segments,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CompositeCurveSegment_<'a> {
+    pub transition: &'a str,
+    pub same_sense: bool,
+    pub parent_curve: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CompositeCurveSegment_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("COMPOSITE_CURVE_SEGMENT(")(strs[0])?;
+        let (s, transition) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, same_sense) = param_from_chunks::<bool>(false, s, &mut i, strs)?;
+        let (s, parent_curve) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                transition,
+                same_sense,
+                parent_curve,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Pcurve_<'a> {
+    pub name: &'a str,
+    pub basis_surface: usize,
+    pub reference_to_curve: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Pcurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("PCURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, reference_to_curve) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_surface,
+                reference_to_curve,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BoundedPcurve_<'a> {
+    pub representation_item__name: &'a str,
+    pub basis_surface: usize,
+    pub reference_to_curve: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BoundedPcurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BOUNDED_PCURVE(")(strs[0])?;
+        let (s, representation_item__name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, reference_to_curve) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                representation_item__name,
+                basis_surface,
+                reference_to_curve,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct SeamCurve_<'a> {
+    pub name: &'a str,
+    pub curve_3d: usize,
+    pub associated_geometry: ArrayVec<usize, 2>,
+    pub master_representation: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SeamCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SEAM_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, curve_3d) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, associated_geometry) =
+            param_from_chunks::<ArrayVec<usize, 2>>(false, s, &mut i, strs)?;
+        let (s, master_representation) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                curve_3d,
+                associated_geometry,
+                master_representation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct IntersectionCurve_<'a> {
+    pub name: &'a str,
+    pub curve_3d: usize,
+    pub associated_geometry: ArrayVec<usize, 2>,
+    pub master_representation: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> IntersectionCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("INTERSECTION_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, curve_3d) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, associated_geometry) =
+            param_from_chunks::<ArrayVec<usize, 2>>(false, s, &mut i, strs)?;
+        let (s, master_representation) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                curve_3d,
+                associated_geometry,
+                master_representation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct SurfaceCurve_<'a> {
+    pub name: &'a str,
+    pub curve_3d: usize,
+    pub associated_geometry: ArrayVec<usize, 2>,
+    pub master_representation: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SurfaceCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SURFACE_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, curve_3d) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, associated_geometry) =
+            param_from_chunks::<ArrayVec<usize, 2>>(false, s, &mut i, strs)?;
+        let (s, master_representation) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                curve_3d,
+                associated_geometry,
+                master_representation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BoundedSurfaceCurve_<'a> {
+    pub representation_item__name: &'a str,
+    pub curve_3d: usize,
+    pub associated_geometry: ArrayVec<usize, 2>,
+    pub master_representation: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BoundedSurfaceCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BOUNDED_SURFACE_CURVE(")(strs[0])?;
+        let (s, representation_item__name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, curve_3d) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, associated_geometry) =
+            param_from_chunks::<ArrayVec<usize, 2>>(false, s, &mut i, strs)?;
+        let (s, master_representation) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                representation_item__name,
+                curve_3d,
+                associated_geometry,
+                master_representation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OffsetCurve2d_<'a> {
+    pub name: &'a str,
+    pub basis_curve: usize,
+    pub distance: f64,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OffsetCurve2d_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("OFFSET_CURVE_2D(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, distance) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_curve,
+                distance,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OffsetCurve3d_<'a> {
+    pub name: &'a str,
+    pub basis_curve: usize,
+    pub distance: f64,
+    pub self_intersect: Logical,
+    pub ref_direction: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OffsetCurve3d_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("OFFSET_CURVE_3D(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, distance) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, ref_direction) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_curve,
+                distance,
+                self_intersect,
+                ref_direction,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Polyline_<'a> {
+    pub name: &'a str,
+    pub points: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Polyline_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("POLYLINE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, points) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                points,
                 _p: std::marker::PhantomData,
             },
         ))
@@ -320,6 +772,299 @@ impl<'a> RationalBSplineCurve_<'a> {
                 closed_curve,
                 self_intersect,
                 weights_data,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BezierCurve_<'a> {
+    pub name: &'a str,
+    pub degree: i64,
+    pub control_points_list: Vec<usize>,
+    pub curve_form: &'a str,
+    pub closed_curve: Logical,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BezierCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BEZIER_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, control_points_list) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, curve_form) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, closed_curve) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                degree,
+                control_points_list,
+                curve_form,
+                closed_curve,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct QuasiUniformCurve_<'a> {
+    pub name: &'a str,
+    pub degree: i64,
+    pub control_points_list: Vec<usize>,
+    pub curve_form: &'a str,
+    pub closed_curve: Logical,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> QuasiUniformCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("QUASI_UNIFORM_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, control_points_list) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, curve_form) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, closed_curve) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                degree,
+                control_points_list,
+                curve_form,
+                closed_curve,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct UniformCurve_<'a> {
+    pub name: &'a str,
+    pub degree: i64,
+    pub control_points_list: Vec<usize>,
+    pub curve_form: &'a str,
+    pub closed_curve: Logical,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> UniformCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("UNIFORM_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, control_points_list) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, curve_form) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, closed_curve) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                degree,
+                control_points_list,
+                curve_form,
+                closed_curve,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ReparametrisedCompositeCurveSegment_<'a> {
+    pub transition: &'a str,
+    pub same_sense: bool,
+    pub parent_curve: usize,
+    pub param_length: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ReparametrisedCompositeCurveSegment_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("REPARAMETRISED_COMPOSITE_CURVE_SEGMENT(")(strs[0])?;
+        let (s, transition) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, same_sense) = param_from_chunks::<bool>(false, s, &mut i, strs)?;
+        let (s, parent_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, param_length) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                transition,
+                same_sense,
+                parent_curve,
+                param_length,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OuterBoundaryCurve_<'a> {
+    pub name: &'a str,
+    pub segments: Vec<usize>,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OuterBoundaryCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("OUTER_BOUNDARY_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, segments) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                segments,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BoundaryCurve_<'a> {
+    pub name: &'a str,
+    pub segments: Vec<usize>,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BoundaryCurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BOUNDARY_CURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, segments) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                segments,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CurveReplica_<'a> {
+    pub name: &'a str,
+    pub parent_curve: usize,
+    pub transformation: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CurveReplica_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CURVE_REPLICA(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, parent_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, transformation) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                parent_curve,
+                transformation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct DegeneratePcurve_<'a> {
+    pub name: &'a str,
+    pub basis_surface: usize,
+    pub reference_to_curve: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> DegeneratePcurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("DEGENERATE_PCURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, reference_to_curve) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_surface,
+                reference_to_curve,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct EvaluatedDegeneratePcurve_<'a> {
+    pub name: &'a str,
+    pub basis_surface: usize,
+    pub reference_to_curve: usize,
+    pub equivalent_point: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> EvaluatedDegeneratePcurve_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("EVALUATED_DEGENERATE_PCURVE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, reference_to_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, equivalent_point) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_surface,
+                reference_to_curve,
+                equivalent_point,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CompositeCurveOnSurface_<'a> {
+    pub name: &'a str,
+    pub segments: Vec<usize>,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CompositeCurveOnSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("COMPOSITE_CURVE_ON_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, segments) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                segments,
+                self_intersect,
                 _p: std::marker::PhantomData,
             },
         ))
@@ -562,6 +1307,410 @@ impl<'a> RationalBSplineSurface_<'a> {
 }
 
 #[derive(Debug)]
+pub struct SurfaceOfLinearExtrusion_<'a> {
+    pub name: &'a str,
+    pub swept_curve: usize,
+    pub extrusion_axis: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SurfaceOfLinearExtrusion_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SURFACE_OF_LINEAR_EXTRUSION(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, swept_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, extrusion_axis) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                swept_curve,
+                extrusion_axis,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct SurfaceOfRevolution_<'a> {
+    pub name: &'a str,
+    pub swept_curve: usize,
+    pub axis_position: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SurfaceOfRevolution_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SURFACE_OF_REVOLUTION(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, swept_curve) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, axis_position) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                swept_curve,
+                axis_position,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OffsetSurface_<'a> {
+    pub name: &'a str,
+    pub basis_surface: usize,
+    pub distance: f64,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OffsetSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("OFFSET_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, distance) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_surface,
+                distance,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct DegenerateToroidalSurface_<'a> {
+    pub name: &'a str,
+    pub position: usize,
+    pub major_radius: f64,
+    pub minor_radius: f64,
+    pub select_outer: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> DegenerateToroidalSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("DEGENERATE_TOROIDAL_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, position) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, major_radius) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, minor_radius) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, select_outer) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                position,
+                major_radius,
+                minor_radius,
+                select_outer,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CurveBoundedSurface_<'a> {
+    pub name: &'a str,
+    pub basis_surface: usize,
+    pub boundaries: Vec<usize>,
+    pub implicit_outer: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CurveBoundedSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CURVE_BOUNDED_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, boundaries) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, implicit_outer) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_surface,
+                boundaries,
+                implicit_outer,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RectangularTrimmedSurface_<'a> {
+    pub name: &'a str,
+    pub basis_surface: usize,
+    pub u1: f64,
+    pub u2: f64,
+    pub v1: f64,
+    pub v2: f64,
+    pub usense: bool,
+    pub vsense: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RectangularTrimmedSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("RECTANGULAR_TRIMMED_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, basis_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, u1) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, u2) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, v1) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, v2) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, usense) = param_from_chunks::<bool>(false, s, &mut i, strs)?;
+        let (s, vsense) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                basis_surface,
+                u1,
+                u2,
+                v1,
+                v2,
+                usense,
+                vsense,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct QuasiUniformSurface_<'a> {
+    pub name: &'a str,
+    pub u_degree: i64,
+    pub v_degree: i64,
+    pub control_points_list: Vec<Vec<usize>>,
+    pub surface_form: &'a str,
+    pub u_closed: Logical,
+    pub v_closed: Logical,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> QuasiUniformSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("QUASI_UNIFORM_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, u_degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, v_degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, control_points_list) =
+            param_from_chunks::<Vec<Vec<usize>>>(false, s, &mut i, strs)?;
+        let (s, surface_form) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, u_closed) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, v_closed) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                u_degree,
+                v_degree,
+                control_points_list,
+                surface_form,
+                u_closed,
+                v_closed,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BezierSurface_<'a> {
+    pub name: &'a str,
+    pub u_degree: i64,
+    pub v_degree: i64,
+    pub control_points_list: Vec<Vec<usize>>,
+    pub surface_form: &'a str,
+    pub u_closed: Logical,
+    pub v_closed: Logical,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BezierSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BEZIER_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, u_degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, v_degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, control_points_list) =
+            param_from_chunks::<Vec<Vec<usize>>>(false, s, &mut i, strs)?;
+        let (s, surface_form) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, u_closed) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, v_closed) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                u_degree,
+                v_degree,
+                control_points_list,
+                surface_form,
+                u_closed,
+                v_closed,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct UniformSurface_<'a> {
+    pub name: &'a str,
+    pub u_degree: i64,
+    pub v_degree: i64,
+    pub control_points_list: Vec<Vec<usize>>,
+    pub surface_form: &'a str,
+    pub u_closed: Logical,
+    pub v_closed: Logical,
+    pub self_intersect: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> UniformSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("UNIFORM_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, u_degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, v_degree) = param_from_chunks::<i64>(false, s, &mut i, strs)?;
+        let (s, control_points_list) =
+            param_from_chunks::<Vec<Vec<usize>>>(false, s, &mut i, strs)?;
+        let (s, surface_form) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, u_closed) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, v_closed) = param_from_chunks::<Logical>(false, s, &mut i, strs)?;
+        let (s, self_intersect) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                u_degree,
+                v_degree,
+                control_points_list,
+                surface_form,
+                u_closed,
+                v_closed,
+                self_intersect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct SweptSurface_<'a> {
+    pub name: &'a str,
+    pub swept_curve: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SweptSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SWEPT_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, swept_curve) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                swept_curve,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct SurfaceReplica_<'a> {
+    pub name: &'a str,
+    pub parent_surface: usize,
+    pub transformation: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SurfaceReplica_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SURFACE_REPLICA(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, parent_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, transformation) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                parent_surface,
+                transformation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OrientedSurface_<'a> {
+    pub name: &'a str,
+    pub orientation: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OrientedSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("ORIENTED_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, orientation) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                orientation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RectangularCompositeSurface_<'a> {
+    pub name: &'a str,
+    pub segments: Vec<Vec<usize>>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RectangularCompositeSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("RECTANGULAR_COMPOSITE_SURFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, segments) = param_from_chunks::<Vec<Vec<usize>>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                segments,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
 pub struct VertexPoint_<'a> {
     pub representation_item__name: &'a str,
     pub vertex_geometry: usize,
@@ -772,6 +1921,431 @@ impl<'a> ClosedShell_<'a> {
 }
 
 #[derive(Debug)]
+pub struct OpenShell_<'a> {
+    pub name: &'a str,
+    pub cfs_faces: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OpenShell_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("OPEN_SHELL(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, cfs_faces) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                cfs_faces,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OrientedClosedShell_<'a> {
+    pub name: &'a str,
+    pub closed_shell_element: usize,
+    pub orientation: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OrientedClosedShell_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("ORIENTED_CLOSED_SHELL(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, _) = param_from_chunks::<Derived>(false, s, &mut i, strs)?;
+        let (s, closed_shell_element) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, orientation) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                closed_shell_element,
+                orientation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OrientedOpenShell_<'a> {
+    pub name: &'a str,
+    pub open_shell_element: usize,
+    pub orientation: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OrientedOpenShell_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("ORIENTED_OPEN_SHELL(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, _) = param_from_chunks::<Derived>(false, s, &mut i, strs)?;
+        let (s, open_shell_element) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, orientation) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                open_shell_element,
+                orientation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct FaceSurface_<'a> {
+    pub representation_item__name: &'a str,
+    pub bounds: Vec<usize>,
+    pub face_geometry: usize,
+    pub same_sense: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> FaceSurface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("FACE_SURFACE(")(strs[0])?;
+        let (s, representation_item__name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, bounds) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, face_geometry) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, same_sense) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                representation_item__name,
+                bounds,
+                face_geometry,
+                same_sense,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Face_<'a> {
+    pub name: &'a str,
+    pub bounds: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Face_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("FACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, bounds) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                bounds,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Subface_<'a> {
+    pub name: &'a str,
+    pub bounds: Vec<usize>,
+    pub parent_face: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Subface_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SUBFACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, bounds) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, parent_face) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                bounds,
+                parent_face,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Edge_<'a> {
+    pub name: &'a str,
+    pub edge_start: usize,
+    pub edge_end: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Edge_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("EDGE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, edge_start) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, edge_end) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                edge_start,
+                edge_end,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Subedge_<'a> {
+    pub name: &'a str,
+    pub edge_start: usize,
+    pub edge_end: usize,
+    pub parent_edge: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Subedge_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SUBEDGE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, edge_start) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, edge_end) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, parent_edge) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                edge_start,
+                edge_end,
+                parent_edge,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Vertex_<'a> {
+    pub name: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Vertex_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("VERTEX(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct VertexLoop_<'a> {
+    pub name: &'a str,
+    pub loop_vertex: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> VertexLoop_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("VERTEX_LOOP(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, loop_vertex) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                loop_vertex,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct PolyLoop_<'a> {
+    pub representation_item__name: &'a str,
+    pub polygon: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> PolyLoop_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("POLY_LOOP(")(strs[0])?;
+        let (s, representation_item__name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, polygon) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                representation_item__name,
+                polygon,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Path_<'a> {
+    pub name: &'a str,
+    pub edge_list: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Path_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("PATH(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, edge_list) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                edge_list,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OrientedPath_<'a> {
+    pub name: &'a str,
+    pub path_element: usize,
+    pub orientation: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OrientedPath_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("ORIENTED_PATH(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, _) = param_from_chunks::<Derived>(false, s, &mut i, strs)?;
+        let (s, path_element) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, orientation) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                path_element,
+                orientation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct OrientedFace_<'a> {
+    pub name: &'a str,
+    pub face_element: usize,
+    pub orientation: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> OrientedFace_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("ORIENTED_FACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, _) = param_from_chunks::<Derived>(false, s, &mut i, strs)?;
+        let (s, face_element) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, orientation) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                face_element,
+                orientation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ConnectedFaceSet_<'a> {
+    pub name: &'a str,
+    pub cfs_faces: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ConnectedFaceSet_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CONNECTED_FACE_SET(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, cfs_faces) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                cfs_faces,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ConnectedFaceSubSet_<'a> {
+    pub name: &'a str,
+    pub cfs_faces: Vec<usize>,
+    pub parent_face_set: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ConnectedFaceSubSet_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CONNECTED_FACE_SUB_SET(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, cfs_faces) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, parent_face_set) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                cfs_faces,
+                parent_face_set,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ConnectedEdgeSet_<'a> {
+    pub name: &'a str,
+    pub ces_edges: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ConnectedEdgeSet_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CONNECTED_EDGE_SET(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, ces_edges) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                ces_edges,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
 pub struct ManifoldSolidBrep_<'a> {
     pub name: &'a str,
     pub outer: usize,
@@ -788,6 +2362,475 @@ impl<'a> ManifoldSolidBrep_<'a> {
             Self {
                 name,
                 outer,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BrepWithVoids_<'a> {
+    pub name: &'a str,
+    pub outer: usize,
+    pub voids: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BrepWithVoids_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BREP_WITH_VOIDS(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, outer) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, voids) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                outer,
+                voids,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct FacetedBrep_<'a> {
+    pub name: &'a str,
+    pub outer: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> FacetedBrep_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("FACETED_BREP(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, outer) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                outer,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ShellBasedSurfaceModel_<'a> {
+    pub name: &'a str,
+    pub sbsm_boundary: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ShellBasedSurfaceModel_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SHELL_BASED_SURFACE_MODEL(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, sbsm_boundary) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                sbsm_boundary,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct FaceBasedSurfaceModel_<'a> {
+    pub name: &'a str,
+    pub fbsm_faces: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> FaceBasedSurfaceModel_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("FACE_BASED_SURFACE_MODEL(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, fbsm_faces) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                fbsm_faces,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CsgSolid_<'a> {
+    pub name: &'a str,
+    pub tree_root_expression: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CsgSolid_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CSG_SOLID(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, tree_root_expression) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                tree_root_expression,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BooleanResult_<'a> {
+    pub name: &'a str,
+    pub operator: &'a str,
+    pub first_operand: usize,
+    pub second_operand: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BooleanResult_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BOOLEAN_RESULT(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, operator) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, first_operand) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, second_operand) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                operator,
+                first_operand,
+                second_operand,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct HalfSpaceSolid_<'a> {
+    pub name: &'a str,
+    pub base_surface: usize,
+    pub agreement_flag: bool,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> HalfSpaceSolid_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("HALF_SPACE_SOLID(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, base_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, agreement_flag) = param_from_chunks::<bool>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                base_surface,
+                agreement_flag,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BoxedHalfSpace_<'a> {
+    pub name: &'a str,
+    pub base_surface: usize,
+    pub agreement_flag: bool,
+    pub enclosure: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> BoxedHalfSpace_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BOXED_HALF_SPACE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, base_surface) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, agreement_flag) = param_from_chunks::<bool>(false, s, &mut i, strs)?;
+        let (s, enclosure) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                base_surface,
+                agreement_flag,
+                enclosure,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ExtrudedAreaSolid_<'a> {
+    pub name: &'a str,
+    pub swept_area: usize,
+    pub extruded_direction: usize,
+    pub depth: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ExtrudedAreaSolid_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("EXTRUDED_AREA_SOLID(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, swept_area) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, extruded_direction) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, depth) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                swept_area,
+                extruded_direction,
+                depth,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RevolvedAreaSolid_<'a> {
+    pub name: &'a str,
+    pub swept_area: usize,
+    pub axis: usize,
+    pub angle: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RevolvedAreaSolid_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("REVOLVED_AREA_SOLID(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, swept_area) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, axis) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, angle) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                swept_area,
+                axis,
+                angle,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct SweptDiskSolid_<'a> {
+    pub name: &'a str,
+    pub directrix: usize,
+    pub radius: f64,
+    pub inner_radius: Option<f64>,
+    pub start_param: f64,
+    pub end_param: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SweptDiskSolid_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SWEPT_DISK_SOLID(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, directrix) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, radius) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, inner_radius) = param_from_chunks::<Option<f64>>(false, s, &mut i, strs)?;
+        let (s, start_param) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, end_param) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                directrix,
+                radius,
+                inner_radius,
+                start_param,
+                end_param,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct SolidReplica_<'a> {
+    pub name: &'a str,
+    pub parent_solid: usize,
+    pub transformation: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> SolidReplica_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SOLID_REPLICA(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, parent_solid) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, transformation) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                parent_solid,
+                transformation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Block_<'a> {
+    pub name: &'a str,
+    pub position: usize,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Block_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("BLOCK(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, position) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, x) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, y) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, z) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                position,
+                x,
+                y,
+                z,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RightCircularCone_<'a> {
+    pub name: &'a str,
+    pub position: usize,
+    pub height: f64,
+    pub radius: f64,
+    pub semi_angle: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RightCircularCone_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("RIGHT_CIRCULAR_CONE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, position) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, height) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, radius) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, semi_angle) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                position,
+                height,
+                radius,
+                semi_angle,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RightCircularCylinder_<'a> {
+    pub name: &'a str,
+    pub position: usize,
+    pub height: f64,
+    pub radius: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RightCircularCylinder_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("RIGHT_CIRCULAR_CYLINDER(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, position) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, height) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, radius) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                position,
+                height,
+                radius,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Sphere_<'a> {
+    pub name: &'a str,
+    pub radius: f64,
+    pub centre: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Sphere_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SPHERE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, radius) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, centre) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                radius,
+                centre,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Torus_<'a> {
+    pub name: &'a str,
+    pub position: usize,
+    pub major_radius: f64,
+    pub minor_radius: f64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Torus_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("TORUS(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, position) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, major_radius) = param_from_chunks::<f64>(false, s, &mut i, strs)?;
+        let (s, minor_radius) = param_from_chunks::<f64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                position,
+                major_radius,
+                minor_radius,
                 _p: std::marker::PhantomData,
             },
         ))
@@ -840,6 +2883,374 @@ impl<'a> AdvancedBrepShapeRepresentation_<'a> {
                 name,
                 items,
                 context_of_items,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct MappedItem_<'a> {
+    pub name: &'a str,
+    pub mapping_source: usize,
+    pub mapping_target: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> MappedItem_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("MAPPED_ITEM(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, mapping_source) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, mapping_target) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                mapping_source,
+                mapping_target,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RepresentationMap_<'a> {
+    pub mapping_origin: usize,
+    pub mapped_representation: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RepresentationMap_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("REPRESENTATION_MAP(")(strs[0])?;
+        let (s, mapping_origin) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, mapped_representation) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                mapping_origin,
+                mapped_representation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Representation_<'a> {
+    pub name: &'a str,
+    pub items: Vec<usize>,
+    pub context_of_items: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> Representation_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("REPRESENTATION(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, items) = param_from_chunks::<Vec<usize>>(false, s, &mut i, strs)?;
+        let (s, context_of_items) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                items,
+                context_of_items,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RepresentationItem_<'a> {
+    pub name: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RepresentationItem_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("REPRESENTATION_ITEM(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RepresentationContext_<'a> {
+    pub context_identifier: &'a str,
+    pub context_type: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RepresentationContext_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("REPRESENTATION_CONTEXT(")(strs[0])?;
+        let (s, context_identifier) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, context_type) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                context_identifier,
+                context_type,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct RepresentationRelationship_<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub rep_1: usize,
+    pub rep_2: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> RepresentationRelationship_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("REPRESENTATION_RELATIONSHIP(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, rep_1) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, rep_2) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                description,
+                rep_1,
+                rep_2,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct GeometricRepresentationContext_<'a> {
+    pub context_identifier: &'a str,
+    pub context_type: &'a str,
+    pub coordinate_space_dimension: i64,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> GeometricRepresentationContext_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("GEOMETRIC_REPRESENTATION_CONTEXT(")(strs[0])?;
+        let (s, context_identifier) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, context_type) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, coordinate_space_dimension) = param_from_chunks::<i64>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                context_identifier,
+                context_type,
+                coordinate_space_dimension,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct GeometricRepresentationItem_<'a> {
+    pub name: &'a str,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> GeometricRepresentationItem_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("GEOMETRIC_REPRESENTATION_ITEM(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ShapeDefinitionRepresentation_<'a> {
+    pub definition: usize,
+    pub used_representation: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ShapeDefinitionRepresentation_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SHAPE_DEFINITION_REPRESENTATION(")(strs[0])?;
+        let (s, definition) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, used_representation) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                definition,
+                used_representation,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ShapeAspect_<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub of_shape: usize,
+    pub product_definitional: Logical,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ShapeAspect_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SHAPE_ASPECT(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, of_shape) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, product_definitional) = param_from_chunks::<Logical>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                description,
+                of_shape,
+                product_definitional,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ShapeAspectRelationship_<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub relating_shape_aspect: usize,
+    pub related_shape_aspect: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ShapeAspectRelationship_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("SHAPE_ASPECT_RELATIONSHIP(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, relating_shape_aspect) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, related_shape_aspect) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                description,
+                relating_shape_aspect,
+                related_shape_aspect,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ItemIdentifiedRepresentationUsage_<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub definition: usize,
+    pub used_representation: usize,
+    pub identified_item: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ItemIdentifiedRepresentationUsage_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("ITEM_IDENTIFIED_REPRESENTATION_USAGE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, definition) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, used_representation) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, identified_item) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                description,
+                definition,
+                used_representation,
+                identified_item,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct NextAssemblyUsageOccurrence_<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub relating_product_definition: usize,
+    pub related_product_definition: usize,
+    pub reference_designator: Option<&'a str>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> NextAssemblyUsageOccurrence_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("NEXT_ASSEMBLY_USAGE_OCCURRENCE(")(strs[0])?;
+        let (s, id) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, relating_product_definition) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, related_product_definition) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, reference_designator) =
+            param_from_chunks::<Option<&'a str>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                id,
+                name,
+                description,
+                relating_product_definition,
+                related_product_definition,
+                reference_designator,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ProductDefinitionShape_<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub definition: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> ProductDefinitionShape_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("PRODUCT_DEFINITION_SHAPE(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, definition) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                description,
+                definition,
                 _p: std::marker::PhantomData,
             },
         ))
@@ -937,6 +3348,110 @@ impl<'a> ItemDefinedTransformation_<'a> {
 }
 
 #[derive(Debug)]
+pub struct CartesianTransformationOperator3d_<'a> {
+    pub representation_item__name: &'a str,
+    pub functionally_defined_transformation__name: &'a str,
+    pub description: Option<&'a str>,
+    pub axis1: Option<usize>,
+    pub axis2: Option<usize>,
+    pub local_origin: usize,
+    pub scale: Option<f64>,
+    pub axis3: Option<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CartesianTransformationOperator3d_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CARTESIAN_TRANSFORMATION_OPERATOR_3D(")(strs[0])?;
+        let (s, representation_item__name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, functionally_defined_transformation__name) =
+            param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, axis1) = param_from_chunks::<Option<usize>>(false, s, &mut i, strs)?;
+        let (s, axis2) = param_from_chunks::<Option<usize>>(false, s, &mut i, strs)?;
+        let (s, local_origin) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, scale) = param_from_chunks::<Option<f64>>(false, s, &mut i, strs)?;
+        let (s, axis3) = param_from_chunks::<Option<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                representation_item__name,
+                functionally_defined_transformation__name,
+                description,
+                axis1,
+                axis2,
+                local_origin,
+                scale,
+                axis3,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct CartesianTransformationOperator_<'a> {
+    pub representation_item__name: &'a str,
+    pub functionally_defined_transformation__name: &'a str,
+    pub description: Option<&'a str>,
+    pub axis1: Option<usize>,
+    pub axis2: Option<usize>,
+    pub local_origin: usize,
+    pub scale: Option<f64>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CartesianTransformationOperator_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("CARTESIAN_TRANSFORMATION_OPERATOR(")(strs[0])?;
+        let (s, representation_item__name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, functionally_defined_transformation__name) =
+            param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(false, s, &mut i, strs)?;
+        let (s, axis1) = param_from_chunks::<Option<usize>>(false, s, &mut i, strs)?;
+        let (s, axis2) = param_from_chunks::<Option<usize>>(false, s, &mut i, strs)?;
+        let (s, local_origin) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, scale) = param_from_chunks::<Option<f64>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                representation_item__name,
+                functionally_defined_transformation__name,
+                description,
+                axis1,
+                axis2,
+                local_origin,
+                scale,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct FunctionallyDefinedTransformation_<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> FunctionallyDefinedTransformation_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("FUNCTIONALLY_DEFINED_TRANSFORMATION(")(strs[0])?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                name,
+                description,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
 pub struct SiUnit_<'a> {
     pub prefix: Option<&'a str>,
     pub name: &'a str,
@@ -970,15 +3485,7 @@ impl<'a> ConversionBasedUnit_<'a> {
     pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
         let mut i = 0;
         let (s, _) = tag("CONVERSION_BASED_UNIT(")(strs[0])?;
-        // Inherited NAMED_UNIT dimension param: either `*` (derived) or `#nnn` (ref)
-        let i_save = i;
-        let s = match param_from_chunks::<Derived>(false, s, &mut i, strs) {
-            Ok((s, _)) => s,
-            Err(_) => {
-                i = i_save;
-                param_from_chunks::<usize>(false, s, &mut i, strs)?.0
-            }
-        };
+        let (s, _) = param_from_chunks::<Derived>(false, s, &mut i, strs)?;
         let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
         let (s, conversion_factor) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
         Ok((
@@ -1013,17 +3520,253 @@ impl<'a> LengthUnit_<'a> {
 }
 
 #[derive(Debug)]
+pub struct NamedUnit_<'a> {
+    pub dimensions: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> NamedUnit_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("NAMED_UNIT(")(strs[0])?;
+        let (s, dimensions) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                dimensions,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct DerivedUnit_<'a> {
+    pub elements: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> DerivedUnit_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("DERIVED_UNIT(")(strs[0])?;
+        let (s, elements) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                elements,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct MeasureWithUnit_<'a> {
+    pub value_component: Select<'a>,
+    pub unit_component: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> MeasureWithUnit_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("MEASURE_WITH_UNIT(")(strs[0])?;
+        let (s, value_component) = param_from_chunks::<Select<'a>>(false, s, &mut i, strs)?;
+        let (s, unit_component) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                value_component,
+                unit_component,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct PlaneAngleUnit_<'a> {
+    pub dimensions: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> PlaneAngleUnit_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("PLANE_ANGLE_UNIT(")(strs[0])?;
+        let (s, dimensions) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                dimensions,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct LengthMeasureWithUnit_<'a> {
+    pub value_component: Select<'a>,
+    pub unit_component: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> LengthMeasureWithUnit_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("LENGTH_MEASURE_WITH_UNIT(")(strs[0])?;
+        let (s, value_component) = param_from_chunks::<Select<'a>>(false, s, &mut i, strs)?;
+        let (s, unit_component) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                value_component,
+                unit_component,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct PlaneAngleMeasureWithUnit_<'a> {
+    pub value_component: Select<'a>,
+    pub unit_component: usize,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> PlaneAngleMeasureWithUnit_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("PLANE_ANGLE_MEASURE_WITH_UNIT(")(strs[0])?;
+        let (s, value_component) = param_from_chunks::<Select<'a>>(false, s, &mut i, strs)?;
+        let (s, unit_component) = param_from_chunks::<usize>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                value_component,
+                unit_component,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct GlobalUnitAssignedContext_<'a> {
+    pub context_identifier: &'a str,
+    pub context_type: &'a str,
+    pub units: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> GlobalUnitAssignedContext_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("GLOBAL_UNIT_ASSIGNED_CONTEXT(")(strs[0])?;
+        let (s, context_identifier) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, context_type) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, units) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                context_identifier,
+                context_type,
+                units,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct GlobalUncertaintyAssignedContext_<'a> {
+    pub context_identifier: &'a str,
+    pub context_type: &'a str,
+    pub uncertainty: Vec<usize>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> GlobalUncertaintyAssignedContext_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT(")(strs[0])?;
+        let (s, context_identifier) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, context_type) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, uncertainty) = param_from_chunks::<Vec<usize>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                context_identifier,
+                context_type,
+                uncertainty,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct UncertaintyMeasureWithUnit_<'a> {
+    pub value_component: Select<'a>,
+    pub unit_component: usize,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    _p: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> UncertaintyMeasureWithUnit_<'a> {
+    pub fn parse_chunks(strs: &[&'a str]) -> IResult<'a, Self> {
+        let mut i = 0;
+        let (s, _) = tag("UNCERTAINTY_MEASURE_WITH_UNIT(")(strs[0])?;
+        let (s, value_component) = param_from_chunks::<Select<'a>>(false, s, &mut i, strs)?;
+        let (s, unit_component) = param_from_chunks::<usize>(false, s, &mut i, strs)?;
+        let (s, name) = param_from_chunks::<&'a str>(false, s, &mut i, strs)?;
+        let (s, description) = param_from_chunks::<Option<&'a str>>(true, s, &mut i, strs)?;
+        Ok((
+            s,
+            Self {
+                value_component,
+                unit_component,
+                name,
+                description,
+                _p: std::marker::PhantomData,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
 pub enum Entity<'a> {
     CartesianPoint(CartesianPoint_<'a>),
     Direction(Direction_<'a>),
     Vector(Vector_<'a>),
     Axis2Placement3d(Axis2Placement3d_<'a>),
+    Axis1Placement(Axis1Placement_<'a>),
+    Axis2Placement2d(Axis2Placement2d_<'a>),
     Line(Line_<'a>),
     Circle(Circle_<'a>),
     Ellipse(Ellipse_<'a>),
+    Hyperbola(Hyperbola_<'a>),
+    Parabola(Parabola_<'a>),
+    TrimmedCurve(TrimmedCurve_<'a>),
+    CompositeCurve(CompositeCurve_<'a>),
+    CompositeCurveSegment(CompositeCurveSegment_<'a>),
+    Pcurve(Pcurve_<'a>),
+    BoundedPcurve(BoundedPcurve_<'a>),
+    SeamCurve(SeamCurve_<'a>),
+    IntersectionCurve(IntersectionCurve_<'a>),
+    SurfaceCurve(SurfaceCurve_<'a>),
+    BoundedSurfaceCurve(BoundedSurfaceCurve_<'a>),
+    OffsetCurve2d(OffsetCurve2d_<'a>),
+    OffsetCurve3d(OffsetCurve3d_<'a>),
+    Polyline(Polyline_<'a>),
     BSplineCurve(BSplineCurve_<'a>),
     BSplineCurveWithKnots(BSplineCurveWithKnots_<'a>),
     RationalBSplineCurve(RationalBSplineCurve_<'a>),
+    BezierCurve(BezierCurve_<'a>),
+    QuasiUniformCurve(QuasiUniformCurve_<'a>),
+    UniformCurve(UniformCurve_<'a>),
+    ReparametrisedCompositeCurveSegment(ReparametrisedCompositeCurveSegment_<'a>),
+    OuterBoundaryCurve(OuterBoundaryCurve_<'a>),
+    BoundaryCurve(BoundaryCurve_<'a>),
+    CurveReplica(CurveReplica_<'a>),
+    DegeneratePcurve(DegeneratePcurve_<'a>),
+    EvaluatedDegeneratePcurve(EvaluatedDegeneratePcurve_<'a>),
+    CompositeCurveOnSurface(CompositeCurveOnSurface_<'a>),
     Plane(Plane_<'a>),
     CylindricalSurface(CylindricalSurface_<'a>),
     ConicalSurface(ConicalSurface_<'a>),
@@ -1031,6 +3774,19 @@ pub enum Entity<'a> {
     ToroidalSurface(ToroidalSurface_<'a>),
     BSplineSurfaceWithKnots(BSplineSurfaceWithKnots_<'a>),
     RationalBSplineSurface(RationalBSplineSurface_<'a>),
+    SurfaceOfLinearExtrusion(SurfaceOfLinearExtrusion_<'a>),
+    SurfaceOfRevolution(SurfaceOfRevolution_<'a>),
+    OffsetSurface(OffsetSurface_<'a>),
+    DegenerateToroidalSurface(DegenerateToroidalSurface_<'a>),
+    CurveBoundedSurface(CurveBoundedSurface_<'a>),
+    RectangularTrimmedSurface(RectangularTrimmedSurface_<'a>),
+    QuasiUniformSurface(QuasiUniformSurface_<'a>),
+    BezierSurface(BezierSurface_<'a>),
+    UniformSurface(UniformSurface_<'a>),
+    SweptSurface(SweptSurface_<'a>),
+    SurfaceReplica(SurfaceReplica_<'a>),
+    OrientedSurface(OrientedSurface_<'a>),
+    RectangularCompositeSurface(RectangularCompositeSurface_<'a>),
     VertexPoint(VertexPoint_<'a>),
     EdgeCurve(EdgeCurve_<'a>),
     OrientedEdge(OrientedEdge_<'a>),
@@ -1039,15 +3795,75 @@ pub enum Entity<'a> {
     FaceOuterBound(FaceOuterBound_<'a>),
     AdvancedFace(AdvancedFace_<'a>),
     ClosedShell(ClosedShell_<'a>),
+    OpenShell(OpenShell_<'a>),
+    OrientedClosedShell(OrientedClosedShell_<'a>),
+    OrientedOpenShell(OrientedOpenShell_<'a>),
+    FaceSurface(FaceSurface_<'a>),
+    Face(Face_<'a>),
+    Subface(Subface_<'a>),
+    Edge(Edge_<'a>),
+    Subedge(Subedge_<'a>),
+    Vertex(Vertex_<'a>),
+    VertexLoop(VertexLoop_<'a>),
+    PolyLoop(PolyLoop_<'a>),
+    Path(Path_<'a>),
+    OrientedPath(OrientedPath_<'a>),
+    OrientedFace(OrientedFace_<'a>),
+    ConnectedFaceSet(ConnectedFaceSet_<'a>),
+    ConnectedFaceSubSet(ConnectedFaceSubSet_<'a>),
+    ConnectedEdgeSet(ConnectedEdgeSet_<'a>),
     ManifoldSolidBrep(ManifoldSolidBrep_<'a>),
+    BrepWithVoids(BrepWithVoids_<'a>),
+    FacetedBrep(FacetedBrep_<'a>),
+    ShellBasedSurfaceModel(ShellBasedSurfaceModel_<'a>),
+    FaceBasedSurfaceModel(FaceBasedSurfaceModel_<'a>),
+    CsgSolid(CsgSolid_<'a>),
+    BooleanResult(BooleanResult_<'a>),
+    HalfSpaceSolid(HalfSpaceSolid_<'a>),
+    BoxedHalfSpace(BoxedHalfSpace_<'a>),
+    ExtrudedAreaSolid(ExtrudedAreaSolid_<'a>),
+    RevolvedAreaSolid(RevolvedAreaSolid_<'a>),
+    SweptDiskSolid(SweptDiskSolid_<'a>),
+    SolidReplica(SolidReplica_<'a>),
+    Block(Block_<'a>),
+    RightCircularCone(RightCircularCone_<'a>),
+    RightCircularCylinder(RightCircularCylinder_<'a>),
+    Sphere(Sphere_<'a>),
+    Torus(Torus_<'a>),
     ShapeRepresentation(ShapeRepresentation_<'a>),
     AdvancedBrepShapeRepresentation(AdvancedBrepShapeRepresentation_<'a>),
+    MappedItem(MappedItem_<'a>),
+    RepresentationMap(RepresentationMap_<'a>),
+    Representation(Representation_<'a>),
+    RepresentationItem(RepresentationItem_<'a>),
+    RepresentationContext(RepresentationContext_<'a>),
+    RepresentationRelationship(RepresentationRelationship_<'a>),
+    GeometricRepresentationContext(GeometricRepresentationContext_<'a>),
+    GeometricRepresentationItem(GeometricRepresentationItem_<'a>),
+    ShapeDefinitionRepresentation(ShapeDefinitionRepresentation_<'a>),
+    ShapeAspect(ShapeAspect_<'a>),
+    ShapeAspectRelationship(ShapeAspectRelationship_<'a>),
+    ItemIdentifiedRepresentationUsage(ItemIdentifiedRepresentationUsage_<'a>),
+    NextAssemblyUsageOccurrence(NextAssemblyUsageOccurrence_<'a>),
+    ProductDefinitionShape(ProductDefinitionShape_<'a>),
     RepresentationRelationshipWithTransformation(RepresentationRelationshipWithTransformation_<'a>),
     ShapeRepresentationRelationship(ShapeRepresentationRelationship_<'a>),
     ItemDefinedTransformation(ItemDefinedTransformation_<'a>),
+    CartesianTransformationOperator3d(CartesianTransformationOperator3d_<'a>),
+    CartesianTransformationOperator(CartesianTransformationOperator_<'a>),
+    FunctionallyDefinedTransformation(FunctionallyDefinedTransformation_<'a>),
     SiUnit(SiUnit_<'a>),
     ConversionBasedUnit(ConversionBasedUnit_<'a>),
     LengthUnit(LengthUnit_<'a>),
+    NamedUnit(NamedUnit_<'a>),
+    DerivedUnit(DerivedUnit_<'a>),
+    MeasureWithUnit(MeasureWithUnit_<'a>),
+    PlaneAngleUnit(PlaneAngleUnit_<'a>),
+    LengthMeasureWithUnit(LengthMeasureWithUnit_<'a>),
+    PlaneAngleMeasureWithUnit(PlaneAngleMeasureWithUnit_<'a>),
+    GlobalUnitAssignedContext(GlobalUnitAssignedContext_<'a>),
+    GlobalUncertaintyAssignedContext(GlobalUncertaintyAssignedContext_<'a>),
+    UncertaintyMeasureWithUnit(UncertaintyMeasureWithUnit_<'a>),
     /// Unparsed entity — tag extracted, payload left as raw str.
     Generic(&'a str),
     ComplexEntity(Vec<Entity<'a>>),
@@ -1070,9 +3886,44 @@ impl<'a> Entity<'a> {
             "AXIS2_PLACEMENT_3D" => {
                 Axis2Placement3d_::parse_chunks(strs).map(|(s, v)| (s, Entity::Axis2Placement3d(v)))
             }
+            "AXIS1_PLACEMENT" => {
+                Axis1Placement_::parse_chunks(strs).map(|(s, v)| (s, Entity::Axis1Placement(v)))
+            }
+            "AXIS2_PLACEMENT_2D" => {
+                Axis2Placement2d_::parse_chunks(strs).map(|(s, v)| (s, Entity::Axis2Placement2d(v)))
+            }
             "LINE" => Line_::parse_chunks(strs).map(|(s, v)| (s, Entity::Line(v))),
             "CIRCLE" => Circle_::parse_chunks(strs).map(|(s, v)| (s, Entity::Circle(v))),
             "ELLIPSE" => Ellipse_::parse_chunks(strs).map(|(s, v)| (s, Entity::Ellipse(v))),
+            "HYPERBOLA" => Hyperbola_::parse_chunks(strs).map(|(s, v)| (s, Entity::Hyperbola(v))),
+            "PARABOLA" => Parabola_::parse_chunks(strs).map(|(s, v)| (s, Entity::Parabola(v))),
+            "TRIMMED_CURVE" => {
+                TrimmedCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::TrimmedCurve(v)))
+            }
+            "COMPOSITE_CURVE" => {
+                CompositeCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::CompositeCurve(v)))
+            }
+            "COMPOSITE_CURVE_SEGMENT" => CompositeCurveSegment_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::CompositeCurveSegment(v))),
+            "PCURVE" => Pcurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::Pcurve(v))),
+            "BOUNDED_PCURVE" => {
+                BoundedPcurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::BoundedPcurve(v)))
+            }
+            "SEAM_CURVE" => SeamCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::SeamCurve(v))),
+            "INTERSECTION_CURVE" => IntersectionCurve_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::IntersectionCurve(v))),
+            "SURFACE_CURVE" => {
+                SurfaceCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::SurfaceCurve(v)))
+            }
+            "BOUNDED_SURFACE_CURVE" => BoundedSurfaceCurve_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::BoundedSurfaceCurve(v))),
+            "OFFSET_CURVE_2D" => {
+                OffsetCurve2d_::parse_chunks(strs).map(|(s, v)| (s, Entity::OffsetCurve2d(v)))
+            }
+            "OFFSET_CURVE_3D" => {
+                OffsetCurve3d_::parse_chunks(strs).map(|(s, v)| (s, Entity::OffsetCurve3d(v)))
+            }
+            "POLYLINE" => Polyline_::parse_chunks(strs).map(|(s, v)| (s, Entity::Polyline(v))),
             "B_SPLINE_CURVE" => {
                 BSplineCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::BSplineCurve(v)))
             }
@@ -1080,6 +3931,33 @@ impl<'a> Entity<'a> {
                 .map(|(s, v)| (s, Entity::BSplineCurveWithKnots(v))),
             "RATIONAL_B_SPLINE_CURVE" => RationalBSplineCurve_::parse_chunks(strs)
                 .map(|(s, v)| (s, Entity::RationalBSplineCurve(v))),
+            "BEZIER_CURVE" => {
+                BezierCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::BezierCurve(v)))
+            }
+            "QUASI_UNIFORM_CURVE" => QuasiUniformCurve_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::QuasiUniformCurve(v))),
+            "UNIFORM_CURVE" => {
+                UniformCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::UniformCurve(v)))
+            }
+            "REPARAMETRISED_COMPOSITE_CURVE_SEGMENT" => {
+                ReparametrisedCompositeCurveSegment_::parse_chunks(strs)
+                    .map(|(s, v)| (s, Entity::ReparametrisedCompositeCurveSegment(v)))
+            }
+            "OUTER_BOUNDARY_CURVE" => OuterBoundaryCurve_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::OuterBoundaryCurve(v))),
+            "BOUNDARY_CURVE" => {
+                BoundaryCurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::BoundaryCurve(v)))
+            }
+            "CURVE_REPLICA" => {
+                CurveReplica_::parse_chunks(strs).map(|(s, v)| (s, Entity::CurveReplica(v)))
+            }
+            "DEGENERATE_PCURVE" => {
+                DegeneratePcurve_::parse_chunks(strs).map(|(s, v)| (s, Entity::DegeneratePcurve(v)))
+            }
+            "EVALUATED_DEGENERATE_PCURVE" => EvaluatedDegeneratePcurve_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::EvaluatedDegeneratePcurve(v))),
+            "COMPOSITE_CURVE_ON_SURFACE" => CompositeCurveOnSurface_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::CompositeCurveOnSurface(v))),
             "PLANE" => Plane_::parse_chunks(strs).map(|(s, v)| (s, Entity::Plane(v))),
             "CYLINDRICAL_SURFACE" => CylindricalSurface_::parse_chunks(strs)
                 .map(|(s, v)| (s, Entity::CylindricalSurface(v))),
@@ -1096,6 +3974,38 @@ impl<'a> Entity<'a> {
                 .map(|(s, v)| (s, Entity::BSplineSurfaceWithKnots(v))),
             "RATIONAL_B_SPLINE_SURFACE" => RationalBSplineSurface_::parse_chunks(strs)
                 .map(|(s, v)| (s, Entity::RationalBSplineSurface(v))),
+            "SURFACE_OF_LINEAR_EXTRUSION" => SurfaceOfLinearExtrusion_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::SurfaceOfLinearExtrusion(v))),
+            "SURFACE_OF_REVOLUTION" => SurfaceOfRevolution_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::SurfaceOfRevolution(v))),
+            "OFFSET_SURFACE" => {
+                OffsetSurface_::parse_chunks(strs).map(|(s, v)| (s, Entity::OffsetSurface(v)))
+            }
+            "DEGENERATE_TOROIDAL_SURFACE" => DegenerateToroidalSurface_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::DegenerateToroidalSurface(v))),
+            "CURVE_BOUNDED_SURFACE" => CurveBoundedSurface_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::CurveBoundedSurface(v))),
+            "RECTANGULAR_TRIMMED_SURFACE" => RectangularTrimmedSurface_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RectangularTrimmedSurface(v))),
+            "QUASI_UNIFORM_SURFACE" => QuasiUniformSurface_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::QuasiUniformSurface(v))),
+            "BEZIER_SURFACE" => {
+                BezierSurface_::parse_chunks(strs).map(|(s, v)| (s, Entity::BezierSurface(v)))
+            }
+            "UNIFORM_SURFACE" => {
+                UniformSurface_::parse_chunks(strs).map(|(s, v)| (s, Entity::UniformSurface(v)))
+            }
+            "SWEPT_SURFACE" => {
+                SweptSurface_::parse_chunks(strs).map(|(s, v)| (s, Entity::SweptSurface(v)))
+            }
+            "SURFACE_REPLICA" => {
+                SurfaceReplica_::parse_chunks(strs).map(|(s, v)| (s, Entity::SurfaceReplica(v)))
+            }
+            "ORIENTED_SURFACE" => {
+                OrientedSurface_::parse_chunks(strs).map(|(s, v)| (s, Entity::OrientedSurface(v)))
+            }
+            "RECTANGULAR_COMPOSITE_SURFACE" => RectangularCompositeSurface_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RectangularCompositeSurface(v))),
             "VERTEX_POINT" => {
                 VertexPoint_::parse_chunks(strs).map(|(s, v)| (s, Entity::VertexPoint(v)))
             }
@@ -1114,14 +4024,118 @@ impl<'a> Entity<'a> {
             "CLOSED_SHELL" => {
                 ClosedShell_::parse_chunks(strs).map(|(s, v)| (s, Entity::ClosedShell(v)))
             }
+            "OPEN_SHELL" => OpenShell_::parse_chunks(strs).map(|(s, v)| (s, Entity::OpenShell(v))),
+            "ORIENTED_CLOSED_SHELL" => OrientedClosedShell_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::OrientedClosedShell(v))),
+            "ORIENTED_OPEN_SHELL" => OrientedOpenShell_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::OrientedOpenShell(v))),
+            "FACE_SURFACE" => {
+                FaceSurface_::parse_chunks(strs).map(|(s, v)| (s, Entity::FaceSurface(v)))
+            }
+            "FACE" => Face_::parse_chunks(strs).map(|(s, v)| (s, Entity::Face(v))),
+            "SUBFACE" => Subface_::parse_chunks(strs).map(|(s, v)| (s, Entity::Subface(v))),
+            "EDGE" => Edge_::parse_chunks(strs).map(|(s, v)| (s, Entity::Edge(v))),
+            "SUBEDGE" => Subedge_::parse_chunks(strs).map(|(s, v)| (s, Entity::Subedge(v))),
+            "VERTEX" => Vertex_::parse_chunks(strs).map(|(s, v)| (s, Entity::Vertex(v))),
+            "VERTEX_LOOP" => {
+                VertexLoop_::parse_chunks(strs).map(|(s, v)| (s, Entity::VertexLoop(v)))
+            }
+            "POLY_LOOP" => PolyLoop_::parse_chunks(strs).map(|(s, v)| (s, Entity::PolyLoop(v))),
+            "PATH" => Path_::parse_chunks(strs).map(|(s, v)| (s, Entity::Path(v))),
+            "ORIENTED_PATH" => {
+                OrientedPath_::parse_chunks(strs).map(|(s, v)| (s, Entity::OrientedPath(v)))
+            }
+            "ORIENTED_FACE" => {
+                OrientedFace_::parse_chunks(strs).map(|(s, v)| (s, Entity::OrientedFace(v)))
+            }
+            "CONNECTED_FACE_SET" => {
+                ConnectedFaceSet_::parse_chunks(strs).map(|(s, v)| (s, Entity::ConnectedFaceSet(v)))
+            }
+            "CONNECTED_FACE_SUB_SET" => ConnectedFaceSubSet_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::ConnectedFaceSubSet(v))),
+            "CONNECTED_EDGE_SET" => {
+                ConnectedEdgeSet_::parse_chunks(strs).map(|(s, v)| (s, Entity::ConnectedEdgeSet(v)))
+            }
             "MANIFOLD_SOLID_BREP" => ManifoldSolidBrep_::parse_chunks(strs)
                 .map(|(s, v)| (s, Entity::ManifoldSolidBrep(v))),
+            "BREP_WITH_VOIDS" => {
+                BrepWithVoids_::parse_chunks(strs).map(|(s, v)| (s, Entity::BrepWithVoids(v)))
+            }
+            "FACETED_BREP" => {
+                FacetedBrep_::parse_chunks(strs).map(|(s, v)| (s, Entity::FacetedBrep(v)))
+            }
+            "SHELL_BASED_SURFACE_MODEL" => ShellBasedSurfaceModel_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::ShellBasedSurfaceModel(v))),
+            "FACE_BASED_SURFACE_MODEL" => FaceBasedSurfaceModel_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::FaceBasedSurfaceModel(v))),
+            "CSG_SOLID" => CsgSolid_::parse_chunks(strs).map(|(s, v)| (s, Entity::CsgSolid(v))),
+            "BOOLEAN_RESULT" => {
+                BooleanResult_::parse_chunks(strs).map(|(s, v)| (s, Entity::BooleanResult(v)))
+            }
+            "HALF_SPACE_SOLID" => {
+                HalfSpaceSolid_::parse_chunks(strs).map(|(s, v)| (s, Entity::HalfSpaceSolid(v)))
+            }
+            "BOXED_HALF_SPACE" => {
+                BoxedHalfSpace_::parse_chunks(strs).map(|(s, v)| (s, Entity::BoxedHalfSpace(v)))
+            }
+            "EXTRUDED_AREA_SOLID" => ExtrudedAreaSolid_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::ExtrudedAreaSolid(v))),
+            "REVOLVED_AREA_SOLID" => RevolvedAreaSolid_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RevolvedAreaSolid(v))),
+            "SWEPT_DISK_SOLID" => {
+                SweptDiskSolid_::parse_chunks(strs).map(|(s, v)| (s, Entity::SweptDiskSolid(v)))
+            }
+            "SOLID_REPLICA" => {
+                SolidReplica_::parse_chunks(strs).map(|(s, v)| (s, Entity::SolidReplica(v)))
+            }
+            "BLOCK" => Block_::parse_chunks(strs).map(|(s, v)| (s, Entity::Block(v))),
+            "RIGHT_CIRCULAR_CONE" => RightCircularCone_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RightCircularCone(v))),
+            "RIGHT_CIRCULAR_CYLINDER" => RightCircularCylinder_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RightCircularCylinder(v))),
+            "SPHERE" => Sphere_::parse_chunks(strs).map(|(s, v)| (s, Entity::Sphere(v))),
+            "TORUS" => Torus_::parse_chunks(strs).map(|(s, v)| (s, Entity::Torus(v))),
             "SHAPE_REPRESENTATION" => ShapeRepresentation_::parse_chunks(strs)
                 .map(|(s, v)| (s, Entity::ShapeRepresentation(v))),
             "ADVANCED_BREP_SHAPE_REPRESENTATION" => {
                 AdvancedBrepShapeRepresentation_::parse_chunks(strs)
                     .map(|(s, v)| (s, Entity::AdvancedBrepShapeRepresentation(v)))
             }
+            "MAPPED_ITEM" => {
+                MappedItem_::parse_chunks(strs).map(|(s, v)| (s, Entity::MappedItem(v)))
+            }
+            "REPRESENTATION_MAP" => RepresentationMap_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RepresentationMap(v))),
+            "REPRESENTATION" => {
+                Representation_::parse_chunks(strs).map(|(s, v)| (s, Entity::Representation(v)))
+            }
+            "REPRESENTATION_ITEM" => RepresentationItem_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RepresentationItem(v))),
+            "REPRESENTATION_CONTEXT" => RepresentationContext_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RepresentationContext(v))),
+            "REPRESENTATION_RELATIONSHIP" => RepresentationRelationship_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::RepresentationRelationship(v))),
+            "GEOMETRIC_REPRESENTATION_CONTEXT" => {
+                GeometricRepresentationContext_::parse_chunks(strs)
+                    .map(|(s, v)| (s, Entity::GeometricRepresentationContext(v)))
+            }
+            "GEOMETRIC_REPRESENTATION_ITEM" => GeometricRepresentationItem_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::GeometricRepresentationItem(v))),
+            "SHAPE_DEFINITION_REPRESENTATION" => ShapeDefinitionRepresentation_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::ShapeDefinitionRepresentation(v))),
+            "SHAPE_ASPECT" => {
+                ShapeAspect_::parse_chunks(strs).map(|(s, v)| (s, Entity::ShapeAspect(v)))
+            }
+            "SHAPE_ASPECT_RELATIONSHIP" => ShapeAspectRelationship_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::ShapeAspectRelationship(v))),
+            "ITEM_IDENTIFIED_REPRESENTATION_USAGE" => {
+                ItemIdentifiedRepresentationUsage_::parse_chunks(strs)
+                    .map(|(s, v)| (s, Entity::ItemIdentifiedRepresentationUsage(v)))
+            }
+            "NEXT_ASSEMBLY_USAGE_OCCURRENCE" => NextAssemblyUsageOccurrence_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::NextAssemblyUsageOccurrence(v))),
+            "PRODUCT_DEFINITION_SHAPE" => ProductDefinitionShape_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::ProductDefinitionShape(v))),
             "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION" => {
                 RepresentationRelationshipWithTransformation_::parse_chunks(strs)
                     .map(|(s, v)| (s, Entity::RepresentationRelationshipWithTransformation(v)))
@@ -1132,12 +4146,46 @@ impl<'a> Entity<'a> {
             }
             "ITEM_DEFINED_TRANSFORMATION" => ItemDefinedTransformation_::parse_chunks(strs)
                 .map(|(s, v)| (s, Entity::ItemDefinedTransformation(v))),
+            "CARTESIAN_TRANSFORMATION_OPERATOR_3D" => {
+                CartesianTransformationOperator3d_::parse_chunks(strs)
+                    .map(|(s, v)| (s, Entity::CartesianTransformationOperator3d(v)))
+            }
+            "CARTESIAN_TRANSFORMATION_OPERATOR" => {
+                CartesianTransformationOperator_::parse_chunks(strs)
+                    .map(|(s, v)| (s, Entity::CartesianTransformationOperator(v)))
+            }
+            "FUNCTIONALLY_DEFINED_TRANSFORMATION" => {
+                FunctionallyDefinedTransformation_::parse_chunks(strs)
+                    .map(|(s, v)| (s, Entity::FunctionallyDefinedTransformation(v)))
+            }
             "SI_UNIT" => SiUnit_::parse_chunks(strs).map(|(s, v)| (s, Entity::SiUnit(v))),
             "CONVERSION_BASED_UNIT" => ConversionBasedUnit_::parse_chunks(strs)
                 .map(|(s, v)| (s, Entity::ConversionBasedUnit(v))),
             "LENGTH_UNIT" => {
                 LengthUnit_::parse_chunks(strs).map(|(s, v)| (s, Entity::LengthUnit(v)))
             }
+            "NAMED_UNIT" => NamedUnit_::parse_chunks(strs).map(|(s, v)| (s, Entity::NamedUnit(v))),
+            "DERIVED_UNIT" => {
+                DerivedUnit_::parse_chunks(strs).map(|(s, v)| (s, Entity::DerivedUnit(v)))
+            }
+            "MEASURE_WITH_UNIT" => {
+                MeasureWithUnit_::parse_chunks(strs).map(|(s, v)| (s, Entity::MeasureWithUnit(v)))
+            }
+            "PLANE_ANGLE_UNIT" => {
+                PlaneAngleUnit_::parse_chunks(strs).map(|(s, v)| (s, Entity::PlaneAngleUnit(v)))
+            }
+            "LENGTH_MEASURE_WITH_UNIT" => LengthMeasureWithUnit_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::LengthMeasureWithUnit(v))),
+            "PLANE_ANGLE_MEASURE_WITH_UNIT" => PlaneAngleMeasureWithUnit_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::PlaneAngleMeasureWithUnit(v))),
+            "GLOBAL_UNIT_ASSIGNED_CONTEXT" => GlobalUnitAssignedContext_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::GlobalUnitAssignedContext(v))),
+            "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT" => {
+                GlobalUncertaintyAssignedContext_::parse_chunks(strs)
+                    .map(|(s, v)| (s, Entity::GlobalUncertaintyAssignedContext(v)))
+            }
+            "UNCERTAINTY_MEASURE_WITH_UNIT" => UncertaintyMeasureWithUnit_::parse_chunks(strs)
+                .map(|(s, v)| (s, Entity::UncertaintyMeasureWithUnit(v))),
             "" => parse_complex_mapping(strs[0]),
             _ => Ok(("", Entity::Generic(strs[0]))),
         }

@@ -10,8 +10,9 @@ use std::io::Read;
 use std::path::Path;
 
 use xsd_parser::{
+    Config, IdentType,
     config::{NamespaceIdent, Schema},
-    generate, Config, IdentType,
+    generate,
 };
 
 const COLLADA_NS: &[u8] = b"http://www.collada.org/2005/11/COLLADASchema";
@@ -412,11 +413,8 @@ fn simplify_structs(file: &mut syn::File) {
                             .named
                             .iter()
                             .filter(|f| {
-                                let fname = f
-                                    .ident
-                                    .as_ref()
-                                    .map(|i| i.to_string())
-                                    .unwrap_or_default();
+                                let fname =
+                                    f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                                 fname != "setparam" && fname != "technique_hint"
                             })
                             .cloned()

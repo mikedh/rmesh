@@ -35,7 +35,12 @@ macro_rules! space_list {
 
         impl Serialize for $name {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                let text: String = self.0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+                let text: String = self
+                    .0
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 s.serialize_str(&text)
             }
         }
@@ -521,7 +526,10 @@ pub struct FloatArrayElementType {
     pub count: u64,
     #[serde(default = "FloatArrayElementType::default_digits", rename = "@digits")]
     pub digits: i16,
-    #[serde(default = "FloatArrayElementType::default_magnitude", rename = "@magnitude")]
+    #[serde(
+        default = "FloatArrayElementType::default_magnitude",
+        rename = "@magnitude"
+    )]
     pub magnitude: i16,
     #[serde(rename = "$text")]
     pub content: ListOfFloatsType,
@@ -1082,7 +1090,6 @@ pub struct SplineControlVerticesElementType {
     pub extra: Vec<Extra>,
 }
 
-
 // ── Accessor helpers for content enums ──
 
 impl MeshElementType {
@@ -1176,7 +1183,9 @@ impl NodeElementType {
             _ => None,
         })
     }
-    pub fn instance_controllers(&self) -> impl Iterator<Item = &InstanceControllerElementType> + '_ {
+    pub fn instance_controllers(
+        &self,
+    ) -> impl Iterator<Item = &InstanceControllerElementType> + '_ {
         self.content.iter().filter_map(|c| match c {
             NodeElementTypeContent::InstanceController(ic) => Some(ic),
             _ => None,

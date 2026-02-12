@@ -60,15 +60,14 @@ impl<'a, T> std::ops::Index<Id<T>> for StepFile<'a> {
 /// Extract the numeric value from a LENGTH_MEASURE_WITH_UNIT entity.
 fn extract_length_mwu_value(entity: &Entity<'_>) -> Option<f64> {
     let raw = match entity {
-        Entity::Generic(s) => *s,
+        Entity::LengthMeasureWithUnit(lmwu) => lmwu.value_component.0,
+        Entity::MeasureWithUnit(mwu) => mwu.value_component.0,
+        Entity::Generic(s) => *s, // fallback for entities not in codegen match list
         _ => return None,
     };
-    // Only match LENGTH_MEASURE_WITH_UNIT (not PLANE_ANGLE etc.)
-    let inner = raw
-        .find("LENGTH_MEASURE_WITH_UNIT(")
-        .map(|i| &raw[i + "LENGTH_MEASURE_WITH_UNIT(".len()..])?;
-    let paren = inner.find('(')?;
-    let rest = &inner[paren + 1..];
+    // Search for LENGTH_MEASURE( at any nesting level
+    let idx = raw.find("LENGTH_MEASURE(")?;
+    let rest = &raw[idx + "LENGTH_MEASURE(".len()..];
     fast_float::parse_partial::<f64, _>(rest)
         .ok()
         .map(|(v, _)| v)
