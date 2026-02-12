@@ -26,9 +26,11 @@ pub fn load_zae(data: &[u8]) -> Result<(schema::Collada, ZipResolver)> {
     // Find and read the .dae file
     let dae_index = (0..archive.len())
         .find(|&i| {
-            archive
-                .by_index(i)
-                .is_ok_and(|f| f.name().ends_with(".dae"))
+            archive.by_index(i).is_ok_and(|f| {
+                std::path::Path::new(f.name())
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("dae"))
+            })
         })
         .context("no .dae file found in ZAE archive")?;
 

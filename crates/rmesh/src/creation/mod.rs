@@ -221,7 +221,7 @@ impl Triangulator {
     /// ------------
     /// triangles
     ///  The triangles referencing `vertices`
-    pub fn trianglate_2d(
+    pub fn triangulate_2d(
         &mut self,
         exterior: &[usize],
         interiors: &[Vec<usize>],
@@ -315,7 +315,7 @@ impl Triangulator {
         // use the cross product method to find a plane which works well for exactly planar points
         let result = Plane::from_points(&fittable, true).map(|plane| {
             let on_plane = plane.to_2d(vertices);
-            self.trianglate_2d(exterior, interiors, &on_plane, local_indices)
+            self.triangulate_2d(exterior, interiors, &on_plane, local_indices)
         });
 
         match result {

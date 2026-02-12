@@ -686,7 +686,7 @@ impl Path2D {
                 .collect();
 
             let tris =
-                triangulator.trianglate_2d(&ext_indices, &hole_indices, &all_vertices, false);
+                triangulator.triangulate_2d(&ext_indices, &hole_indices, &all_vertices, false);
             all_triangles.extend(tris);
         }
 

@@ -116,10 +116,10 @@ impl FileType {
         }
 
         // Collada DAE: XML containing "<COLLADA" in the first 100 bytes
-        if let Ok(head) = std::str::from_utf8(&data[..data.len().min(100)]) {
-            if head.to_ascii_lowercase().contains("<collada") {
-                return Some(FileType::DAE);
-            }
+        if let Ok(head) = std::str::from_utf8(&data[..data.len().min(100)])
+            && head.to_ascii_lowercase().contains("<collada")
+        {
+            return Some(FileType::DAE);
         }
 
         // ZIP archive (ZAE) magic: PK\x03\x04
