@@ -442,7 +442,15 @@ fn convert_face<'a>(
             _ => continue,
         };
 
-        let loop_idx = convert_loop(step, model, loop_id, vertex_map, edge_map, curve_map, vertex_pair_map)?;
+        let loop_idx = convert_loop(
+            step,
+            model,
+            loop_id,
+            vertex_map,
+            edge_map,
+            curve_map,
+            vertex_pair_map,
+        )?;
 
         if is_outer && outer_loop_idx.is_none() {
             outer_loop_idx = Some(loop_idx);
@@ -503,36 +511,39 @@ fn convert_loop<'a>(
             edge.start_vertex.min(edge.end_vertex),
             edge.start_vertex.max(edge.end_vertex),
         );
-        let (final_edge_idx, flip) =
-            if let Some(candidates) = vertex_pair_map.get(&vp) {
-                // Check curve midpoints to confirm geometric match
-                let t_mid = (edge.t_start + edge.t_end) / 2.0;
-                let mid = model.curves[edge.curve].evaluate(t_mid);
-                let mut found = None;
-                for &candidate_idx in candidates {
-                    let cand = &model.edges[candidate_idx];
-                    let ct_mid = (cand.t_start + cand.t_end) / 2.0;
-                    let cmid = model.curves[cand.curve].evaluate(ct_mid);
-                    if (mid - cmid).norm_squared() < EDGE_MERGE_TOL_SQ {
-                        let needs_flip = cand.start_vertex != edge.start_vertex;
-                        found = Some((candidate_idx, needs_flip));
-                        break;
-                    }
+        let (final_edge_idx, flip) = if let Some(candidates) = vertex_pair_map.get(&vp) {
+            // Check curve midpoints to confirm geometric match
+            let t_mid = (edge.t_start + edge.t_end) / 2.0;
+            let mid = model.curves[edge.curve].evaluate(t_mid);
+            let mut found = None;
+            for &candidate_idx in candidates {
+                let cand = &model.edges[candidate_idx];
+                let ct_mid = (cand.t_start + cand.t_end) / 2.0;
+                let cmid = model.curves[cand.curve].evaluate(ct_mid);
+                if (mid - cmid).norm_squared() < EDGE_MERGE_TOL_SQ {
+                    let needs_flip = cand.start_vertex != edge.start_vertex;
+                    found = Some((candidate_idx, needs_flip));
+                    break;
                 }
-                if let Some((ci, flip)) = found {
-                    (ci, flip)
-                } else {
-                    vertex_pair_map.get_mut(&vp).unwrap().push(edge_idx);
-                    (edge_idx, false)
-                }
+            }
+            if let Some((ci, flip)) = found {
+                (ci, flip)
             } else {
-                vertex_pair_map.insert(vp, vec![edge_idx]);
+                vertex_pair_map.get_mut(&vp).unwrap().push(edge_idx);
                 (edge_idx, false)
-            };
+            }
+        } else {
+            vertex_pair_map.insert(vp, vec![edge_idx]);
+            (edge_idx, false)
+        };
 
         oriented_edges.push(OrientedEdge {
             edge: final_edge_idx,
-            same_sense: if flip { !oe.orientation } else { oe.orientation },
+            same_sense: if flip {
+                !oe.orientation
+            } else {
+                oe.orientation
+            },
         });
     }
 
@@ -2229,24 +2240,24 @@ mod tests {
                         let mesh_watertight = mesh.is_watertight();
 
                         // Compute defect faces only for tess_bug cases
-                        let (mesh_defect_faces, defect_details) =
-                            if brep_watertight && !mesh_watertight {
-                                let bad = mesh.non_watertight_face_indices();
-                                let details: Vec<DefectFaceInfo> = bad
-                                    .iter()
-                                    .map(|&fi| {
-                                        let face = &brep.faces[fi];
-                                        DefectFaceInfo {
-                                            surface_kind: brep.face_surfaces[face.surface]
-                                                .kind_name(),
-                                            has_holes: !face.inner_loops.is_empty(),
-                                        }
-                                    })
-                                    .collect();
-                                (bad.len(), details)
-                            } else {
-                                (0, Vec::new())
-                            };
+                        let (mesh_defect_faces, defect_details) = if brep_watertight
+                            && !mesh_watertight
+                        {
+                            let bad = mesh.non_watertight_face_indices();
+                            let details: Vec<DefectFaceInfo> = bad
+                                .iter()
+                                .map(|&fi| {
+                                    let face = &brep.faces[fi];
+                                    DefectFaceInfo {
+                                        surface_kind: brep.face_surfaces[face.surface].kind_name(),
+                                        has_holes: !face.inner_loops.is_empty(),
+                                    }
+                                })
+                                .collect();
+                            (bad.len(), details)
+                        } else {
+                            (0, Vec::new())
+                        };
 
                         body_results.push(BodyResult {
                             step_faces,
@@ -2613,14 +2624,20 @@ mod tests {
         println!();
         if !defect_by_surface.is_empty() {
             println!("  === Defect Face Summary ===");
-            println!("  {:12} {:>8} {:>10} {:>10}", "Surface", "Defects", "w/ holes", "w/o holes");
+            println!(
+                "  {:12} {:>8} {:>10} {:>10}",
+                "Surface", "Defects", "w/ holes", "w/o holes"
+            );
             println!("  {}", "-".repeat(44));
             let mut surface_entries: Vec<_> = defect_by_surface.iter().collect();
             surface_entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
             for &(&kind, &(total, with_holes)) in &surface_entries {
                 println!(
                     "  {:12} {:>8} {:>10} {:>10}",
-                    kind, total, with_holes, total - with_holes
+                    kind,
+                    total,
+                    with_holes,
+                    total - with_holes
                 );
             }
             println!();

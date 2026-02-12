@@ -124,13 +124,15 @@ fn validate_triangulation(
             assert!(
                 count == 1,
                 "face {face_idx} {phase}: boundary pool edge ({},{}) in {count} tris (expected 1)",
-                key.0, key.1
+                key.0,
+                key.1
             );
         } else {
             assert!(
                 count == 2,
                 "face {face_idx} {phase}: interior pool edge ({},{}) in {count} tris (expected 2)",
-                key.0, key.1
+                key.0,
+                key.1
             );
         }
     }
@@ -143,7 +145,8 @@ fn validate_triangulation(
         assert!(
             edge_count.contains_key(&pool_edge),
             "face {face_idx} {phase}: boundary pool edge ({},{}) missing from triangulation",
-            pool_edge.0, pool_edge.1
+            pool_edge.0,
+            pool_edge.1
         );
     }
 }
@@ -869,15 +872,19 @@ fn triangulate_face_robust_pts(
 
     // Track the best incomplete result (most boundary edges preserved)
     let mut best_incomplete: Option<(Vec<[usize; 3]>, usize, u8)> = None;
-    let mut track_best = |result: &[[usize; 3]], strategy: u8, expected: &HashSet<(usize, usize)>| {
-        if result.is_empty() {
-            return;
-        }
-        let count = count_boundary_edges(result, expected);
-        if best_incomplete.as_ref().is_none_or(|(_, best_count, _)| count > *best_count) {
-            best_incomplete = Some((result.to_vec(), count, strategy));
-        }
-    };
+    let mut track_best =
+        |result: &[[usize; 3]], strategy: u8, expected: &HashSet<(usize, usize)>| {
+            if result.is_empty() {
+                return;
+            }
+            let count = count_boundary_edges(result, expected);
+            if best_incomplete
+                .as_ref()
+                .is_none_or(|(_, best_count, _)| count > *best_count)
+            {
+                best_incomplete = Some((result.to_vec(), count, strategy));
+            }
+        };
 
     // Try 1: CDT in UV space
     if let Ok(tris) = cdt::triangulate_contours(pts, contours) {
@@ -1529,8 +1536,12 @@ impl<'a> ShellTessellator<'a> {
                             && pool_tri[1] != pool_tri[2]
                             && pool_tri[0] != pool_tri[2],
                         "face {face_idx} ASSEMBLY: degenerate pool tri [{},{},{}] from local [{},{},{}]",
-                        pool_tri[0], pool_tri[1], pool_tri[2],
-                        tri[0], tri[1], tri[2]
+                        pool_tri[0],
+                        pool_tri[1],
+                        pool_tri[2],
+                        tri[0],
+                        tri[1],
+                        tri[2]
                     );
                 }
                 self.triangles.push(pool_tri);
@@ -1705,7 +1716,10 @@ impl<'a> ShellTessellator<'a> {
                     }
                 }
             }
-            assert_eq!(mismatch_count, 0, "{mismatch_count} cross-face edge mismatches detected");
+            assert_eq!(
+                mismatch_count, 0,
+                "{mismatch_count} cross-face edge mismatches detected"
+            );
         }
 
         let _t3 = std::time::Instant::now();
@@ -1728,8 +1742,13 @@ impl<'a> ShellTessellator<'a> {
             }
             eprintln!(
                 "    strategy: uv_cdt={} plane_cdt={} earcut_uv={} best={} fan={} earcut_3d={} multi_axis={}",
-                strat_counts[0], strat_counts[1], strat_counts[2],
-                strat_counts[3], strat_counts[4], strat_counts[5], strat_counts[6],
+                strat_counts[0],
+                strat_counts[1],
+                strat_counts[2],
+                strat_counts[3],
+                strat_counts[4],
+                strat_counts[5],
+                strat_counts[6],
             );
         }
 
