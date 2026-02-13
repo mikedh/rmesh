@@ -227,7 +227,12 @@ impl CurveBSpline {
         let mut high = n + 1;
         let mut mid = usize::midpoint(low, high);
 
+        let mut iters = 0usize;
         while u < self.knots[mid] || u >= self.knots[mid + 1] {
+            iters += 1;
+            if iters > 64 {
+                break;
+            }
             if u < self.knots[mid] {
                 high = mid;
             } else {

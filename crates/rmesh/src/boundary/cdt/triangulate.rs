@@ -60,6 +60,11 @@ pub struct Triangulation {
     flip_count: usize,
     /// Hard cap on flips: N * 128 where N = total points
     flip_limit: usize,
+
+    /// Counts total loop iterations across all CDT operations
+    pub(super) work_count: usize,
+    /// Hard cap: N * 256 where N = total points
+    pub(super) work_limit: usize,
 }
 
 impl Triangulation {
@@ -297,6 +302,7 @@ impl Triangulation {
         ////////////////////////////////////////////////////////////////////////
         let has_edges = edges.into_iter().count() > 0;
         let flip_limit = sorted_points.len() * 128;
+        let work_limit = sorted_points.len() * 256;
         let mut out = Triangulation {
             hull: Hull::new(sorted_points.len(), has_edges),
             half: Half::new(sorted_points.len()),
@@ -319,6 +325,9 @@ impl Triangulation {
 
             flip_count: 0,
             flip_limit,
+
+            work_count: 0,
+            work_limit,
         };
 
         let pa = out.next;
@@ -455,7 +464,7 @@ impl Triangulation {
             self.step()?;
             // Safety net: 30 seconds absolute maximum — should never be reached
             // if divergence detection in step() is working correctly.
-            if start.elapsed() > std::time::Duration::from_secs(30) {
+            if start.elapsed() > std::time::Duration::from_secs(2) {
                 return Err(Error::TimeBudgetExceeded);
             }
         }
@@ -475,6 +484,16 @@ impl Triangulation {
         self.next == self.points.len() + 1
     }
 
+    /// Increments the global work counter and returns Diverged if the limit is exceeded.
+    fn check_work(&mut self) -> Result<(), Error> {
+        self.work_count += 1;
+        if self.work_count > self.work_limit {
+            Err(Error::Diverged)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Walks the upper hull, making it convex.
     /// This should only be called once from `finalize()`.
     fn make_outer_hull_convex(&mut self) {
@@ -484,6 +503,10 @@ impl Triangulation {
         let mut hl = start;
         let mut hr = self.hull.right_hull(hl);
         loop {
+            self.work_count += 1;
+            if self.work_count > self.work_limit {
+                break;
+            }
             /*
                 ^
                  \
@@ -563,6 +586,8 @@ impl Triangulation {
     /// This may return [`Error::PointOnFixedEdge`], [`Error::NoMorePoints`],
     /// or [`Error::CrossingFixedEdge`] if those error conditions are met.
     pub fn step(&mut self) -> Result<(), Error> {
+        let step_flips_start = self.flip_count;
+
         if self.done() {
             return Err(Error::NoMorePoints);
         } else if self.next == self.points.len() {
@@ -723,11 +748,10 @@ impl Triangulation {
             .collect();
         self.handle_fixed_edges_iteratively(tasks)?;
 
-        // Divergence detection: if average flips per step exceeds threshold,
-        // the CDT is hitting O(n²) pathological behavior.
-        // A healthy CDT averages ~6 flips/insertion; 128 gives 20x headroom.
-        let steps_completed = self.next.0 as usize;
-        if steps_completed > 64 && self.flip_count > steps_completed * 128 {
+        // Per-step divergence: a healthy insertion averages ~6 flips.
+        // 256 gives 40x headroom; catches the first pathological step immediately.
+        let step_flips = self.flip_count - step_flips_start;
+        if step_flips > 256 {
             return Err(Error::Diverged);
         }
 
@@ -745,6 +769,10 @@ impl Triangulation {
          */
         let mut h_b = h_p;
         loop {
+            self.work_count += 1;
+            if self.work_count > self.work_limit {
+                break;
+            }
             // Move one edge to the left.  In the first iteration of the loop,
             // h_b will be pointing at the b->p edge.
             h_b = self.hull.left_hull(h_b);
@@ -794,6 +822,10 @@ impl Triangulation {
          */
         let mut h_a = h_p;
         loop {
+            self.work_count += 1;
+            if self.work_count > self.work_limit {
+                break;
+            }
             // Move one edge to the left.  In the first iteration of the loop,
             // h_a will be pointing at the p->a edge.
             let e_ap = self.hull.edge(h_a);
@@ -827,7 +859,7 @@ impl Triangulation {
     /// inserting a fixed edge.  h is a [`HullIndex`] equivalent to the `src`
     /// point, and `dst` is the destination of the new fixed edge.
     fn find_hull_walk_mode(
-        &self,
+        &mut self,
         h: HullIndex,
         src: PointIndex,
         dst: PointIndex,
@@ -904,6 +936,7 @@ impl Triangulation {
         let mut index_a_src = self.half.edge(e_left).prev;
 
         loop {
+            self.check_work()?;
             let edge_a_src = self.half.edge(index_a_src);
             let a = edge_a_src.src;
             if a == dst {
@@ -1046,6 +1079,7 @@ impl Triangulation {
         e = edge_ba.buddy;
 
         loop {
+            self.check_work()?;
             /*            src
                         :
                   b<--:-------a

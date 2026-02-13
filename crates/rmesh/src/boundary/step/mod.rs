@@ -1046,7 +1046,10 @@ fn convert_surface_of_linear_extrusion(
                 // Line parallel to extrusion — degenerate, fall through to NURBS
                 Ok(Surface::BSpline(extrude_curve_to_nurbs(&curve, &direction)))
             } else {
-                Ok(Surface::Plane(SurfacePlane::new(line.origin, normal / norm)))
+                Ok(Surface::Plane(SurfacePlane::new(
+                    line.origin,
+                    normal / norm,
+                )))
             }
         }
         Curve::Circle(circle) => {
@@ -1078,10 +1081,8 @@ fn extrude_curve_to_nurbs(curve: &Curve, direction: &Vector3<f64>) -> SurfaceBSp
     // Each outer element is one profile control point (U direction),
     // inner = [original, original + direction] (V/extrusion direction).
     // This matches SurfaceBSpline convention: control_points[u][v].
-    let control_points: Vec<Vec<Point3<f64>>> = ctrl_pts
-        .iter()
-        .map(|p| vec![*p, p + direction])
-        .collect();
+    let control_points: Vec<Vec<Point3<f64>>> =
+        ctrl_pts.iter().map(|p| vec![*p, p + direction]).collect();
 
     // Weights: duplicate each profile weight for both extrusion endpoints
     let surface_weights = weights.map(|w| w.iter().map(|&wi| vec![wi, wi]).collect());
@@ -1100,9 +1101,7 @@ fn extrude_curve_to_nurbs(curve: &Curve, direction: &Vector3<f64>) -> SurfaceBSp
 ///
 /// For analytic curves (Line, Circle, Ellipse), generates equivalent rational B-spline
 /// representations. For B-spline curves, returns the data directly.
-fn curve_to_bspline_data(
-    curve: &Curve,
-) -> (usize, Vec<Point3<f64>>, Vec<f64>, Option<Vec<f64>>) {
+fn curve_to_bspline_data(curve: &Curve) -> (usize, Vec<Point3<f64>>, Vec<f64>, Option<Vec<f64>>) {
     match curve {
         Curve::BSpline(bs) => (
             bs.degree,
@@ -2625,72 +2624,74 @@ mod tests {
                     let step_file = StepFile::parse(&processed);
                     let parse_ms = t.elapsed().as_secs_f64() * 1e3;
 
-                    // Phase 2: convert + analyze each MSB directly
+                    // Phase 2: convert + tessellate each MSB in parallel
+                    use rayon::prelude::*;
                     let t = Instant::now();
-                    let mut body_results: Vec<BodyResult> = Vec::new();
 
-                    for entity in &step_file.entities {
-                        let ap214::Entity::ManifoldSolidBrep(msb) = entity else {
-                            continue;
-                        };
+                    let msbs: Vec<&ap214::ManifoldSolidBrep_> = step_file
+                        .entities
+                        .iter()
+                        .filter_map(|e| {
+                            if let ap214::Entity::ManifoldSolidBrep(msb) = e {
+                                Some(msb)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
 
-                        // Get STEP face count from the outer ClosedShell
-                        let step_faces = match &step_file.entities[msb.outer] {
-                            ap214::Entity::ClosedShell(s) => s.cfs_faces.len(),
-                            _ => 0,
-                        };
-
-                        // Convert MSB to BrepModel
-                        let (brep, skipped_faces) =
-                            match convert_manifold_solid_brep(&step_file, msb) {
-                                Ok(pair) => pair,
-                                Err(_) => continue,
+                    let body_results: Vec<BodyResult> = msbs
+                        .par_iter()
+                        .filter_map(|msb| {
+                            let step_faces = match &step_file.entities[msb.outer] {
+                                ap214::Entity::ClosedShell(s) => s.cfs_faces.len(),
+                                _ => 0,
                             };
 
-                        let brep_faces = brep.faces.len();
+                            let (brep, skipped_faces) =
+                                convert_manifold_solid_brep(&step_file, msb).ok()?;
 
-                        // BREP topology validation
-                        let edge_errors = brep.errors_edge_sharing();
-                        let brep_watertight = edge_errors.is_empty();
-                        let unmatched_edges = edge_errors.len();
+                            let brep_faces = brep.faces.len();
+                            let edge_errors = brep.errors_edge_sharing();
+                            let brep_watertight = edge_errors.is_empty();
+                            let unmatched_edges = edge_errors.len();
 
-                        // Tessellate
-                        let mesh = brep.tesselate(&params);
-                        let mesh_triangles = mesh.faces.len();
-                        let mesh_watertight = mesh.is_watertight();
+                            let mesh = brep.tesselate(&params);
+                            let mesh_triangles = mesh.faces.len();
+                            let mesh_watertight = mesh.is_watertight();
 
-                        // Compute defect faces only for tess_bug cases
-                        let (mesh_defect_faces, defect_details) = if brep_watertight
-                            && !mesh_watertight
-                        {
-                            let bad = mesh.non_watertight_face_indices();
-                            let details: Vec<DefectFaceInfo> = bad
-                                .iter()
-                                .map(|&fi| {
-                                    let face = &brep.faces[fi];
-                                    DefectFaceInfo {
-                                        surface_kind: brep.face_surfaces[face.surface].kind_name(),
-                                        has_holes: !face.inner_loops.is_empty(),
-                                    }
-                                })
-                                .collect();
-                            (bad.len(), details)
-                        } else {
-                            (0, Vec::new())
-                        };
+                            let (mesh_defect_faces, defect_details) =
+                                if brep_watertight && !mesh_watertight {
+                                    let bad = mesh.non_watertight_face_indices();
+                                    let details: Vec<DefectFaceInfo> = bad
+                                        .iter()
+                                        .map(|&fi| {
+                                            let face = &brep.faces[fi];
+                                            DefectFaceInfo {
+                                                surface_kind: brep.face_surfaces[face.surface]
+                                                    .kind_name(),
+                                                has_holes: !face.inner_loops.is_empty(),
+                                            }
+                                        })
+                                        .collect();
+                                    (bad.len(), details)
+                                } else {
+                                    (0, Vec::new())
+                                };
 
-                        body_results.push(BodyResult {
-                            step_faces,
-                            skipped_faces,
-                            brep_faces,
-                            brep_watertight,
-                            unmatched_edges,
-                            mesh_triangles,
-                            mesh_watertight,
-                            mesh_defect_faces,
-                            defect_details,
-                        });
-                    }
+                            Some(BodyResult {
+                                step_faces,
+                                skipped_faces,
+                                brep_faces,
+                                brep_watertight,
+                                unmatched_edges,
+                                mesh_triangles,
+                                mesh_watertight,
+                                mesh_defect_faces,
+                                defect_details,
+                            })
+                        })
+                        .collect();
                     let convert_ms = t.elapsed().as_secs_f64() * 1e3;
 
                     if body_results.is_empty() {

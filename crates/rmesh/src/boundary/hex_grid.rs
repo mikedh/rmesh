@@ -125,7 +125,12 @@ fn generate_hex_grid(
 ) -> Vec<Point2<f64>> {
     // Scale spacing up if the grid would exceed MAX_INTERIOR_POINTS
     let mut spacing = spacing;
+    let mut scale_iters = 0usize;
     loop {
+        scale_iters += 1;
+        if scale_iters > 50 {
+            return Vec::new();
+        }
         let row_sp = spacing;
         let col_sp = spacing * (3.0_f64).sqrt() / 2.0;
         let inset = spacing * 0.5;

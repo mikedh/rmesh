@@ -205,7 +205,13 @@ impl Half {
         assert!(self.edge(e).buddy == EMPTY_EDGE);
         let mut seen = EdgeVec::of(vec![false; self.edges.len()]);
         let mut todo = vec![(e, self.edge(e).fixed())];
+        let max_iters = self.edges.len();
+        let mut iters = 0usize;
         while let Some((e, inside)) = todo.pop() {
+            iters += 1;
+            if iters > max_iters {
+                break;
+            }
             if e == EMPTY_EDGE || seen[e] {
                 continue;
             }

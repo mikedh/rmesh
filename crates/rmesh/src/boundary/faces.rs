@@ -628,7 +628,12 @@ impl SurfaceBSpline {
         let mut high = n + 1;
         let mut mid = usize::midpoint(low, high);
 
+        let mut iters = 0usize;
         while u < knots[mid] || u >= knots[mid + 1] {
+            iters += 1;
+            if iters > 64 {
+                break;
+            }
             if u < knots[mid] {
                 high = mid;
             } else {

@@ -33,6 +33,13 @@ use crate::attributes::{Attributes, Grouping, GroupingKind};
 use crate::creation::{Plane, Triangulator};
 use crate::mesh::Trimesh;
 
+#[cfg(test)]
+fn validation_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RMESH_VALIDATE").is_ok())
+}
+
 /// Parameters controlling tessellation quality.
 ///
 /// Tolerance is purely relative: the effective chord-height threshold is
@@ -934,8 +941,7 @@ fn triangulate_face_robust_pts(
 
             match cdt::triangulate_contours(&pts_2d, contours) {
                 Ok(tris) => {
-                    let result: Vec<[usize; 3]> =
-                        tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
+                    let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
                     if contours_complete_with(&result, &expected) {
                         return (result, 1, false);
                     }
@@ -960,8 +966,7 @@ fn triangulate_face_robust_pts(
             let pts_2d: Vec<(f64, f64)> = positions.iter().map(proj_fn).collect();
             match cdt::triangulate_contours(&pts_2d, contours) {
                 Ok(tris) => {
-                    let result: Vec<[usize; 3]> =
-                        tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
+                    let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
                     if contours_complete_with(&result, &expected) {
                         return (result, 6, false);
                     }
@@ -1222,7 +1227,7 @@ fn tessellate_face(
 
     // CDT validation (test-only, warnings instead of panics)
     #[cfg(test)]
-    {
+    if validation_enabled() {
         let w = validate_triangulation(
             &state.triangles,
             &state.local_to_pool,
@@ -1249,7 +1254,7 @@ fn tessellate_face(
 
     // Post-chord-refinement validation (test-only, warnings instead of panics)
     #[cfg(test)]
-    {
+    if validation_enabled() {
         let w = validate_triangulation(
             &state.triangles,
             &state.local_to_pool,
@@ -1600,13 +1605,6 @@ impl<'a> ShellTessellator<'a> {
                 self.pool_edge_to_brep.insert(key_a, brep_edge_idx);
                 self.pool_edge_to_brep.insert(key_b, brep_edge_idx);
             }
-
-            #[cfg(test)]
-            eprintln!(
-                "    phase1.5 iteration {}: refined {} outer edges",
-                _iteration,
-                edges_to_refine.len()
-            );
         }
     }
 
@@ -1653,11 +1651,6 @@ impl<'a> ShellTessellator<'a> {
                     || pool_tri[1] == pool_tri[2]
                     || pool_tri[0] == pool_tri[2]
                 {
-                    #[cfg(test)]
-                    eprintln!(
-                        "    WARN: face {face_idx} ASSEMBLY: skipping degenerate pool tri [{},{},{}]",
-                        pool_tri[0], pool_tri[1], pool_tri[2]
-                    );
                     continue;
                 }
                 self.triangles.push(pool_tri);
@@ -1680,7 +1673,7 @@ impl<'a> ShellTessellator<'a> {
 
         // Phase 1 validation (test-only)
         #[cfg(test)]
-        {
+        if validation_enabled() {
             // Every BREP edge shared by 2 faces: both faces reference it
             for (&edge_idx, disc) in &self.edge_discretization {
                 assert!(
@@ -1762,7 +1755,7 @@ impl<'a> ShellTessellator<'a> {
             .collect();
 
         // Serial merge: rewrite sentinel indices to real pool indices
-        for (face_idx, (mut state, new_verts)) in face_results.into_iter().enumerate() {
+        for (_face_idx, (mut state, new_verts)) in face_results.into_iter().enumerate() {
             let actual_base = self.vertices.len();
             for idx in &mut state.local_to_pool {
                 if *idx >= sentinel_base {
@@ -1772,19 +1765,19 @@ impl<'a> ShellTessellator<'a> {
 
             // Post-merge validation: all pool indices should be valid
             #[cfg(test)]
-            {
+            if validation_enabled() {
                 let new_pool_size = self.vertices.len() + new_verts.len();
                 for (local_idx, &pool_idx) in state.local_to_pool.iter().enumerate() {
                     assert!(
                         pool_idx < new_pool_size,
-                        "face {face_idx}: local {local_idx} has pool {pool_idx} >= pool size {new_pool_size}"
+                        "face {_face_idx}: local {local_idx} has pool {pool_idx} >= pool size {new_pool_size}"
                     );
                 }
                 // Check no sentinel indices remain
                 for &pool_idx in &state.local_to_pool {
                     assert!(
                         pool_idx < sentinel_base,
-                        "face {face_idx}: unrewritten sentinel pool index {pool_idx}"
+                        "face {_face_idx}: unrewritten sentinel pool index {pool_idx}"
                     );
                 }
             }
@@ -1794,7 +1787,7 @@ impl<'a> ShellTessellator<'a> {
         }
         // Cross-face boundary edge validation (test-only)
         #[cfg(test)]
-        {
+        if validation_enabled() {
             // For each face, collect pool edge → count within that face
             let face_pool_edge_counts: Vec<HashMap<(usize, usize), usize>> = self
                 .face_states
@@ -1838,35 +1831,8 @@ impl<'a> ShellTessellator<'a> {
             }
         }
 
-        let _t3 = std::time::Instant::now();
-
         // Phase 3: Final assembly
         self.phase3_final_assembly();
-
-        #[cfg(test)]
-        {
-            eprintln!(
-                "    tess phases: edge={:.1}ms bubble+CDT={:.1}ms assemble={:.1}ms",
-                (_t2 - _t1).as_secs_f64() * 1e3,
-                (_t3 - _t2).as_secs_f64() * 1e3,
-                (std::time::Instant::now() - _t3).as_secs_f64() * 1e3,
-            );
-            let mut strat_counts = [0usize; 7];
-            for s in &self.face_states {
-                let idx = (s.diag_strategy as usize).min(strat_counts.len() - 1);
-                strat_counts[idx] += 1;
-            }
-            eprintln!(
-                "    strategy: uv_cdt={} plane_cdt={} earcut_uv={} best={} fan={} earcut_3d={} multi_axis={}",
-                strat_counts[0],
-                strat_counts[1],
-                strat_counts[2],
-                strat_counts[3],
-                strat_counts[4],
-                strat_counts[5],
-                strat_counts[6],
-            );
-        }
 
         // Build Trimesh with attributes
         let mut attrs_vertex = Attributes::default();

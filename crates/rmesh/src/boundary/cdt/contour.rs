@@ -122,6 +122,10 @@ impl Contour {
         let mut out = None;
         while let Some(e) = self.try_clip(t)? {
             out = Some(e);
+            t.work_count += 1;
+            if t.work_count > t.work_limit {
+                return Err(Error::Diverged);
+            }
         }
         // Advance to the end of the triangulation
         self.index = self.pts[self.index].next;
