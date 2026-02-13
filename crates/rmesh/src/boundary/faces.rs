@@ -116,6 +116,75 @@ pub enum Surface {
     Sphere(Sphere),
     Torus(Torus),
     BSpline(SurfaceBSpline),
+    Offset(Box<OffsetSurface>),
+}
+
+/// A surface offset from a base surface by a constant distance along its normal.
+///
+/// `evaluate(u,v) = base.evaluate(u,v) + distance * base.normal_at(u,v)`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OffsetSurface {
+    pub base: Surface,
+    pub distance: f64,
+}
+
+impl OffsetSurface {
+    /// Map 3D point to (u, v) parameters via Newton-Raphson starting from base.to_parametric.
+    pub fn to_parametric(&self, point: &Point3<f64>) -> Point2<f64> {
+        // Start from the base surface's parameter for the query point
+        let uv0 = self.base.to_parametric(point);
+        let mut u = uv0.x;
+        let mut v = uv0.y;
+
+        // Newton-Raphson refinement
+        for _ in 0..10 {
+            let s = self.evaluate(u, v);
+            let delta = s - point;
+            if delta.norm_squared() < NEWTON_TOL * NEWTON_TOL {
+                break;
+            }
+            // Use finite differences for derivatives of the offset surface
+            let eps = 1e-8;
+            let su = (self.evaluate(u + eps, v) - self.evaluate(u - eps, v)) / (2.0 * eps);
+            let sv = (self.evaluate(u, v + eps) - self.evaluate(u, v - eps)) / (2.0 * eps);
+
+            let a11 = su.dot(&su);
+            let a12 = su.dot(&sv);
+            let a22 = sv.dot(&sv);
+            let b1 = delta.dot(&su);
+            let b2 = delta.dot(&sv);
+
+            let det = a11 * a22 - a12 * a12;
+            if det.abs() < METRIC_TOL {
+                break;
+            }
+            u -= (a22 * b1 - a12 * b2) / det;
+            v -= (a11 * b2 - a12 * b1) / det;
+        }
+
+        Point2::new(u, v)
+    }
+
+    /// Evaluate the offset surface at (u, v).
+    pub fn evaluate(&self, u: f64, v: f64) -> Point3<f64> {
+        let base_pt = self.base.evaluate(u, v);
+        let n = self.base.normal_at(u, v);
+        base_pt + self.distance * n
+    }
+
+    /// Surface normal via finite differences.
+    pub fn normal_at(&self, u: f64, v: f64) -> Vector3<f64> {
+        let eps = 1e-8;
+        let su = self.evaluate(u + eps, v) - self.evaluate(u - eps, v);
+        let sv = self.evaluate(u, v + eps) - self.evaluate(u, v - eps);
+        let n = su.cross(&sv);
+        let len = n.norm();
+        if len < GEOMETRY_TOL {
+            self.base.normal_at(u, v)
+        } else {
+            n / len
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1060,10 +1129,13 @@ impl Surface {
     /// For these surfaces, midpoint computation should be done in 3D to avoid
     /// issues when the UV midpoint crosses the angular discontinuity.
     pub fn is_angular(&self) -> bool {
-        matches!(
-            self,
-            Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_)
-        )
+        match self {
+            Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) => {
+                true
+            }
+            Surface::Offset(o) => o.base.is_angular(),
+            _ => false,
+        }
     }
 
     /// Whether both parametric coordinates are angular (can have ±π discontinuities).
@@ -1071,12 +1143,20 @@ impl Surface {
     /// Torus has (major_angle, minor_angle) — both are atan2 outputs in [-π, π].
     /// Other angular surfaces only have one angular coordinate (u/theta).
     pub fn is_doubly_angular(&self) -> bool {
-        matches!(self, Surface::Torus(_))
+        match self {
+            Surface::Torus(_) => true,
+            Surface::Offset(o) => o.base.is_doubly_angular(),
+            _ => false,
+        }
     }
 
     /// Whether this is a planar surface (no subdivision needed).
     pub fn is_planar(&self) -> bool {
-        matches!(self, Surface::Plane(_))
+        match self {
+            Surface::Plane(_) => true,
+            Surface::Offset(o) => o.base.is_planar(),
+            _ => false,
+        }
     }
 
     /// Estimate maximum curvature over a UV region by sampling a 3×3 grid.
@@ -1115,6 +1195,7 @@ impl Surface {
                     None
                 }
             }
+            Surface::Offset(o) => o.base.project_as_circle(plane),
             _ => None,
         }
     }
@@ -1128,6 +1209,7 @@ impl Surface {
             Surface::Sphere(_) => "Sphere",
             Surface::Torus(_) => "Torus",
             Surface::BSpline(_) => "BSpline",
+            Surface::Offset(_) => "Offset",
         }
     }
 
@@ -1140,6 +1222,7 @@ impl Surface {
             Surface::Sphere(s) => s.curvature_at(u, v),
             Surface::Torus(t) => t.curvature_at(u, v),
             Surface::BSpline(b) => b.curvature_at(u, v),
+            Surface::Offset(o) => o.base.curvature_at(u, v),
         }
     }
 
@@ -1182,6 +1265,8 @@ impl Surface {
                 let g = s_v.dot(&s_v);
                 (e, f, g)
             }
+            // Offset: delegate to base surface (approximate — offset changes metric slightly)
+            Surface::Offset(o) => o.base.first_fundamental_form(u, v),
         }
     }
 }
@@ -1301,7 +1386,7 @@ impl From<&Surface> for SurfaceDict {
                 extent_major_angle: None,
                 extent_minor_angle: None,
             },
-            Surface::BSpline(_) => SurfaceDict::BSpline,
+            Surface::BSpline(_) | Surface::Offset(_) => SurfaceDict::BSpline,
         }
     }
 }

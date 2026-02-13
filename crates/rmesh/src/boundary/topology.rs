@@ -546,9 +546,16 @@ pub struct OrientedEdge {
 }
 
 /// A loop - a closed chain of oriented edges forming a boundary.
+///
+/// Most loops are edge loops with one or more oriented edges.
+/// A **vertex loop** is a degenerate loop at a surface pole (e.g. sphere tip):
+/// zero edges, one vertex. Set `vertex = Some(vertex_idx)` for these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrepLoop {
     pub edges: Vec<OrientedEdge>,
+    /// For vertex loops (degenerate loops at surface poles): the single vertex index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex: Option<usize>,
 }
 
 /// A face (2D topology) - a surface region bounded by loops.
@@ -684,10 +691,23 @@ impl BrepModel {
         idx
     }
 
-    /// Add a loop and return its index.
+    /// Add an edge loop and return its index.
     pub fn add_loop(&mut self, edges: Vec<OrientedEdge>) -> usize {
         let idx = self.loops.len();
-        self.loops.push(BrepLoop { edges });
+        self.loops.push(BrepLoop {
+            edges,
+            vertex: None,
+        });
+        idx
+    }
+
+    /// Add a vertex loop (degenerate loop at a surface pole) and return its index.
+    pub fn add_vertex_loop(&mut self, vertex: usize) -> usize {
+        let idx = self.loops.len();
+        self.loops.push(BrepLoop {
+            edges: vec![],
+            vertex: Some(vertex),
+        });
         idx
     }
 
@@ -1009,6 +1029,10 @@ impl BrepModel {
             for li in all_loops {
                 loop_set.insert(li);
                 if li < self.loops.len() {
+                    // Collect vertex from vertex loops
+                    if let Some(vi) = self.loops[li].vertex {
+                        vertex_set.insert(vi);
+                    }
                     for oe in &self.loops[li].edges {
                         edge_set.insert(oe.edge);
                         if oe.edge < self.edges.len() {
@@ -1082,6 +1106,7 @@ impl BrepModel {
                         same_sense: oe.same_sense,
                     })
                     .collect(),
+                vertex: loop_.vertex.map(|v| vertex_map[&v]),
             });
         }
         // Copy surfaces

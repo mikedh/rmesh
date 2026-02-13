@@ -55,6 +55,11 @@ pub struct Triangulation {
     // the edges array
     pub(super) hull: Hull,
     pub(super) half: Half,
+
+    /// Counts total edge flips in legalize() for divergence detection
+    flip_count: usize,
+    /// Hard cap on flips: N * 128 where N = total points
+    flip_limit: usize,
 }
 
 impl Triangulation {
@@ -291,6 +296,7 @@ impl Triangulation {
 
         ////////////////////////////////////////////////////////////////////////
         let has_edges = edges.into_iter().count() > 0;
+        let flip_limit = sorted_points.len() * 128;
         let mut out = Triangulation {
             hull: Hull::new(sorted_points.len(), has_edges),
             half: Half::new(sorted_points.len()),
@@ -310,6 +316,9 @@ impl Triangulation {
             ending_data: vec![],
 
             points: sorted_points, // moved out here
+
+            flip_count: 0,
+            flip_limit,
         };
 
         let pa = out.next;
@@ -441,8 +450,14 @@ impl Triangulation {
     /// This may return [`Error::PointOnFixedEdge`], [`Error::NoMorePoints`],
     /// or [`Error::CrossingFixedEdge`] if those error conditions are met.
     pub fn run(&mut self) -> Result<(), Error> {
+        let start = std::time::Instant::now();
         while !self.done() {
             self.step()?;
+            // Safety net: 30 seconds absolute maximum — should never be reached
+            // if divergence detection in step() is working correctly.
+            if start.elapsed() > std::time::Duration::from_secs(30) {
+                return Err(Error::TimeBudgetExceeded);
+            }
         }
         Ok(())
     }
@@ -707,6 +722,14 @@ impl Triangulation {
             })
             .collect();
         self.handle_fixed_edges_iteratively(tasks)?;
+
+        // Divergence detection: if average flips per step exceeds threshold,
+        // the CDT is hitting O(n²) pathological behavior.
+        // A healthy CDT averages ~6 flips/insertion; 128 gives 20x headroom.
+        let steps_completed = self.next.0 as usize;
+        if steps_completed > 64 && self.flip_count > steps_completed * 128 {
+            return Err(Error::Diverged);
+        }
 
         Ok(())
     }
@@ -1432,6 +1455,11 @@ impl Triangulation {
     }
 
     pub(super) fn legalize(&mut self, e_ab: EdgeIndex) {
+        // Hard cap: stop flipping if we've hit the pathological threshold.
+        // The divergence check at end of step() will detect this and return Err(Diverged).
+        if self.flip_count >= self.flip_limit {
+            return;
+        }
         /* We're given this
          *            c
          *          /  ^
@@ -1475,6 +1503,7 @@ impl Triangulation {
         {
             let e_db = self.half.prev(e_ba);
 
+            self.flip_count += 1;
             self.half.swap(e_ab);
             self.legalize(e_ad);
             self.legalize(e_db);

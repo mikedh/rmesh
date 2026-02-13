@@ -38,7 +38,7 @@ use rayon::prelude::*;
 
 use nalgebra::{Matrix4, Point3, Vector3};
 
-use super::faces::{Cone, Cylinder, Sphere, SurfaceBSpline, SurfacePlane, Torus};
+use super::faces::{Cone, Cylinder, OffsetSurface, Sphere, SurfaceBSpline, SurfacePlane, Torus};
 use super::{
     BrepModel, Curve, CurveBSpline, CurveCircle, CurveEllipse, CurveLine, OrientedEdge, Surface,
 };
@@ -472,7 +472,7 @@ fn convert_face<'a>(
     Ok(face_idx)
 }
 
-/// Convert an EDGE_LOOP to a BrepLoop
+/// Convert an EDGE_LOOP or VERTEX_LOOP to a BrepLoop
 fn convert_loop<'a>(
     step: &'a StepFile<'a>,
     model: &mut BrepModel,
@@ -482,6 +482,12 @@ fn convert_loop<'a>(
     curve_map: &mut HashMap<usize, usize>,
     vertex_pair_map: &mut HashMap<(usize, usize), Vec<usize>>,
 ) -> Result<usize, StepError> {
+    // Handle VERTEX_LOOP (degenerate loop at surface poles)
+    if let ap214::Entity::VertexLoop(vl) = &step.entities[loop_id] {
+        let vertex_idx = convert_vertex(step, model, vl.loop_vertex, vertex_map)?;
+        return Ok(model.add_vertex_loop(vertex_idx));
+    }
+
     let edge_loop = match &step.entities[loop_id] {
         ap214::Entity::EdgeLoop(el) => el,
         _ => return Err(StepError::UnsupportedEntity("Expected EDGE_LOOP".into())),
@@ -925,6 +931,11 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
         }
         ap214::Entity::BSplineSurfaceWithKnots(bsurf) => convert_bspline_surface(step, bsurf, None),
         ap214::Entity::ComplexEntity(subs) => convert_complex_surface(step, surface_id, subs),
+        ap214::Entity::SurfaceOfLinearExtrusion(sle) => {
+            convert_surface_of_linear_extrusion(step, sle)
+        }
+        ap214::Entity::SurfaceOfRevolution(sor) => convert_surface_of_revolution(step, sor),
+        ap214::Entity::OffsetSurface(os) => convert_offset_surface(step, os),
         _ => Err(StepError::UnsupportedEntity(format!(
             "Unsupported surface type at #{}",
             surface_id
@@ -999,6 +1010,405 @@ fn convert_bspline_surface(
     );
 
     Ok(Surface::BSpline(surface))
+}
+
+/// Convert a SURFACE_OF_LINEAR_EXTRUSION to a Surface.
+///
+/// A swept surface formed by extruding a profile curve along a direction vector.
+/// Special cases map to simpler surface types:
+/// - Line → Plane
+/// - Circle with axis ∥ extrusion → Cylinder
+/// - General → BSpline via NURBS extrusion
+fn convert_surface_of_linear_extrusion(
+    step: &StepFile<'_>,
+    sle: &ap214::SurfaceOfLinearExtrusion_<'_>,
+) -> Result<Surface, StepError> {
+    let curve = convert_curve(step, sle.swept_curve)?;
+    // extrusion_axis is a VECTOR entity (direction * magnitude)
+    let direction = match &step.entities[sle.extrusion_axis] {
+        ap214::Entity::Vector(v) => {
+            let dir = convert_direction(step, v.orientation)?;
+            dir * v.magnitude
+        }
+        _ => {
+            return Err(StepError::UnsupportedEntity(
+                "Expected VECTOR for SurfaceOfLinearExtrusion.extrusion_axis".into(),
+            ));
+        }
+    };
+
+    match &curve {
+        Curve::Line(line) => {
+            // Line extruded → Plane. The plane contains the line and the extrusion direction.
+            let normal = line.direction.cross(&direction);
+            let norm = normal.norm();
+            if norm < 1e-12 {
+                // Line parallel to extrusion — degenerate, fall through to NURBS
+                Ok(Surface::BSpline(extrude_curve_to_nurbs(&curve, &direction)))
+            } else {
+                Ok(Surface::Plane(SurfacePlane::new(line.origin, normal / norm)))
+            }
+        }
+        Curve::Circle(circle) => {
+            // Circle extruded along its axis → Cylinder
+            let dir_unit = direction.normalize();
+            if circle.axis.dot(&dir_unit).abs() > 1.0 - 1e-6 {
+                Ok(Surface::Cylinder(Cylinder::new(
+                    circle.center,
+                    direction,
+                    circle.radius,
+                )))
+            } else {
+                Ok(Surface::BSpline(extrude_curve_to_nurbs(&curve, &direction)))
+            }
+        }
+        _ => Ok(Surface::BSpline(extrude_curve_to_nurbs(&curve, &direction))),
+    }
+}
+
+/// Extrude a curve to create a NURBS surface.
+///
+/// Creates a degree-1 surface in the extrusion direction by duplicating the curve's
+/// control points at height 0 and height `direction`. The curve's knots/degree/weights
+/// are preserved in the U direction.
+fn extrude_curve_to_nurbs(curve: &Curve, direction: &Vector3<f64>) -> SurfaceBSpline {
+    // Convert any curve type to B-spline control points
+    let (degree, ctrl_pts, knots, weights) = curve_to_bspline_data(curve);
+
+    // Each outer element is one profile control point (U direction),
+    // inner = [original, original + direction] (V/extrusion direction).
+    // This matches SurfaceBSpline convention: control_points[u][v].
+    let control_points: Vec<Vec<Point3<f64>>> = ctrl_pts
+        .iter()
+        .map(|p| vec![*p, p + direction])
+        .collect();
+
+    // Weights: duplicate each profile weight for both extrusion endpoints
+    let surface_weights = weights.map(|w| w.iter().map(|&wi| vec![wi, wi]).collect());
+
+    SurfaceBSpline {
+        u_degree: degree,
+        v_degree: 1,
+        control_points,
+        u_knots: knots,
+        v_knots: vec![0.0, 0.0, 1.0, 1.0], // degree-1 clamped
+        weights: surface_weights,
+    }
+}
+
+/// Extract B-spline data (degree, control points, knots, weights) from any curve type.
+///
+/// For analytic curves (Line, Circle, Ellipse), generates equivalent rational B-spline
+/// representations. For B-spline curves, returns the data directly.
+fn curve_to_bspline_data(
+    curve: &Curve,
+) -> (usize, Vec<Point3<f64>>, Vec<f64>, Option<Vec<f64>>) {
+    match curve {
+        Curve::BSpline(bs) => (
+            bs.degree,
+            bs.control_points.clone(),
+            bs.knots.clone(),
+            bs.weights.clone(),
+        ),
+        Curve::Line(line) => {
+            // Degree-1 B-spline: two control points
+            let p0 = line.origin;
+            let p1 = line.origin + line.direction;
+            (1, vec![p0, p1], vec![0.0, 0.0, 1.0, 1.0], None)
+        }
+        Curve::Circle(circle) => circle_to_nurbs_data(circle),
+        Curve::Ellipse(ellipse) => ellipse_to_nurbs_data(ellipse),
+    }
+}
+
+/// Convert a full circle to a degree-2 rational B-spline (NURBS).
+///
+/// Uses the standard 9-control-point representation with circular arc weights.
+fn circle_to_nurbs_data(
+    circle: &CurveCircle,
+) -> (usize, Vec<Point3<f64>>, Vec<f64>, Option<Vec<f64>>) {
+    use std::f64::consts::FRAC_PI_2;
+    let y_axis = circle.axis.cross(&circle.x_axis);
+    let r = circle.radius;
+    let c = circle.center;
+    let w = FRAC_PI_2.cos(); // cos(45°) = 1/√2
+
+    // 9 control points for a full circle (4 quarter arcs)
+    let pts = vec![
+        c + r * circle.x_axis,
+        c + r * circle.x_axis + r * y_axis,
+        c + r * y_axis,
+        c - r * circle.x_axis + r * y_axis,
+        c - r * circle.x_axis,
+        c - r * circle.x_axis - r * y_axis,
+        c - r * y_axis,
+        c + r * circle.x_axis - r * y_axis,
+        c + r * circle.x_axis,
+    ];
+    let weights = vec![1.0, w, 1.0, w, 1.0, w, 1.0, w, 1.0];
+    let knots = vec![
+        0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0,
+    ];
+    (2, pts, knots, Some(weights))
+}
+
+/// Convert a full ellipse to a degree-2 rational B-spline (NURBS).
+fn ellipse_to_nurbs_data(
+    ellipse: &CurveEllipse,
+) -> (usize, Vec<Point3<f64>>, Vec<f64>, Option<Vec<f64>>) {
+    use std::f64::consts::FRAC_PI_2;
+    let y_axis = ellipse.axis.cross(&ellipse.x_axis);
+    let a = ellipse.semi_major;
+    let b = ellipse.semi_minor;
+    let c = ellipse.center;
+    let w = FRAC_PI_2.cos();
+
+    let pts = vec![
+        c + a * ellipse.x_axis,
+        c + a * ellipse.x_axis + b * y_axis,
+        c + b * y_axis,
+        c - a * ellipse.x_axis + b * y_axis,
+        c - a * ellipse.x_axis,
+        c - a * ellipse.x_axis - b * y_axis,
+        c - b * y_axis,
+        c + a * ellipse.x_axis - b * y_axis,
+        c + a * ellipse.x_axis,
+    ];
+    let weights = vec![1.0, w, 1.0, w, 1.0, w, 1.0, w, 1.0];
+    let knots = vec![
+        0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0,
+    ];
+    (2, pts, knots, Some(weights))
+}
+
+/// Convert a SURFACE_OF_REVOLUTION to a Surface.
+///
+/// A swept surface formed by revolving a profile curve around an axis.
+/// Special cases map to simpler surface types:
+/// - Line ∥ axis → Cylinder
+/// - Line intersecting axis → Cone
+/// - Circle centered on axis → Sphere (if radius perpendicular to axis)
+/// - General → BSpline via NURBS revolution
+fn convert_surface_of_revolution(
+    step: &StepFile<'_>,
+    sor: &ap214::SurfaceOfRevolution_<'_>,
+) -> Result<Surface, StepError> {
+    let curve = convert_curve(step, sor.swept_curve)?;
+    let (axis_origin, axis_dir) = convert_axis1_placement(step, sor.axis_position)?;
+
+    match &curve {
+        Curve::Line(line) => {
+            let line_dir = line.direction.normalize();
+            let cos_angle = line_dir.dot(&axis_dir).abs();
+
+            if cos_angle > 1.0 - 1e-6 {
+                // Line parallel to axis → Cylinder
+                // Radius = distance from line origin to axis
+                let to_line = line.origin - axis_origin;
+                let proj = to_line.dot(&axis_dir) * axis_dir;
+                let radial = to_line - proj;
+                let radius = radial.norm();
+                Ok(Surface::Cylinder(Cylinder::new(
+                    axis_origin,
+                    axis_dir,
+                    radius,
+                )))
+            } else if cos_angle < 1e-6 {
+                // Line perpendicular to axis (in axial plane) — could be a torus generatrix
+                // but more commonly this is just a general case; fall through to NURBS
+                Ok(Surface::BSpline(revolve_curve_to_nurbs(
+                    &curve,
+                    &axis_origin,
+                    &axis_dir,
+                )))
+            } else {
+                // Line at angle to axis → Cone
+                let to_line = line.origin - axis_origin;
+                let h_on_axis = to_line.dot(&axis_dir);
+                let radial = to_line - h_on_axis * axis_dir;
+                let r = radial.norm();
+
+                // Half angle: angle between line and axis
+                let half_angle = (1.0 - cos_angle * cos_angle).sqrt().atan2(cos_angle);
+
+                // Apex: where the line (extended) intersects the axis
+                // Project line origin onto the axis direction component
+                let t_apex = if half_angle.tan().abs() > 1e-12 {
+                    -r / half_angle.tan()
+                } else {
+                    0.0
+                };
+                let apex = axis_origin + (h_on_axis + t_apex) * axis_dir;
+
+                Ok(Surface::Cone(Cone::new(apex, axis_dir, half_angle)))
+            }
+        }
+        Curve::Circle(circle) => {
+            // Check if circle center is on the axis
+            let to_center = circle.center - axis_origin;
+            let h_on_axis = to_center.dot(&axis_dir);
+            let radial = to_center - h_on_axis * axis_dir;
+            let center_dist = radial.norm();
+
+            // Check if circle axis is parallel to revolution axis (sphere case)
+            let axes_parallel = circle.axis.dot(&axis_dir).abs() > 1.0 - 1e-6;
+
+            if center_dist < 1e-6 && axes_parallel {
+                // Circle centered on axis with parallel axis → Sphere
+                let center = axis_origin + h_on_axis * axis_dir;
+                Ok(Surface::Sphere(Sphere {
+                    center,
+                    radius: circle.radius,
+                }))
+            } else if axes_parallel && center_dist > 1e-6 {
+                // Circle in axial plane, off-axis → Torus
+                let center = axis_origin + h_on_axis * axis_dir;
+                Ok(Surface::Torus(Torus::new(
+                    center,
+                    axis_dir,
+                    center_dist,
+                    circle.radius,
+                )))
+            } else {
+                Ok(Surface::BSpline(revolve_curve_to_nurbs(
+                    &curve,
+                    &axis_origin,
+                    &axis_dir,
+                )))
+            }
+        }
+        _ => Ok(Surface::BSpline(revolve_curve_to_nurbs(
+            &curve,
+            &axis_origin,
+            &axis_dir,
+        ))),
+    }
+}
+
+/// Extract origin and axis direction from an AXIS1_PLACEMENT entity.
+fn convert_axis1_placement(
+    step: &StepFile<'_>,
+    placement_id: usize,
+) -> Result<(Point3<f64>, Vector3<f64>), StepError> {
+    let a1p = match &step.entities[placement_id] {
+        ap214::Entity::Axis1Placement(a) => a,
+        _ => {
+            return Err(StepError::UnsupportedEntity(
+                "Expected AXIS1_PLACEMENT".into(),
+            ));
+        }
+    };
+
+    let origin = convert_cartesian_point(step, a1p.location)?;
+    let axis = if let Some(&axis_id) = a1p.axis.as_ref() {
+        convert_direction(step, axis_id)?
+    } else {
+        Vector3::z()
+    };
+
+    Ok((origin, axis))
+}
+
+/// Revolve a curve around an axis to create a NURBS surface.
+///
+/// Uses the standard NURBS revolution algorithm: 9 control points in the angular
+/// direction (4 quarter arcs using circular arc weights), tensored with the profile
+/// curve's control points.
+fn revolve_curve_to_nurbs(
+    curve: &Curve,
+    axis_origin: &Point3<f64>,
+    axis_dir: &Vector3<f64>,
+) -> SurfaceBSpline {
+    use std::f64::consts::FRAC_PI_4;
+
+    let (profile_degree, profile_pts, profile_knots, profile_weights) =
+        curve_to_bspline_data(curve);
+    let w_angle = FRAC_PI_4.cos(); // cos(45°) = 1/√2 for 90° arcs
+
+    let n_profile = profile_pts.len();
+    let n_angular = 9; // 4 quarter arcs
+
+    // For each profile control point, generate 9 angular control points
+    let mut control_points: Vec<Vec<Point3<f64>>> = Vec::with_capacity(n_angular);
+    let mut weights_grid: Vec<Vec<f64>> = Vec::with_capacity(n_angular);
+
+    // Angular weights pattern: [1, w, 1, w, 1, w, 1, w, 1]
+    let angular_weights = [1.0, w_angle, 1.0, w_angle, 1.0, w_angle, 1.0, w_angle, 1.0];
+
+    // Angles for 9 control points (0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°, 360°)
+    let angles = [
+        0.0,
+        std::f64::consts::FRAC_PI_4,
+        std::f64::consts::FRAC_PI_2,
+        3.0 * std::f64::consts::FRAC_PI_4,
+        std::f64::consts::PI,
+        5.0 * std::f64::consts::FRAC_PI_4,
+        3.0 * std::f64::consts::FRAC_PI_2,
+        7.0 * std::f64::consts::FRAC_PI_4,
+        std::f64::consts::TAU,
+    ];
+
+    for (ai, &angle) in angles.iter().enumerate() {
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        let aw = angular_weights[ai];
+
+        let mut row_pts: Vec<Point3<f64>> = Vec::with_capacity(n_profile);
+        let mut row_weights: Vec<f64> = Vec::with_capacity(n_profile);
+
+        for (pi, profile_pt) in profile_pts.iter().enumerate() {
+            // Rotate profile_pt around axis
+            let to_pt = profile_pt - axis_origin;
+            let along_axis = to_pt.dot(axis_dir) * axis_dir;
+            let radial = to_pt - along_axis;
+            let r = radial.norm();
+
+            let rotated = if r < 1e-14 {
+                // Point on axis — doesn't move during revolution
+                *profile_pt
+            } else {
+                let radial_unit = radial / r;
+                let tangent = axis_dir.cross(&radial_unit);
+                let rotated_radial = cos_a * radial_unit + sin_a * tangent;
+                axis_origin + along_axis + r * rotated_radial
+            };
+
+            let pw = profile_weights.as_ref().map_or(1.0, |w| w[pi]);
+            row_pts.push(rotated);
+            row_weights.push(aw * pw);
+        }
+
+        control_points.push(row_pts);
+        weights_grid.push(row_weights);
+    }
+
+    // Angular knot vector for degree-2, 9 control points, 4 quarter arcs
+    let u_knots = vec![
+        0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0,
+    ];
+
+    SurfaceBSpline {
+        u_degree: 2,
+        v_degree: profile_degree,
+        control_points,
+        u_knots,
+        v_knots: profile_knots,
+        weights: Some(weights_grid),
+    }
+}
+
+/// Convert an OFFSET_SURFACE to a Surface.
+///
+/// An offset surface is a base surface displaced along its normal by a constant distance.
+fn convert_offset_surface(
+    step: &StepFile<'_>,
+    os: &ap214::OffsetSurface_<'_>,
+) -> Result<Surface, StepError> {
+    let base = convert_surface(step, os.basis_surface)?;
+    Ok(Surface::Offset(Box::new(OffsetSurface {
+        base,
+        distance: os.distance,
+    })))
 }
 
 /// Compute a default X axis perpendicular to the given Z axis.
@@ -2194,6 +2604,16 @@ mod tests {
                 .to_string();
             let file_bytes = path.metadata().map(|m| m.len() as usize).unwrap_or(0);
 
+            let file_start = Instant::now();
+            eprint!(
+                "  [{:>3}/{}] {} ({} KB) ... ",
+                file_idx + 1,
+                step_files.len(),
+                rel_path,
+                file_bytes / 1024
+            );
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+
             // Wrap everything in catch_unwind for resilience
             let result: Result<Result<_, String>, _> =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2324,6 +2744,14 @@ mod tests {
                 }
             };
 
+            let file_ms = file_start.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "{} ({} bodies, {:.0}ms)",
+                status,
+                body_results.len(),
+                file_ms
+            );
+
             // Classify bodies into 4 buckets and accumulate per-file stats
             let mut file_step_faces = 0usize;
             let mut file_skipped_faces = 0usize;
@@ -2449,8 +2877,8 @@ mod tests {
             ).unwrap();
             jsonl_file.flush().unwrap();
 
-            // Progress report every 500 files
-            if (file_idx + 1) % 500 == 0 {
+            // Progress report every 50 files
+            if (file_idx + 1) % 50 == 0 {
                 let elapsed = corpus_start.elapsed().as_secs_f64();
                 let rate = (file_idx + 1) as f64 / elapsed;
                 eprintln!(

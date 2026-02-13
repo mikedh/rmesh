@@ -75,6 +75,14 @@ pub enum Error {
     /// This indicates a logic error in the crate, but it happens occasionally
     #[error("escaped wedge when searching fixed edge")]
     WedgeEscape,
+
+    /// CDT diverged: flip rate indicates O(n²) pathological behavior
+    #[error("CDT diverged: flip rate indicates O(n²) pathological behavior")]
+    Diverged,
+
+    /// CDT exceeded time budget (safety backstop)
+    #[error("CDT exceeded time budget")]
+    TimeBudgetExceeded,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
