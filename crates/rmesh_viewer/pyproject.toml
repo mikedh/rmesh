@@ -3,7 +3,7 @@ requires = ["maturin[patchelf]>=1.8,<2.0", "numpy>=2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rmesh-viewer"
+name = "rmesh_viewer"
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",

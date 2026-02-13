@@ -5,7 +5,7 @@ edition = "2024"
 
 [lib]
 name = "rmesh"
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 anyhow = {workspace=true}

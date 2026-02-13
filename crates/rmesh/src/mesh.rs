@@ -358,7 +358,10 @@ impl Trimesh {
         self.cache_face_normals.get_or_init(|| {
             self.faces_cross()
                 .par_iter()
-                .map(|cross| cross.normalize())
+                .map(|cross| {
+                    let n = cross.norm();
+                    if n > 1e-30 { cross / n } else { Vector3::zeros() }
+                })
                 .collect()
         })
     }
@@ -417,6 +420,115 @@ impl Trimesh {
             .par_iter()
             .map(|adj| normals[adj.0].angle(&normals[adj.1]))
             .collect()
+    }
+
+    /// Compute smooth vertex normals (one per face-corner).
+    ///
+    /// Returns `Vec<Vector3<f64>>` of length `faces.len() * 3`.
+    /// Index `[fi * 3 + ci]` is the normal for face `fi`, vertex `ci`.
+    ///
+    /// If `groups` is `Some`, uses the provided per-face group IDs directly
+    /// (e.g. from OBJ `s N` smooth groups). If `None`, computes groups from
+    /// face adjacency: faces sharing an edge whose face normals differ by
+    /// less than `angle_threshold` radians are grouped together.
+    ///
+    /// Within a group, vertex normals are angle-weighted averages of
+    /// adjacent face normals. Pass `PI` for fully smooth.
+    pub fn smooth_vertex_normals(
+        &self,
+        angle_threshold: f64,
+        groups: Option<&[usize]>,
+    ) -> Vec<Vector3<f64>> {
+        let n_faces = self.faces.len();
+        let face_normals = self.face_normals();
+
+        // Resolve face→group mapping: either from caller or from angle threshold
+        let computed_groups;
+        let face_group: &[usize] = if let Some(g) = groups {
+            g
+        } else {
+            let adj = self.face_adjacency();
+            let angles = self.face_adjacency_angles();
+
+            let smooth_edges: Vec<(usize, usize)> = adj
+                .iter()
+                .zip(angles.iter())
+                .filter(|&(_, angle)| *angle <= angle_threshold)
+                .map(|(&pair, _)| pair)
+                .collect();
+
+            let components = adjacency::connected_components(n_faces, &smooth_edges);
+            computed_groups = {
+                let mut fg = vec![0usize; n_faces];
+                for (gi, group) in components.iter().enumerate() {
+                    for &fi in group {
+                        fg[fi] = gi;
+                    }
+                }
+                fg
+            };
+            &computed_groups
+        };
+
+        // Precompute corner angles: corner_angles[fi * 3 + ci] = interior angle
+        // at vertex ci of face fi.
+        let corner_angles: Vec<f64> = self
+            .faces
+            .iter()
+            .flat_map(|[i0, i1, i2]| {
+                let v0 = self.vertices[*i0].coords;
+                let v1 = self.vertices[*i1].coords;
+                let v2 = self.vertices[*i2].coords;
+                let angle_at = |a: Vector3<f64>, b: Vector3<f64>, c: Vector3<f64>| {
+                    let e1 = b - a;
+                    let e2 = c - a;
+                    let n1 = e1.norm();
+                    let n2 = e2.norm();
+                    if n1 < 1e-30 || n2 < 1e-30 {
+                        return 0.0;
+                    }
+                    (e1.dot(&e2) / (n1 * n2)).clamp(-1.0, 1.0).acos()
+                };
+                [angle_at(v0, v1, v2), angle_at(v1, v2, v0), angle_at(v2, v0, v1)]
+            })
+            .collect();
+
+        // Build vertex→faces map
+        let n_verts = self.vertices.len();
+        let mut vert_faces: Vec<Vec<usize>> = vec![Vec::new(); n_verts];
+        for (fi, face) in self.faces.iter().enumerate() {
+            for &vi in face {
+                vert_faces[vi].push(fi);
+            }
+        }
+
+        // For each face corner, compute angle-weighted average of face normals
+        // from faces sharing the same vertex AND same smooth group.
+        let mut corner_normals = vec![Vector3::zeros(); n_faces * 3];
+        for (fi, face) in self.faces.iter().enumerate() {
+            let group = face_group[fi];
+            for (ci, &vi) in face.iter().enumerate() {
+                let mut normal = Vector3::zeros();
+                for &neighbor_fi in &vert_faces[vi] {
+                    if face_group[neighbor_fi] == group {
+                        let neighbor_ci = self.faces[neighbor_fi]
+                            .iter()
+                            .position(|&v| v == vi)
+                            .unwrap();
+                        let weight = corner_angles[neighbor_fi * 3 + neighbor_ci];
+                        normal += face_normals[neighbor_fi] * weight;
+                    }
+                }
+                let norm = normal.norm();
+                corner_normals[fi * 3 + ci] = if norm > 1e-30 {
+                    normal / norm
+                } else {
+                    Vector3::z_axis().into_inner()
+                };
+            }
+        }
+
+        corner_normals
     }
 
     /// Compute mass properties (volume, mass, center of mass, inertia tensor).
@@ -2415,5 +2527,80 @@ mod tests {
         );
         // 8 original + 2*2 fill = 12
         assert_eq!(filled.faces.len(), 12);
+    }
+
+    #[test]
+    fn test_smooth_vertex_normals_cube_smooth() {
+        // A cube with 30° threshold: all edges are 90° > 30°, so every face
+        // should get its own flat normals (equivalent to faceted for a cube).
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let normals = cube.smooth_vertex_normals(std::f64::consts::FRAC_PI_6, None);
+        assert_eq!(normals.len(), cube.faces.len() * 3);
+
+        // Each face's 3 corner normals should match the face normal
+        let face_normals = cube.face_normals();
+        for (fi, _face) in cube.faces.iter().enumerate() {
+            for ci in 0..3 {
+                let cn = normals[fi * 3 + ci];
+                assert_relative_eq!(cn, face_normals[fi], epsilon = 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_smooth_vertex_normals_cube_full() {
+        // A cube with PI threshold: all edges are smooth, so corners should
+        // average to normalize(±1, ±1, ±1) at each vertex.
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let normals = cube.smooth_vertex_normals(std::f64::consts::PI, None);
+        assert_eq!(normals.len(), cube.faces.len() * 3);
+
+        // Every corner normal at a cube vertex should point toward ±1,±1,±1
+        for (fi, face) in cube.faces.iter().enumerate() {
+            for (ci, &vi) in face.iter().enumerate() {
+                let cn = normals[fi * 3 + ci];
+                let v = cube.vertices[vi];
+                let expected = Vector3::new(v.x.signum(), v.y.signum(), v.z.signum()).normalize();
+                assert_relative_eq!(cn, expected, epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_smooth_vertex_normals_unit_length() {
+        // All returned corner normals should be unit length.
+        let cube = create_box(&[2.0, 3.0, 4.0]);
+        for &threshold in &[std::f64::consts::FRAC_PI_6, std::f64::consts::PI] {
+            let normals = cube.smooth_vertex_normals(threshold, None);
+            for n in normals.iter() {
+                assert_relative_eq!(n.norm(), 1.0, epsilon = 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_smooth_vertex_normals_full_shared() {
+        // With PI threshold, all faces sharing a vertex should produce the
+        // same normal at that vertex (within tolerance).
+        let cube = create_box(&[1.0, 1.0, 1.0]);
+        let normals = cube.smooth_vertex_normals(std::f64::consts::PI, None);
+
+        // Build vertex→corner normals map
+        let mut vert_normals: Vec<Vec<Vector3<f64>>> = vec![Vec::new(); cube.vertices.len()];
+        for (fi, face) in cube.faces.iter().enumerate() {
+            for (ci, &vi) in face.iter().enumerate() {
+                vert_normals[vi].push(normals[fi * 3 + ci]);
+            }
+        }
+
+        // All normals at the same vertex should be identical
+        for (_vi, vn) in vert_normals.iter().enumerate() {
+            if vn.len() < 2 {
+                continue;
+            }
+            for n in &vn[1..] {
+                assert_relative_eq!(*n, vn[0], epsilon = 1e-10);
+            }
+        }
     }
 }

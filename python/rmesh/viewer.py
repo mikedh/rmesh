@@ -19,25 +19,15 @@ def show_trimesh(mesh, *, title="rmesh viewer", width=1280, height=720, backgrou
     kw = {"title": title, "width": width, "height": height}
     if background is not None:
         kw["background"] = background
-    _viewer().show_trimesh(
-        mesh.vertices,
-        mesh.faces,
-        vertex_normals=getattr(mesh, "vertex_normals", None),
-        **kw,
-    )
+    _viewer().show_trimesh(mesh, **kw)
 
 
 def show_scene(scene, *, title="rmesh viewer", width=1280, height=720, background=None):
     """Show a Scene in an interactive 3D viewer window."""
-    meshes = []
-    for name in scene.geometry:
-        geom = scene.geometry[name]
-        if hasattr(geom, "vertices") and hasattr(geom, "faces"):
-            meshes.append({"vertices": geom.vertices, "faces": geom.faces})
     kw = {"title": title, "width": width, "height": height}
     if background is not None:
         kw["background"] = background
-    _viewer().show_scene(meshes, **kw)
+    _viewer().show_scene(scene, **kw)
 
 
 def show_polygon2d(poly, *, title="rmesh 2D", width=1280, height=720, background=None):

@@ -1010,7 +1010,7 @@ macro_rules! cached_array {
 
 #[pyclass(name = "Trimesh")]
 pub struct PyTrimesh {
-    pub(crate) data: Trimesh,
+    pub data: Trimesh,
     vertices_cache: OnceCell<Py<PyArray2<f64>>>,
     faces_cache: OnceCell<Py<PyArray2<i64>>>,
     face_normals_cache: OnceCell<Py<PyArray2<f64>>>,
@@ -1039,6 +1039,14 @@ impl PyTrimesh {
 
 #[pymethods]
 impl PyTrimesh {
+    /// Return a raw pointer to the internal Trimesh data.
+    ///
+    /// The pointer is valid as long as this object is alive.
+    /// Used internally by rmesh_viewer for cross-extension data access.
+    fn _data_ptr(&self) -> usize {
+        &self.data as *const _ as usize
+    }
+
     #[new]
     #[pyo3(signature = (vertices, faces, *, vertex_normals=None, face_colors=None, face_surfaces=None))]
     pub fn new(

@@ -283,6 +283,11 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
 
     let to_mesh = graph.collect_instances(step);
 
+    // Build a uniform scale matrix from the file's length_scale factor
+    // (e.g. 0.0254 for inches→meters).
+    let s = step.length_scale;
+    let scale = Matrix4::new_nonuniform_scaling(&Vector3::new(s, s, s));
+
     // Convert solids in parallel — each is independent with its own local BrepModel.
     let entries: Vec<_> = to_mesh.iter().collect();
     let results: Vec<_> = entries
@@ -291,10 +296,12 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
             if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[**msb_id]
                 && let Ok((brep, _skipped)) = convert_manifold_solid_brep(step, msb)
             {
+                // Apply length_scale to each instance transform.
+                let scaled: Vec<_> = transforms.iter().map(|t| scale * t).collect();
                 Some((
                     name.clone(),
                     Geometry::Brep(Box::new(brep)),
-                    transforms.clone(),
+                    scaled,
                 ))
             } else {
                 None
@@ -336,9 +343,14 @@ fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError>
         })
         .collect();
 
+    // Build a uniform scale matrix from the file's length_scale factor
+    // (e.g. 0.0254 for inches→meters).
+    let s = step.length_scale;
+    let scale = Matrix4::new_nonuniform_scaling(&Vector3::new(s, s, s));
+
     let mut scene = Scene::new();
     for (name, geom) in results {
-        scene.add(&name, geom, None);
+        scene.add(&name, geom, Some(&[scale]));
     }
     Ok(scene)
 }
@@ -2037,18 +2049,17 @@ mod tests {
         );
 
         // trimesh reference in meters: array([0.18415, 0.1143, 0.09525])
-        // Geometry is in native file units (inches), so scale extents to meters.
+        // length_scale is now applied during conversion, so extents are in meters.
         let expected_m = [0.18415, 0.1143, 0.09525];
         let tol = 0.001;
         for i in 0..3 {
-            let got_m = extents[i] * sf.length_scale;
             assert!(
-                (got_m - expected_m[i]).abs() < tol,
+                (extents[i] - expected_m[i]).abs() < tol,
                 "extents[{}]: got {:.6} m, expected {:.6} m (diff={:.6})",
                 i,
-                got_m,
+                extents[i],
                 expected_m[i],
-                (got_m - expected_m[i]).abs()
+                (extents[i] - expected_m[i]).abs()
             );
         }
     }

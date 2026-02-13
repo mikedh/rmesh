@@ -45,6 +45,7 @@ pub enum InputCommand {
     ToggleAxes,
     ToggleFullscreen,
     ToggleEnvLight,
+    ToggleShadingMode,
     Close,
 }
 
@@ -120,6 +121,7 @@ impl InputState {
                 "a" => Some(InputCommand::ToggleAxes),
                 "f" => Some(InputCommand::ToggleFullscreen),
                 "e" => Some(InputCommand::ToggleEnvLight),
+                "s" => Some(InputCommand::ToggleShadingMode),
                 _ => None,
             },
             _ => None,
@@ -141,7 +143,10 @@ impl InputState {
             InputCommand::ToggleGrid => toggles.grid = !toggles.grid,
             InputCommand::ToggleAxes => toggles.axes = !toggles.axes,
             InputCommand::ToggleEnvLight => toggles.env_light = !toggles.env_light,
-            InputCommand::ResetView | InputCommand::Close | InputCommand::ToggleFullscreen => {}
+            InputCommand::ResetView
+            | InputCommand::Close
+            | InputCommand::ToggleFullscreen
+            | InputCommand::ToggleShadingMode => {}
         }
     }
 }

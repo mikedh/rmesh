@@ -1,10 +1,10 @@
-use nalgebra::{Point2, Point3, Vector3, Vector4};
+#![allow(unsafe_code)]
+
+use nalgebra::Point2;
 use numpy::PyReadonlyArray2;
 use pyo3::prelude::*;
 
-use rmesh::attributes::Attributes;
 use rmesh::geometry::Geometry;
-use rmesh::mesh::Trimesh;
 use rmesh::scene::Scene;
 
 /// Build a `ViewerOptions` from Python kwargs.
@@ -22,62 +22,43 @@ fn viewer_options(
     }
 }
 
-/// Show a triangle mesh in an interactive 3D viewer window.
+/// Clone native data from a Python object that exposes `_data_ptr()`.
 ///
-/// Blocks until the window is closed.
+/// # Safety
+/// The Python object must be an `rmesh.Trimesh` or `rmesh.Scene` whose
+/// `_data_ptr()` method returns a valid pointer to `T`. The object is kept
+/// alive by the caller for the duration of this function.
+unsafe fn clone_native<T: Clone>(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<T> {
+    let ptr: usize = obj.call_method0(py, "_data_ptr")?.extract(py)?;
+    if ptr == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "null data pointer",
+        ));
+    }
+    // SAFETY: ptr points to a valid T inside the Python object which is kept
+    // alive by the caller. We clone immediately while holding the GIL.
+    Ok(unsafe { &*(ptr as *const T) }.clone())
+}
+
+/// Show a Trimesh in an interactive 3D viewer window.
+///
+/// Accepts a native `rmesh.Trimesh` object. All mesh attributes (UVs,
+/// normals, materials, textures, smooth groups) are preserved.
 #[pyfunction]
-#[pyo3(signature = (vertices, faces, *, vertex_normals=None, vertex_colors=None, title="rmesh viewer", width=1280, height=720, background=None))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (mesh, *, title="rmesh viewer", width=1280, height=720, background=None))]
 fn show_trimesh(
     py: Python<'_>,
-    vertices: PyReadonlyArray2<'_, f64>,
-    faces: PyReadonlyArray2<'_, i64>,
-    vertex_normals: Option<PyReadonlyArray2<'_, f64>>,
-    vertex_colors: Option<PyReadonlyArray2<'_, u8>>,
+    mesh: Py<PyAny>,
     title: &str,
     width: u32,
     height: u32,
     background: Option<[f32; 3]>,
 ) -> PyResult<()> {
-    let verts: Vec<Point3<f64>> = vertices
-        .as_array()
-        .rows()
-        .into_iter()
-        .map(|r| Point3::new(r[0], r[1], r[2]))
-        .collect();
-    let tris: Vec<[usize; 3]> = faces
-        .as_array()
-        .rows()
-        .into_iter()
-        .map(|r| [r[0] as usize, r[1] as usize, r[2] as usize])
-        .collect();
-
-    let mut attr_vertex = Attributes::default();
-    if let Some(n) = vertex_normals {
-        attr_vertex.normals.push(
-            n.as_array()
-                .rows()
-                .into_iter()
-                .map(|r| Vector3::new(r[0], r[1], r[2]))
-                .collect(),
-        );
-    }
-    let mut attr_face = Attributes::default();
-    if let Some(c) = vertex_colors {
-        attr_face.colors.push(
-            c.as_array()
-                .rows()
-                .into_iter()
-                .map(|r| Vector4::new(r[0], r[1], r[2], r[3]))
-                .collect(),
-        );
-    }
-
-    let mesh = Trimesh::new(verts, tris, Some(attr_vertex), Some(attr_face))
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    // Clone the native Trimesh data from the Python object.
+    let trimesh: rmesh::mesh::Trimesh = unsafe { clone_native(py, &mesh)? };
 
     let mut scene = Scene::new();
-    scene.add_geometry("mesh", Geometry::Mesh(Box::new(mesh)));
+    scene.add_geometry("mesh", Geometry::Mesh(Box::new(trimesh)));
 
     let options = viewer_options(title, width, height, background);
 
@@ -89,56 +70,29 @@ fn show_trimesh(
     Ok(())
 }
 
-/// Show a scene in an interactive 3D viewer window.
+/// Show a Scene in an interactive 3D viewer window.
 ///
-/// Accepts a list of mesh dicts, each with `vertices` (N×3 f64) and `faces` (M×3 i64).
+/// Accepts a native `rmesh.Scene` object. All geometry attributes (UVs,
+/// normals, materials, textures, smooth groups) and the scene graph are
+/// preserved.
 #[pyfunction]
-#[pyo3(signature = (meshes, *, title="rmesh viewer", width=1280, height=720, background=None))]
+#[pyo3(signature = (scene, *, title="rmesh viewer", width=1280, height=720, background=None))]
 fn show_scene(
     py: Python<'_>,
-    meshes: Vec<Bound<'_, pyo3::types::PyDict>>,
+    scene: Py<PyAny>,
     title: &str,
     width: u32,
     height: u32,
     background: Option<[f32; 3]>,
 ) -> PyResult<()> {
-    let mut scene = Scene::new();
-
-    for (i, d) in meshes.iter().enumerate() {
-        let verts_arr: PyReadonlyArray2<'_, f64> = d
-            .get_item("vertices")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing 'vertices'"))?
-            .extract()?;
-        let faces_arr: PyReadonlyArray2<'_, i64> = d
-            .get_item("faces")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing 'faces'"))?
-            .extract()?;
-
-        let verts: Vec<Point3<f64>> = verts_arr
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|r| Point3::new(r[0], r[1], r[2]))
-            .collect();
-        let tris: Vec<[usize; 3]> = faces_arr
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|r| [r[0] as usize, r[1] as usize, r[2] as usize])
-            .collect();
-
-        let mesh = Trimesh::new(verts, tris, None, None)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-        let name = format!("mesh_{i}");
-        scene.add_geometry(&name, Geometry::Mesh(Box::new(mesh)));
-    }
+    // Clone the native Scene data from the Python object.
+    let data: Scene = unsafe { clone_native(py, &scene)? };
 
     let options = viewer_options(title, width, height, background);
 
     py.detach(|| {
         use crate::SceneViewer;
-        scene.show_with_options(options)
+        data.show_with_options(options)
     })
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok(())
