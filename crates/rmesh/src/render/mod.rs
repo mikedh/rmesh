@@ -37,6 +37,23 @@ impl ShadingMode {
             Self::Full => Self::Smooth,
         }
     }
+
+    /// Pick a default shading mode based on scene contents.
+    /// Textured meshes look best with flat shading (the texture carries
+    /// visual detail); untextured meshes benefit from smooth-group normals.
+    pub fn default_for_scene(scene: &crate::scene::Scene) -> Self {
+        use crate::geometry::Geometry;
+        for geom in scene.geometry.values() {
+            if let Geometry::Mesh(mesh) = geom {
+                for mat in &mesh.materials {
+                    if mat.to_pbr().base_color_texture.is_some() {
+                        return Self::Flat;
+                    }
+                }
+            }
+        }
+        Self::Smooth
+    }
 }
 
 impl std::fmt::Display for ShadingMode {
@@ -83,7 +100,7 @@ impl Default for RenderOptions {
         Self {
             width: 1280,
             height: 720,
-            background: [0.9, 0.9, 0.92],
+            background: [1.0, 1.0, 1.0],
         }
     }
 }
@@ -303,7 +320,12 @@ pub fn render_to_image(scene: &crate::scene::Scene, options: &RenderOptions) -> 
     let (_, depth_view) = device::create_depth_texture(&device, w, h);
 
     // Upload scene data
-    let scene_data = upload::upload_scene(&device, &queue, scene, ShadingMode::Smooth);
+    let scene_data = upload::upload_scene(
+        &device,
+        &queue,
+        scene,
+        ShadingMode::default_for_scene(scene),
+    );
 
     // Create renderer for offscreen format
     let mut renderer = SceneRenderer::new(&device, &queue, format);

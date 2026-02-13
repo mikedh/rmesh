@@ -360,7 +360,11 @@ impl Trimesh {
                 .par_iter()
                 .map(|cross| {
                     let n = cross.norm();
-                    if n > 1e-30 { cross / n } else { Vector3::zeros() }
+                    if n > 1e-30 {
+                        cross / n
+                    } else {
+                        Vector3::zeros()
+                    }
                 })
                 .collect()
         })
@@ -489,7 +493,11 @@ impl Trimesh {
                     }
                     (e1.dot(&e2) / (n1 * n2)).clamp(-1.0, 1.0).acos()
                 };
-                [angle_at(v0, v1, v2), angle_at(v1, v2, v0), angle_at(v2, v0, v1)]
+                [
+                    angle_at(v0, v1, v2),
+                    angle_at(v1, v2, v0),
+                    angle_at(v2, v0, v1),
+                ]
             })
             .collect();
 

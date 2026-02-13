@@ -298,11 +298,7 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
             {
                 // Apply length_scale to each instance transform.
                 let scaled: Vec<_> = transforms.iter().map(|t| scale * t).collect();
-                Some((
-                    name.clone(),
-                    Geometry::Brep(Box::new(brep)),
-                    scaled,
-                ))
+                Some((name.clone(), Geometry::Brep(Box::new(brep)), scaled))
             } else {
                 None
             }

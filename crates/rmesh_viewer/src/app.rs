@@ -8,7 +8,7 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 use rmesh::render::mesh::MeshBindGroups;
 use rmesh::render::upload::{self, SceneGpuData};
-use rmesh::render::{RenderToggles, ShadingMode, SceneRenderer, mat4_f64_to_f32};
+use rmesh::render::{RenderToggles, SceneRenderer, ShadingMode, mat4_f64_to_f32};
 use rmesh::scene::{Camera, Scene, Trackball};
 
 use crate::ViewerOptions;
@@ -58,7 +58,8 @@ impl<'a> ViewerApp<'a> {
         let gpu = GpuContext::new(window.clone())?;
         let renderer = SceneRenderer::new(&gpu.device, &gpu.queue, gpu.surface_format());
 
-        let scene_data = upload::upload_scene(&gpu.device, &gpu.queue, self.scene, ShadingMode::Smooth);
+        let default_shading = ShadingMode::default_for_scene(self.scene);
+        let scene_data = upload::upload_scene(&gpu.device, &gpu.queue, self.scene, default_shading);
 
         let mesh_bind_groups = renderer
             .mesh_renderer
@@ -96,7 +97,10 @@ impl<'a> ViewerApp<'a> {
             trackball,
             camera,
             input,
-            toggles: RenderToggles::default(),
+            toggles: RenderToggles {
+                shading_mode: default_shading,
+                ..RenderToggles::default()
+            },
             options: ViewerOptions {
                 title: self.options.title.clone(),
                 width: self.options.width,

@@ -29,7 +29,7 @@ impl Default for ViewerOptions {
             title: "rmesh viewer".to_string(),
             width: 1280,
             height: 720,
-            background: [0.9, 0.9, 0.92],
+            background: [1.0, 1.0, 1.0],
         }
     }
 }

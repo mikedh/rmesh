@@ -31,9 +31,7 @@ fn viewer_options(
 unsafe fn clone_native<T: Clone>(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<T> {
     let ptr: usize = obj.call_method0(py, "_data_ptr")?.extract(py)?;
     if ptr == 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "null data pointer",
-        ));
+        return Err(pyo3::exceptions::PyValueError::new_err("null data pointer"));
     }
     // SAFETY: ptr points to a valid T inside the Python object which is kept
     // alive by the caller. We clone immediately while holding the GIL.
