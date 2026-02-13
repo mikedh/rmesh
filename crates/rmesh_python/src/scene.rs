@@ -205,7 +205,7 @@ impl PySceneGraph {
 /// A scene containing named geometry with an optional scene graph.
 #[pyclass(name = "Scene")]
 pub struct PyScene {
-    pub(crate) data: rmesh::scene::Scene,
+    pub data: rmesh::scene::Scene,
     geometry_cache: OnceCell<Py<PyGeometryDict>>,
 }
 
@@ -224,6 +224,14 @@ impl PyScene {
     #[new]
     fn new() -> Self {
         Self::from_scene(rmesh::scene::Scene::new())
+    }
+
+    /// Return a raw pointer to the internal Scene data.
+    ///
+    /// The pointer is valid as long as this object is alive.
+    /// Used internally by rmesh_viewer for cross-extension data access.
+    fn _data_ptr(&self) -> usize {
+        &self.data as *const _ as usize
     }
 
     /// Add geometry to the scene.

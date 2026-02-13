@@ -5,6 +5,7 @@ use wgpu::util::DeviceExt;
 use crate::attributes::{DEFAULT_COLOR, Material};
 use crate::geometry::Geometry;
 use crate::image::LazyImage;
+use crate::render::ShadingMode;
 use crate::scene::{Scene, SceneNodeKind};
 
 /// GPU-ready mesh vertex: 52 bytes interleaved.
@@ -209,7 +210,12 @@ fn mat4_f64_to_f32(m: &Matrix4<f64>) -> Matrix4<f32> {
 }
 
 /// Upload scene geometry to GPU buffers.
-pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> SceneGpuData {
+pub fn upload_scene(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &Scene,
+    shading_mode: ShadingMode,
+) -> SceneGpuData {
     let mut meshes = Vec::new();
     let mut paths = Vec::new();
     let mut points = Vec::new();
@@ -241,6 +247,7 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                         queue,
                         mesh,
                         world_transform,
+                        shading_mode,
                         &mut meshes,
                         &mut bounds_min,
                         &mut bounds_max,
@@ -288,6 +295,7 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                         queue,
                         &mesh,
                         world_transform,
+                        shading_mode,
                         &mut meshes,
                         &mut bounds_min,
                         &mut bounds_max,
@@ -308,6 +316,7 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                         queue,
                         mesh,
                         &identity,
+                        shading_mode,
                         &mut meshes,
                         &mut bounds_min,
                         &mut bounds_max,
@@ -353,6 +362,7 @@ pub fn upload_scene(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -
                         queue,
                         &mesh,
                         &identity,
+                        shading_mode,
                         &mut meshes,
                         &mut bounds_min,
                         &mut bounds_max,
@@ -416,12 +426,13 @@ fn transform_point(p: &Point3<f64>, m: &Matrix4<f64>) -> Point3<f64> {
     Point3::new(v.x, v.y, v.z)
 }
 
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
 fn upload_mesh(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     mesh: &crate::mesh::Trimesh,
     world_transform: &Matrix4<f64>,
+    shading_mode: ShadingMode,
     meshes: &mut Vec<GpuMesh>,
     bounds_min: &mut Point3<f64>,
     bounds_max: &mut Point3<f64>,
@@ -437,7 +448,7 @@ fn upload_mesh(
     let vertex_uvs: Option<&[nalgebra::Vector2<f64>]> =
         mesh.attributes_vertex.uv.first().map(|u| u.as_slice());
 
-    let vertex_normals: Option<&[nalgebra::Vector3<f64>]> =
+    let smooth_vertex_normals: Option<&[nalgebra::Vector3<f64>]> =
         mesh.attributes_vertex.normals.first().map(|n| n.as_slice());
 
     let vertex_tangents: Option<&[nalgebra::Vector4<f64>]> = mesh
@@ -450,7 +461,12 @@ fn upload_mesh(
 
     let default_tangent = [0.0f32, 0.0, 1.0, 1.0];
 
-    let (vertices, indices) = if let Some(normals) = vertex_normals {
+    // If mesh has file vertex normals AND we're in Smooth mode, use them as-is
+    // with the efficient shared-vertex path (no duplication).
+    let use_file_normals = smooth_vertex_normals.is_some() && shading_mode == ShadingMode::Smooth;
+
+    let (vertices, indices) = if use_file_normals {
+        let normals = smooth_vertex_normals.unwrap();
         let mut verts = Vec::with_capacity(mesh.vertices.len());
         for (vi, p) in mesh.vertices.iter().enumerate() {
             let wp = transform_point(p, world_transform);
@@ -491,18 +507,39 @@ fn upload_mesh(
 
         (verts, idxs)
     } else {
-        // No per-vertex normals: expand to one vertex per face corner
-        let face_normals = mesh.face_normals();
+        // Expanded per-face-corner path (3 verts per face) with computed normals
+        let corner_normals: Vec<nalgebra::Vector3<f64>> = match shading_mode {
+            ShadingMode::Smooth => {
+                // Prefer file-authored smooth groups (e.g. OBJ `s N` directives)
+                let file_groups = mesh
+                    .attributes_face
+                    .groupings
+                    .iter()
+                    .find(|g| g.kind == crate::attributes::GroupingKind::Smoothing)
+                    .map(|g| g.indices.as_slice());
+                mesh.smooth_vertex_normals(std::f64::consts::FRAC_PI_6, file_groups)
+            }
+            ShadingMode::Flat => {
+                let fn_ = mesh.face_normals();
+                mesh.faces
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(fi, _)| std::iter::repeat_n(fn_[fi], 3))
+                    .collect()
+            }
+            ShadingMode::Full => mesh.smooth_vertex_normals(std::f64::consts::PI, None),
+        };
+
         let mut verts = Vec::with_capacity(mesh.faces.len() * 3);
         let mut idxs = Vec::with_capacity(mesh.faces.len() * 3);
 
         for (fi, face) in mesh.faces.iter().enumerate() {
-            let fn_val = face_normals[fi];
-            for &vi in face {
+            for (ci, &vi) in face.iter().enumerate() {
                 let p = &mesh.vertices[vi];
                 let wp = transform_point(p, world_transform);
                 update_bounds(&wp, bounds_min, bounds_max);
 
+                let n = corner_normals[fi * 3 + ci];
                 let color = vertex_colors
                     .and_then(|c| c.get(vi))
                     .copied()
@@ -520,7 +557,7 @@ fn upload_mesh(
                 idxs.push(verts.len() as u32);
                 verts.push(MeshVertex {
                     position: [p.x as f32, p.y as f32, p.z as f32],
-                    normal: [fn_val.x as f32, fn_val.y as f32, fn_val.z as f32],
+                    normal: [n.x as f32, n.y as f32, n.z as f32],
                     color: [color.x, color.y, color.z, color.w],
                     uv: [uv.x as f32, uv.y as f32],
                     tangent,

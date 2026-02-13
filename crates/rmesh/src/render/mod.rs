@@ -17,6 +17,38 @@ use wgpu::util::DeviceExt;
 use shaders::CameraUniforms;
 use upload::SceneGpuData;
 
+/// Shading mode for mesh rendering.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShadingMode {
+    /// Angle-threshold smooth groups (sharp edges preserved at creases >30deg).
+    #[default]
+    Smooth,
+    /// Per-face normals (standard flat shading).
+    Flat,
+    /// Fully smooth, no sharp edges anywhere (PI threshold).
+    Full,
+}
+
+impl ShadingMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Smooth => Self::Flat,
+            Self::Flat => Self::Full,
+            Self::Full => Self::Smooth,
+        }
+    }
+}
+
+impl std::fmt::Display for ShadingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Smooth => write!(f, "Smooth"),
+            Self::Flat => write!(f, "Flat"),
+            Self::Full => write!(f, "Full"),
+        }
+    }
+}
+
 /// Toggle states for rendering options.
 #[allow(clippy::struct_excessive_bools)]
 pub struct RenderToggles {
@@ -24,6 +56,7 @@ pub struct RenderToggles {
     pub grid: bool,
     pub axes: bool,
     pub env_light: bool,
+    pub shading_mode: ShadingMode,
 }
 
 impl Default for RenderToggles {
@@ -33,6 +66,7 @@ impl Default for RenderToggles {
             grid: false,
             axes: false,
             env_light: true,
+            shading_mode: ShadingMode::default(),
         }
     }
 }
@@ -269,7 +303,7 @@ pub fn render_to_image(scene: &crate::scene::Scene, options: &RenderOptions) -> 
     let (_, depth_view) = device::create_depth_texture(&device, w, h);
 
     // Upload scene data
-    let scene_data = upload::upload_scene(&device, &queue, scene);
+    let scene_data = upload::upload_scene(&device, &queue, scene, ShadingMode::Smooth);
 
     // Create renderer for offscreen format
     let mut renderer = SceneRenderer::new(&device, &queue, format);

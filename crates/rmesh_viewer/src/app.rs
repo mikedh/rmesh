@@ -8,7 +8,7 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 use rmesh::render::mesh::MeshBindGroups;
 use rmesh::render::upload::{self, SceneGpuData};
-use rmesh::render::{RenderToggles, SceneRenderer, mat4_f64_to_f32};
+use rmesh::render::{RenderToggles, ShadingMode, SceneRenderer, mat4_f64_to_f32};
 use rmesh::scene::{Camera, Scene, Trackball};
 
 use crate::ViewerOptions;
@@ -58,7 +58,7 @@ impl<'a> ViewerApp<'a> {
         let gpu = GpuContext::new(window.clone())?;
         let renderer = SceneRenderer::new(&gpu.device, &gpu.queue, gpu.surface_format());
 
-        let scene_data = upload::upload_scene(&gpu.device, &gpu.queue, self.scene);
+        let scene_data = upload::upload_scene(&gpu.device, &gpu.queue, self.scene, ShadingMode::Smooth);
 
         let mesh_bind_groups = renderer
             .mesh_renderer
@@ -181,7 +181,24 @@ impl ApplicationHandler for ViewerApp<'_> {
                         event_loop.exit();
                         return;
                     }
-                    handle_command(state, &cmd);
+                    if matches!(cmd, InputCommand::ToggleShadingMode) {
+                        state.toggles.shading_mode = state.toggles.shading_mode.next();
+                        log::info!("shading mode: {}", state.toggles.shading_mode);
+                        // Re-upload all mesh data with new shading mode
+                        let scene_data = upload::upload_scene(
+                            &state.gpu.device,
+                            &state.gpu.queue,
+                            self.scene,
+                            state.toggles.shading_mode,
+                        );
+                        state.mesh_bind_groups = state
+                            .renderer
+                            .mesh_renderer
+                            .prepare_bind_groups(&state.gpu.device, &scene_data.meshes);
+                        state.scene_data = scene_data;
+                    } else {
+                        handle_command(state, &cmd);
+                    }
                     state.window.request_redraw();
                 }
             }
