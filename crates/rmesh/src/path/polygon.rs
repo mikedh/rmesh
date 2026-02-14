@@ -58,19 +58,8 @@ impl Polygon2D {
 
     /// Check if a point is inside this polygon
     pub fn contains(&self, point: Point2<f64>) -> bool {
-        // Point must be inside exterior
-        if !point_in_polygon(point, &self.exterior) {
-            return false;
-        }
-
-        // Point must not be inside any hole
-        for hole in &self.interiors {
-            if point_in_polygon(point, hole) {
-                return false;
-            }
-        }
-
-        true
+        let holes: Vec<&[Point2<f64>]> = self.interiors.iter().map(|h| h.as_slice()).collect();
+        crate::boundary::polygon_query::point_in_polygon(&self.exterior, &holes, &[point])[0]
     }
 
     /// Get the axis-aligned bounding box
@@ -246,31 +235,6 @@ pub fn signed_area(points: &[Point2<f64>]) -> f64 {
     sum / 2.0
 }
 
-/// Check if a point is inside a polygon using ray casting
-fn point_in_polygon(point: Point2<f64>, polygon: &[Point2<f64>]) -> bool {
-    if polygon.len() < 3 {
-        return false;
-    }
-
-    let mut inside = false;
-    let n = polygon.len();
-
-    let mut j = n - 1;
-    for i in 0..n {
-        let pi = polygon[i];
-        let pj = polygon[j];
-
-        if ((pi.y > point.y) != (pj.y > point.y))
-            && (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x)
-        {
-            inside = !inside;
-        }
-        j = i;
-    }
-
-    inside
-}
-
 /// Convert discretized rings from a Path2D into Polygon2D structures
 ///
 /// Uses i_overlay to determine enclosure relationships and assign holes to shells.
@@ -431,6 +395,7 @@ mod tests {
 
     #[test]
     fn test_point_in_polygon() {
+        use crate::boundary::polygon_query::point_in_polygon;
         let square = vec![
             Point2::new(0.0, 0.0),
             Point2::new(10.0, 0.0),
@@ -438,9 +403,9 @@ mod tests {
             Point2::new(0.0, 10.0),
         ];
 
-        assert!(point_in_polygon(Point2::new(5.0, 5.0), &square));
-        assert!(!point_in_polygon(Point2::new(15.0, 5.0), &square));
-        assert!(!point_in_polygon(Point2::new(-1.0, 5.0), &square));
+        assert!(point_in_polygon(&square, &[], &[Point2::new(5.0, 5.0)])[0]);
+        assert!(!point_in_polygon(&square, &[], &[Point2::new(15.0, 5.0)])[0]);
+        assert!(!point_in_polygon(&square, &[], &[Point2::new(-1.0, 5.0)])[0]);
     }
 
     #[test]

@@ -2104,49 +2104,34 @@ mod tests {
         let t = Triangulation::build_from_contours(&pts, &contours).unwrap();
 
         // Verify no triangle centroid is inside any hole or outside the outer contour
-        let hole1 = &pts[36..56];
-        let hole2 = &pts[56..60];
-        let hole3 = &pts[60..64];
-        let outer = &pts[0..36];
+        use crate::boundary::polygon_query::point_in_polygon;
+        use nalgebra::Point2;
 
-        let mut bad_triangles = 0;
-        for (a, b, c) in t.triangles() {
-            let cx = (pts[a].0 + pts[b].0 + pts[c].0) / 3.0;
-            let cy = (pts[a].1 + pts[b].1 + pts[c].1) / 3.0;
-            if point_in_polygon_f64(cx, cy, hole1)
-                || point_in_polygon_f64(cx, cy, hole2)
-                || point_in_polygon_f64(cx, cy, hole3)
-                || !point_in_polygon_f64(cx, cy, outer)
-            {
-                bad_triangles += 1;
-            }
-        }
+        let to_p2 = |s: &[(f64, f64)]| -> Vec<Point2<f64>> {
+            s.iter().map(|&(x, y)| Point2::new(x, y)).collect()
+        };
+        let hole1 = to_p2(&pts[36..56]);
+        let hole2 = to_p2(&pts[56..60]);
+        let hole3 = to_p2(&pts[60..64]);
+        let outer = to_p2(&pts[0..36]);
+        let holes: Vec<&[Point2<f64>]> = vec![&hole1, &hole2, &hole3];
+
+        let centroids: Vec<Point2<f64>> = t
+            .triangles()
+            .map(|(a, b, c)| {
+                Point2::new(
+                    (pts[a].0 + pts[b].0 + pts[c].0) / 3.0,
+                    (pts[a].1 + pts[b].1 + pts[c].1) / 3.0,
+                )
+            })
+            .collect();
+
+        let inside = point_in_polygon(&outer, &holes, &centroids);
+        let bad_triangles = inside.iter().filter(|&&v| !v).count();
         assert!(
             bad_triangles == 0,
             "CDT produced {} triangles inside holes or outside outer contour",
             bad_triangles
         );
-    }
-
-    /// Simple ray-casting point-in-polygon for f64 tuples.
-    fn point_in_polygon_f64(px: f64, py: f64, polygon: &[(f64, f64)]) -> bool {
-        let n = polygon.len();
-        if n < 3 {
-            return false;
-        }
-        let mut inside = false;
-        let mut j = n - 1;
-        for i in 0..n {
-            let (xi, yi) = polygon[i];
-            let (xj, yj) = polygon[j];
-            if (yi > py) != (yj > py) {
-                let x_intersect = xi + (py - yi) / (yj - yi) * (xj - xi);
-                if px < x_intersect {
-                    inside = !inside;
-                }
-            }
-            j = i;
-        }
-        inside
     }
 }

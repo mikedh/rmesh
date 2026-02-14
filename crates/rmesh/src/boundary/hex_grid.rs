@@ -10,7 +10,7 @@ use nalgebra::Point2;
 
 use super::Surface;
 use super::faces::{CURVATURE_TOL, GEOMETRY_TOL};
-use super::tesselate::point_in_polygon;
+use super::polygon_query;
 
 /// Maximum interior points per face.
 const MAX_INTERIOR_POINTS: usize = 256;
@@ -166,43 +166,40 @@ fn generate_hex_grid(
     let n_rows = ((v_end - v_start) / col_spacing).ceil() as usize + 1;
     let n_cols = ((u_end - u_start) / row_spacing).ceil() as usize + 1;
 
-    let mut points = Vec::with_capacity(n_rows * n_cols);
-
+    // Collect all candidate grid points first
+    let mut candidates = Vec::with_capacity(n_rows * n_cols);
     for row in 0..n_rows {
         let v = v_start + row as f64 * col_spacing;
         if v > v_end {
             break;
         }
-        // Hex offset: odd rows shift by half spacing
         let u_offset = if row % 2 == 1 { row_spacing * 0.5 } else { 0.0 };
-
         for col in 0..n_cols {
             let u = u_start + col as f64 * row_spacing + u_offset;
             if u > u_end {
                 break;
             }
-
-            let pt = Point2::new(u, v);
-
-            // Must be inside outer boundary
-            if !point_in_polygon(&pt, boundary) {
-                continue;
-            }
-
-            // Must be outside all holes
-            if holes.iter().any(|&h| point_in_polygon(&pt, h)) {
-                continue;
-            }
-
-            let r = node_spacing_uv(surface, u, v, tolerance);
-            // Skip if spacing is huge (planar region)
-            if !r.is_finite() || r > (u_max - u_min).max(v_max - v_min) {
-                continue;
-            }
-
-            points.push(pt);
+            candidates.push(Point2::new(u, v));
         }
     }
 
-    points
+    // Batch point-in-polygon with hole support
+    let inside = polygon_query::point_in_polygon(boundary, holes, &candidates);
+
+    // Filter: keep points that are inside the polygon and have valid curvature spacing
+    let span = (u_max - u_min).max(v_max - v_min);
+    candidates
+        .into_iter()
+        .zip(inside)
+        .filter_map(|(pt, is_inside)| {
+            if !is_inside {
+                return None;
+            }
+            let r = node_spacing_uv(surface, pt.x, pt.y, tolerance);
+            if !r.is_finite() || r > span {
+                return None;
+            }
+            Some(pt)
+        })
+        .collect()
 }

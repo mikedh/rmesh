@@ -664,30 +664,6 @@ impl Surface {
 // 2D geometry utilities
 // ============================================================================
 
-/// Check if a 2D point is inside a polygon using the ray-casting algorithm.
-/// The polygon is given as a slice of UV points (not closed — last != first).
-pub(super) fn point_in_polygon(point: &Point2<f64>, polygon: &[Point2<f64>]) -> bool {
-    let n = polygon.len();
-    if n < 3 {
-        return false;
-    }
-    let mut inside = false;
-    let px = point.x;
-    let py = point.y;
-    let mut j = n - 1;
-    for i in 0..n {
-        let yi = polygon[i].y;
-        let yj = polygon[j].y;
-        let xi = polygon[i].x;
-        let xj = polygon[j].x;
-        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
 /// Find the closest edge segment in a polygon to a query point.
 /// Returns (edge_index, squared_distance) where edge_index is the starting vertex index.
 fn closest_polygon_edge(point: &Point2<f64>, polygon: &[Point2<f64>]) -> (usize, f64) {
@@ -1534,8 +1510,10 @@ impl<'a> ShellTessellator<'a> {
                     surface.unwrap_uvs(&mut inner_uvs);
 
                     // Check each inner vertex against the outer polygon
-                    for inner_uv in &inner_uvs {
-                        if !point_in_polygon(inner_uv, &outer_uvs) {
+                    let inside =
+                        super::polygon_query::point_in_polygon(&outer_uvs, &[], &inner_uvs);
+                    for (i, inner_uv) in inner_uvs.iter().enumerate() {
+                        if !inside[i] {
                             // Find closest outer edge
                             let (edge_local_idx, _dist_sq) =
                                 closest_polygon_edge(inner_uv, &outer_uvs);
@@ -2865,6 +2843,7 @@ mod tests {
 
     #[test]
     fn test_point_in_polygon_convex() {
+        use crate::boundary::polygon_query::point_in_polygon;
         // Unit square: (0,0), (1,0), (1,1), (0,1)
         let square = vec![
             Point2::new(0.0, 0.0),
@@ -2873,15 +2852,16 @@ mod tests {
             Point2::new(0.0, 1.0),
         ];
         // Interior
-        assert!(point_in_polygon(&Point2::new(0.5, 0.5), &square));
+        assert!(point_in_polygon(&square, &[], &[Point2::new(0.5, 0.5)])[0]);
         // Exterior
-        assert!(!point_in_polygon(&Point2::new(2.0, 0.5), &square));
-        assert!(!point_in_polygon(&Point2::new(-0.1, 0.5), &square));
-        assert!(!point_in_polygon(&Point2::new(0.5, -0.1), &square));
+        assert!(!point_in_polygon(&square, &[], &[Point2::new(2.0, 0.5)])[0]);
+        assert!(!point_in_polygon(&square, &[], &[Point2::new(-0.1, 0.5)])[0]);
+        assert!(!point_in_polygon(&square, &[], &[Point2::new(0.5, -0.1)])[0]);
     }
 
     #[test]
     fn test_point_in_polygon_concave() {
+        use crate::boundary::polygon_query::point_in_polygon;
         // L-shape: concave polygon
         let l_shape = vec![
             Point2::new(0.0, 0.0),
@@ -2892,22 +2872,23 @@ mod tests {
             Point2::new(0.0, 2.0),
         ];
         // Inside the L
-        assert!(point_in_polygon(&Point2::new(0.5, 0.5), &l_shape));
-        assert!(point_in_polygon(&Point2::new(0.5, 1.5), &l_shape));
+        assert!(point_in_polygon(&l_shape, &[], &[Point2::new(0.5, 0.5)])[0]);
+        assert!(point_in_polygon(&l_shape, &[], &[Point2::new(0.5, 1.5)])[0]);
         // Inside bounding box but outside the L (the concave notch)
-        assert!(!point_in_polygon(&Point2::new(1.5, 1.5), &l_shape));
+        assert!(!point_in_polygon(&l_shape, &[], &[Point2::new(1.5, 1.5)])[0]);
         // Fully outside
-        assert!(!point_in_polygon(&Point2::new(3.0, 0.5), &l_shape));
+        assert!(!point_in_polygon(&l_shape, &[], &[Point2::new(3.0, 0.5)])[0]);
     }
 
     #[test]
     fn test_point_in_polygon_degenerate() {
+        use crate::boundary::polygon_query::point_in_polygon;
         // Fewer than 3 points
         let line = vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)];
-        assert!(!point_in_polygon(&Point2::new(0.5, 0.0), &line));
+        assert!(!point_in_polygon(&line, &[], &[Point2::new(0.5, 0.0)])[0]);
 
         let empty: Vec<Point2<f64>> = vec![];
-        assert!(!point_in_polygon(&Point2::new(0.0, 0.0), &empty));
+        assert!(!point_in_polygon(&empty, &[], &[Point2::new(0.0, 0.0)])[0]);
     }
 
     #[test]
