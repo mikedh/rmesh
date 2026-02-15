@@ -316,53 +316,6 @@ impl CurveBSpline {
         }
     }
 
-    /// Evaluate the curve at multiple parameters, writing results into `out`.
-    ///
-    /// Optimized for sorted (monotonically increasing) parameters as produced
-    /// by tessellation: reuses a single scratch array and caches the current
-    /// knot span to avoid redundant binary searches when consecutive parameters
-    /// fall in the same span.
-    #[allow(clippy::needless_range_loop)]
-    pub fn evaluate_batch(&self, params: &[f64], out: &mut [Point3<f64>]) {
-        assert_eq!(params.len(), out.len());
-        let p = self.degree;
-        let n_control = self.control_points.len();
-        let mut cached_span = self.find_span(params.first().copied().unwrap_or(0.0));
-
-        for (idx, &u) in params.iter().enumerate() {
-            // Reuse cached span if still valid, otherwise find new span
-            let span = if u >= self.knots[cached_span]
-                && (cached_span + 1 >= self.knots.len() || u < self.knots[cached_span + 1])
-            {
-                cached_span
-            } else {
-                find_span(u, p, &self.knots, n_control)
-            };
-            cached_span = span;
-
-            let basis = basis_funs(span, u, p, &self.knots);
-
-            if let Some(ref weights) = self.weights {
-                let mut numerator = Vector3::zeros();
-                let mut denominator = 0.0;
-                for i in 0..=p {
-                    let ci = span - p + i;
-                    let wn = weights[ci] * basis[i];
-                    numerator += wn * self.control_points[ci].coords;
-                    denominator += wn;
-                }
-                out[idx] = Point3::from(numerator / denominator);
-            } else {
-                let mut point = Point3::origin();
-                for i in 0..=p {
-                    let ci = span - p + i;
-                    point.coords += basis[i] * self.control_points[ci].coords;
-                }
-                out[idx] = point;
-            }
-        }
-    }
-
     /// Get the valid parameter range [u_min, u_max].
     pub fn domain(&self) -> (f64, f64) {
         let p = self.degree;
