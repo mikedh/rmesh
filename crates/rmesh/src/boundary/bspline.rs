@@ -4,7 +4,7 @@
 //! Both `CurveBSpline` and `SurfaceBSpline` share the same `find_span`,
 //! `basis_funs`, and `basis_funs_ders` free functions.
 
-use nalgebra::{Point2, Point3, Vector3};
+use nalgebra::{Matrix2, Point2, Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
 use super::faces::{GEOMETRY_TOL, METRIC_TOL, NEWTON_TOL};
@@ -57,6 +57,10 @@ pub(crate) fn find_span(u: f64, degree: usize, knots: &[f64], n_control: usize) 
     while u < knots[mid] || u >= knots[mid + 1] {
         iters += 1;
         if iters > 64 {
+            debug_assert!(
+                false,
+                "find_span: binary search exceeded 64 iterations for u={u}, degree={degree}"
+            );
             break;
         }
         if u < knots[mid] {
@@ -106,6 +110,14 @@ pub(crate) fn basis_funs(
         }
         n[j] = saved;
     }
+    debug_assert!(
+        {
+            let sum: f64 = n[..=p].iter().sum();
+            (sum - 1.0).abs() < 1e-10
+        },
+        "basis_funs: partition of unity violated, sum={}",
+        n[..=p].iter().sum::<f64>()
+    );
     n
 }
 
@@ -287,33 +299,28 @@ impl CurveBSpline {
         basis_funs(span, u, self.degree, &self.knots)
     }
 
+    /// Get the weight for control point `idx` (1.0 for non-rational curves).
+    fn weight(&self, idx: usize) -> f64 {
+        self.weights.as_ref().map_or(1.0, |w| w[idx])
+    }
+
     /// Evaluate the curve at parameter u.
-    /// Algorithm A3.1 from "The NURBS Book" (extended for rational/NURBS).
+    /// Algorithm A3.1 from "The NURBS Book" (rational formula with w=1 for non-NURBS).
     #[allow(clippy::needless_range_loop)]
     pub fn evaluate(&self, u: f64) -> Point3<f64> {
         let span = self.find_span(u);
         let basis = self.basis_funs(span, u);
         let p = self.degree;
 
-        if let Some(ref weights) = self.weights {
-            // Rational (NURBS): C(u) = Σ(w_i * N_i * P_i) / Σ(w_i * N_i)
-            let mut numerator = Vector3::zeros();
-            let mut denominator = 0.0;
-            for i in 0..=p {
-                let idx = span - p + i;
-                let wn = weights[idx] * basis[i];
-                numerator += wn * self.control_points[idx].coords;
-                denominator += wn;
-            }
-            Point3::from(numerator / denominator)
-        } else {
-            let mut point = Point3::origin();
-            for i in 0..=p {
-                let idx = span - p + i;
-                point.coords += basis[i] * self.control_points[idx].coords;
-            }
-            point
+        let mut numerator = Vector3::zeros();
+        let mut denominator = 0.0;
+        for i in 0..=p {
+            let idx = span - p + i;
+            let wn = self.weight(idx) * basis[i];
+            numerator += wn * self.control_points[idx].coords;
+            denominator += wn;
         }
+        Point3::from(numerator / denominator)
     }
 
     /// Get the valid parameter range [u_min, u_max].
@@ -359,51 +366,40 @@ impl CurveBSpline {
     }
 
     /// Evaluate C(u) and derivatives C'(u), C''(u), ... up to order `n_ders`
-    /// in a single find_span + basis_funs_ders pass (Algorithm A2.3).
-    /// For rational (NURBS) curves, uses Algorithm A4.2 from "The NURBS Book".
+    /// in a single find_span + basis_funs_ders pass.
+    /// Uses rational quotient rule (Algorithm A4.2) with w=1 for non-NURBS.
     #[allow(clippy::needless_range_loop)]
     pub fn evaluate_with_derivatives(&self, u: f64, n_ders: usize) -> Vec<Vector3<f64>> {
         let span = self.find_span(u);
         let p = self.degree;
         let ders = basis_funs_ders(span, u, p, &self.knots, n_ders);
 
-        if let Some(ref weights) = self.weights {
-            // Compute weighted derivatives: Aw[k] = Σ w_i * N_i^(k) * P_i
-            //                               wders[k] = Σ w_i * N_i^(k)
-            let mut a_ders = vec![Vector3::zeros(); n_ders + 1];
-            let mut w_ders = vec![0.0; n_ders + 1];
-            for k in 0..=n_ders {
-                for j in 0..=p {
-                    let idx = span - p + j;
-                    let w = weights[idx];
-                    a_ders[k] += (w * ders[k][j]) * self.control_points[idx].coords;
-                    w_ders[k] += w * ders[k][j];
-                }
+        // Compute weighted derivatives: Aw[k] = Σ w_i * N_i^(k) * P_i
+        //                               wders[k] = Σ w_i * N_i^(k)
+        let mut a_ders = vec![Vector3::zeros(); n_ders + 1];
+        let mut w_ders = vec![0.0; n_ders + 1];
+        for k in 0..=n_ders {
+            for j in 0..=p {
+                let idx = span - p + j;
+                let w = self.weight(idx);
+                a_ders[k] += (w * ders[k][j]) * self.control_points[idx].coords;
+                w_ders[k] += w * ders[k][j];
             }
-
-            // Apply quotient rule (Algorithm A4.2):
-            // CK[0] = Aw[0] / w[0]  (the point itself)
-            // CK[k] = (Aw[k] - Σ_{i=1}^{k} C(k,i) * w[i] * CK[k-i]) / w[0]
-            let mut ck = vec![Vector3::zeros(); n_ders + 1];
-            for k in 0..=n_ders {
-                let mut v = a_ders[k];
-                for i in 1..=k {
-                    let bin = binomial(k, i) as f64;
-                    v -= (bin * w_ders[i]) * ck[k - i];
-                }
-                ck[k] = v / w_ders[0];
-            }
-            ck
-        } else {
-            let mut result = vec![Vector3::zeros(); n_ders + 1];
-            for k in 0..=n_ders {
-                for j in 0..=p {
-                    let idx = span - p + j;
-                    result[k] += ders[k][j] * self.control_points[idx].coords;
-                }
-            }
-            result
         }
+
+        // Apply quotient rule (Algorithm A4.2):
+        // CK[0] = Aw[0] / w[0]  (the point itself)
+        // CK[k] = (Aw[k] - Σ_{i=1}^{k} C(k,i) * w[i] * CK[k-i]) / w[0]
+        let mut ck = vec![Vector3::zeros(); n_ders + 1];
+        for k in 0..=n_ders {
+            let mut v = a_ders[k];
+            for i in 1..=k {
+                let bin = binomial(k, i) as f64;
+                v -= (bin * w_ders[i]) * ck[k - i];
+            }
+            ck[k] = v / w_ders[0];
+        }
+        ck
     }
 
     /// Find parameter t for a point on the curve using Newton-Raphson.
@@ -466,7 +462,7 @@ impl CurveBSpline {
             let c_double_prime = d[2];
 
             let r = c - point;
-            if r.norm() < eps {
+            if r.norm_squared() < eps * eps {
                 break;
             }
 
@@ -605,6 +601,11 @@ impl SurfaceBSpline {
         (u_domain, v_domain)
     }
 
+    /// Get the weight for control point (i, j) (1.0 for non-rational surfaces).
+    fn weight(&self, i: usize, j: usize) -> f64 {
+        self.weights.as_ref().map_or(1.0, |w| w[i][j])
+    }
+
     /// Find the knot span index for parameter u in the U direction.
     fn find_u_span(&self, u: f64) -> usize {
         find_span(u, self.u_degree, &self.u_knots, self.control_points.len())
@@ -621,7 +622,7 @@ impl SurfaceBSpline {
     }
 
     /// Evaluate the surface at parameters (u, v).
-    /// Algorithm A3.5 from "The NURBS Book" (extended for rational/NURBS).
+    /// Algorithm A3.5 from "The NURBS Book" (rational formula with w=1 for non-NURBS).
     #[allow(clippy::needless_range_loop)]
     pub fn evaluate(&self, u: f64, v: f64) -> Point3<f64> {
         let uspan = self.find_u_span(u);
@@ -634,44 +635,38 @@ impl SurfaceBSpline {
         let q = self.v_degree;
         let uind = uspan - p;
 
-        if let Some(ref weights) = self.weights {
-            let mut numerator = Vector3::zeros();
-            let mut denominator = 0.0;
-            for l in 0..=q {
-                let vind = vspan - q + l;
-                for k in 0..=p {
-                    let wn = weights[uind + k][vind] * nu[k] * nv[l];
-                    numerator += wn * self.control_points[uind + k][vind].coords;
-                    denominator += wn;
-                }
+        let mut numerator = Vector3::zeros();
+        let mut denominator = 0.0;
+        for l in 0..=q {
+            let vind = vspan - q + l;
+            for k in 0..=p {
+                let wn = self.weight(uind + k, vind) * nu[k] * nv[l];
+                numerator += wn * self.control_points[uind + k][vind].coords;
+                denominator += wn;
             }
-            Point3::from(numerator / denominator)
-        } else {
-            let mut s = Point3::origin();
-            for l in 0..=q {
-                let mut temp = Vector3::zeros();
-                let vind = vspan - q + l;
-                for k in 0..=p {
-                    temp += nu[k] * self.control_points[uind + k][vind].coords;
-                }
-                s.coords += nv[l] * temp;
-            }
-            s
         }
+        Point3::from(numerator / denominator)
     }
 
     /// Compute the partial derivatives at (u, v).
     /// Returns (dS/du, dS/dv) - the first partial derivatives.
-    /// For rational (NURBS) surfaces, uses the quotient rule.
-    #[allow(clippy::needless_range_loop)]
     pub fn derivatives(&self, u: f64, v: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let (_, du, dv) = self.evaluate_and_derivatives(u, v);
+        (du, dv)
+    }
+
+    /// Evaluate the surface point and first partial derivatives at (u, v) in a single pass.
+    /// Single span-find + basis_funs_ders per direction, using rational quotient rule
+    /// (with w=1 for non-NURBS).
+    #[allow(clippy::needless_range_loop)]
+    fn evaluate_and_derivatives(
+        &self,
+        u: f64,
+        v: f64,
+    ) -> (Point3<f64>, Vector3<f64>, Vector3<f64>) {
         let uspan = self.find_u_span(u);
         let vspan = self.find_v_span(v);
 
-        let nu = basis_funs(uspan, u, self.u_degree, &self.u_knots);
-        let nv = basis_funs(vspan, v, self.v_degree, &self.v_knots);
-
-        // Compute derivative basis functions
         let nu_der = basis_funs_ders(uspan, u, self.u_degree, &self.u_knots, 1);
         let nv_der = basis_funs_ders(vspan, v, self.v_degree, &self.v_knots, 1);
 
@@ -679,67 +674,38 @@ impl SurfaceBSpline {
         let q = self.v_degree;
         let uind = uspan - p;
 
-        if let Some(ref weights) = self.weights {
-            // For rational surfaces, we need: A(u,v) = Σ w_ij N_i M_j P_ij
-            //                                  w(u,v) = Σ w_ij N_i M_j
-            // S = A/w, dS/du = (dA/du - dw/du * S) / w
-            let mut a = Vector3::zeros();
-            let mut a_du = Vector3::zeros();
-            let mut a_dv = Vector3::zeros();
-            let mut w = 0.0;
-            let mut w_du = 0.0;
-            let mut w_dv = 0.0;
+        let mut a = Vector3::zeros();
+        let mut a_du = Vector3::zeros();
+        let mut a_dv = Vector3::zeros();
+        let mut w = 0.0;
+        let mut w_du = 0.0;
+        let mut w_dv = 0.0;
 
-            for l in 0..=q {
-                let vind = vspan - q + l;
-                for k in 0..=p {
-                    let wt = weights[uind + k][vind];
-                    let pt = self.control_points[uind + k][vind].coords;
-                    let wpt = wt * pt;
+        for l in 0..=q {
+            let vind = vspan - q + l;
+            for k in 0..=p {
+                let wt = self.weight(uind + k, vind);
+                let pt = self.control_points[uind + k][vind].coords;
+                let wpt = wt * pt;
 
-                    let n0m0 = nu[k] * nv[l];
-                    let n1m0 = nu_der[1][k] * nv[l];
-                    let n0m1 = nu[k] * nv_der[1][l];
+                let n0m0 = nu_der[0][k] * nv_der[0][l];
+                let n1m0 = nu_der[1][k] * nv_der[0][l];
+                let n0m1 = nu_der[0][k] * nv_der[1][l];
 
-                    a += n0m0 * wpt;
-                    a_du += n1m0 * wpt;
-                    a_dv += n0m1 * wpt;
+                a += n0m0 * wpt;
+                a_du += n1m0 * wpt;
+                a_dv += n0m1 * wpt;
 
-                    w += wt * n0m0;
-                    w_du += wt * n1m0;
-                    w_dv += wt * n0m1;
-                }
+                w += wt * n0m0;
+                w_du += wt * n1m0;
+                w_dv += wt * n0m1;
             }
-
-            let s = a / w;
-            let du = (a_du - w_du * s) / w;
-            let dv = (a_dv - w_dv * s) / w;
-            (du, dv)
-        } else {
-            // Compute dS/du
-            let mut du = Vector3::zeros();
-            for l in 0..=q {
-                let mut temp = Vector3::zeros();
-                let vind = vspan - q + l;
-                for k in 0..=p {
-                    temp += nu_der[1][k] * self.control_points[uind + k][vind].coords;
-                }
-                du += nv[l] * temp;
-            }
-
-            // Compute dS/dv
-            let mut dv = Vector3::zeros();
-            for l in 0..=q {
-                let mut temp = Vector3::zeros();
-                let vind = vspan - q + l;
-                for k in 0..=p {
-                    temp += nu[k] * self.control_points[uind + k][vind].coords;
-                }
-                dv += nv_der[1][l] * temp;
-            }
-
-            (du, dv)
         }
+
+        let s = a / w;
+        let du = (a_du - w_du * s) / w;
+        let dv = (a_dv - w_dv * s) / w;
+        (Point3::from(s), du, dv)
     }
 
     /// Find the (u, v) parameters for a 3D point on the surface using Newton-Raphson.
@@ -785,8 +751,7 @@ impl SurfaceBSpline {
         const MAX_ITER: usize = 20;
 
         for _ in 0..MAX_ITER {
-            let s = self.evaluate(u, v);
-            let (su, sv) = self.derivatives(u, v);
+            let (s, su, sv) = self.evaluate_and_derivatives(u, v);
 
             let delta = s - point;
 
@@ -880,7 +845,8 @@ impl SurfaceBSpline {
     /// Compute partial derivatives up to order d at (u, v).
     ///
     /// Returns a 2D array SKL where SKL[k][l] = ∂^(k+l)S / ∂u^k ∂v^l.
-    /// Algorithm A3.6 from "The NURBS Book".
+    /// Algorithm A3.6 + A4.4 from "The NURBS Book" (rational quotient rule with w=1
+    /// for non-NURBS).
     #[allow(clippy::needless_range_loop)]
     pub fn derivatives_order(&self, u: f64, v: f64, d: usize) -> Vec<Vec<Vector3<f64>>> {
         let p = self.u_degree;
@@ -889,47 +855,72 @@ impl SurfaceBSpline {
         let du = d.min(p);
         let dv = d.min(q);
 
-        // Initialize result array
-        let mut skl = vec![vec![Vector3::zeros(); d + 1]; d + 1];
-
         let uspan = self.find_u_span(u);
         let vspan = self.find_v_span(v);
 
-        // Compute basis function derivatives
         let nu_ders = basis_funs_ders(uspan, u, p, &self.u_knots, du);
         let nv_ders = basis_funs_ders(vspan, v, q, &self.v_knots, dv);
 
         let uind = uspan - p;
 
-        // Compute surface point and derivatives
+        // Compute weighted point derivatives Aw[k][l] and weight derivatives wders[k][l]
+        let mut aw = vec![vec![Vector3::zeros(); d + 1]; d + 1];
+        let mut wders = vec![vec![0.0; d + 1]; d + 1];
+
         for k in 0..=du {
-            let mut temp = vec![Vector3::zeros(); q + 1];
+            let mut temp_pt = vec![Vector3::zeros(); q + 1];
+            let mut temp_w = vec![0.0; q + 1];
             for s in 0..=q {
                 let vind = vspan - q + s;
                 for r in 0..=p {
-                    temp[s] += nu_ders[k][r] * self.control_points[uind + r][vind].coords;
+                    let wt = self.weight(uind + r, vind);
+                    temp_pt[s] += (wt * nu_ders[k][r]) * self.control_points[uind + r][vind].coords;
+                    temp_w[s] += wt * nu_ders[k][r];
                 }
             }
 
             let dd = (d - k).min(dv);
             for l in 0..=dd {
                 for s in 0..=q {
-                    skl[k][l] += nv_ders[l][s] * temp[s];
+                    aw[k][l] += nv_ders[l][s] * temp_pt[s];
+                    wders[k][l] += nv_ders[l][s] * temp_w[s];
                 }
+            }
+        }
+
+        // Apply 2D quotient rule (Algorithm A4.4 from "The NURBS Book")
+        let mut skl = vec![vec![Vector3::zeros(); d + 1]; d + 1];
+
+        for k in 0..=du {
+            let dd = (d - k).min(dv);
+            for l in 0..=dd {
+                let mut v = aw[k][l];
+
+                for j in 1..=l {
+                    v -= (binomial(l, j) as f64 * wders[0][j]) * skl[k][l - j];
+                }
+
+                for i in 1..=k {
+                    v -= (binomial(k, i) as f64 * wders[i][0]) * skl[k - i][l];
+                    let mut v2 = Vector3::zeros();
+                    for j in 1..=l {
+                        v2 += (binomial(l, j) as f64 * wders[i][j]) * skl[k - i][l - j];
+                    }
+                    v -= binomial(k, i) as f64 * v2;
+                }
+
+                skl[k][l] = v / wders[0][0];
             }
         }
 
         skl
     }
 
-    /// Compute principal curvatures at (u, v) using the first and second fundamental forms.
+    /// Compute principal curvatures at (u, v) via the shape operator S = I⁻¹·II.
     ///
-    /// First fundamental form coefficients: E = S_u · S_u, F = S_u · S_v, G = S_v · S_v
-    /// Second fundamental form coefficients: L = S_uu · n, M = S_uv · n, N = S_vv · n
-    ///
-    /// Gaussian curvature: K = (LN - M²) / (EG - F²)
-    /// Mean curvature: H = (EN - 2FM + GL) / (2(EG - F²))
-    /// Principal curvatures: κ₁,₂ = H ± sqrt(H² - K)
+    /// First fundamental form I = [[E,F],[F,G]], second fundamental form II = [[L,M],[M,N]].
+    /// Gaussian curvature K = det(S), mean curvature H = trace(S)/2.
+    /// Principal curvatures: κ₁,₂ = H ± sqrt(H² - K).
     pub fn curvature_at(&self, u: f64, v: f64) -> super::faces::SurfaceCurvature {
         let d = self.derivatives_order(u, v, 2);
 
@@ -943,48 +934,32 @@ impl SurfaceBSpline {
         let n = s_u.cross(&s_v);
         let n_len = n.norm();
         if n_len < METRIC_TOL {
-            // Degenerate surface normal (e.g., at a pole)
             return super::faces::SurfaceCurvature::zero();
         }
         let n = n / n_len;
 
-        // First fundamental form coefficients
-        let e = s_u.dot(&s_u);
-        let f = s_u.dot(&s_v);
-        let g = s_v.dot(&s_v);
+        // First fundamental form (metric tensor)
+        let first = Matrix2::new(s_u.dot(&s_u), s_u.dot(&s_v), s_u.dot(&s_v), s_v.dot(&s_v));
 
-        // Second fundamental form coefficients
-        let l = s_uu.dot(&n);
-        let m = s_uv.dot(&n);
-        let nn = s_vv.dot(&n); // Using 'nn' to avoid shadowing the normal
+        // Second fundamental form
+        let second = Matrix2::new(s_uu.dot(&n), s_uv.dot(&n), s_uv.dot(&n), s_vv.dot(&n));
 
-        // Determinant of first fundamental form
-        let eg_f2 = e * g - f * f;
-        if eg_f2.abs() < METRIC_TOL {
-            // Degenerate metric
+        let Some(first_inv) = first.try_inverse() else {
             return super::faces::SurfaceCurvature::zero();
-        }
-
-        // Gaussian curvature: K = (LN - M²) / (EG - F²)
-        let gaussian = (l * nn - m * m) / eg_f2;
-
-        // Mean curvature: H = (EN - 2FM + GL) / (2(EG - F²))
-        let mean = (e * nn - 2.0 * f * m + g * l) / (2.0 * eg_f2);
-
-        // Principal curvatures: κ = H ± sqrt(H² - K)
-        let discriminant = mean * mean - gaussian;
-        let sqrt_disc = if discriminant > 0.0 {
-            discriminant.sqrt()
-        } else {
-            0.0 // Near umbilical point
         };
 
-        let kappa_1 = mean + sqrt_disc;
-        let kappa_2 = mean - sqrt_disc;
+        // Shape operator S = I⁻¹·II
+        let shape = first_inv * second;
+        let gaussian = shape.determinant();
+        let mean = shape.trace() / 2.0;
+
+        // Principal curvatures: κ = H ± sqrt(H² - K)
+        let discriminant = (mean * mean - gaussian).max(0.0);
+        let sqrt_disc = discriminant.sqrt();
 
         super::faces::SurfaceCurvature {
-            kappa_1,
-            kappa_2,
+            kappa_1: mean + sqrt_disc,
+            kappa_2: mean - sqrt_disc,
             gaussian,
             mean,
         }
@@ -1234,5 +1209,125 @@ mod tests {
         assert!(tight > loose, "tight={tight} should be > loose={loose}");
         // Curved BSpline should need more than the minimum 8
         assert!(tight > 8, "tight={tight} should be > 8");
+    }
+
+    // =========================================================================
+    // SurfaceBSpline tests
+    // =========================================================================
+
+    /// Build a rational quadratic cylindrical patch (quarter-cylinder, radius R, height H).
+    /// u ∈ [0,1] around the circumference, v ∈ [0,1] along the axis.
+    /// Exact curvature: κ₁ = 1/R around circumference, κ₂ = 0 along axis.
+    fn make_rational_cylinder(radius: f64, height: f64) -> SurfaceBSpline {
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let r = radius;
+        // Quarter-circle control points in XY plane at z=0 and z=H
+        let cp = vec![
+            vec![Point3::new(r, 0.0, 0.0), Point3::new(r, 0.0, height)],
+            vec![Point3::new(r, r, 0.0), Point3::new(r, r, height)],
+            vec![Point3::new(0.0, r, 0.0), Point3::new(0.0, r, height)],
+        ];
+        let weights = Some(vec![vec![1.0, 1.0], vec![w, w], vec![1.0, 1.0]]);
+        SurfaceBSpline {
+            u_degree: 2,
+            v_degree: 1,
+            control_points: cp,
+            u_knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            weights,
+        }
+    }
+
+    #[test]
+    fn test_rational_surface_evaluate_on_cylinder() {
+        let r = 5.0;
+        let surf = make_rational_cylinder(r, 10.0);
+        // All points should lie on a cylinder of radius R
+        for i in 0..=10 {
+            for j in 0..=4 {
+                let u = i as f64 / 10.0;
+                let v = j as f64 / 4.0;
+                let p = surf.evaluate(u, v);
+                let dist = (p.x * p.x + p.y * p.y).sqrt();
+                assert_relative_eq!(dist, r, epsilon = 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rational_surface_derivatives_order_vs_finite_diff() {
+        let r = 5.0;
+        let surf = make_rational_cylinder(r, 10.0);
+        let eps = 1e-7;
+
+        for &(u, v) in &[(0.3, 0.4), (0.5, 0.5), (0.7, 0.2)] {
+            let d = surf.derivatives_order(u, v, 2);
+
+            // Check 1st derivatives vs finite differences
+            let p_up = surf.evaluate(u + eps, v);
+            let p_um = surf.evaluate(u - eps, v);
+            let fd_u = (p_up - p_um) / (2.0 * eps);
+            assert_relative_eq!(d[1][0].x, fd_u.x, epsilon = 1e-4);
+            assert_relative_eq!(d[1][0].y, fd_u.y, epsilon = 1e-4);
+            assert_relative_eq!(d[1][0].z, fd_u.z, epsilon = 1e-4);
+
+            let p_vp = surf.evaluate(u, v + eps);
+            let p_vm = surf.evaluate(u, v - eps);
+            let fd_v = (p_vp - p_vm) / (2.0 * eps);
+            assert_relative_eq!(d[0][1].x, fd_v.x, epsilon = 1e-4);
+            assert_relative_eq!(d[0][1].y, fd_v.y, epsilon = 1e-4);
+            assert_relative_eq!(d[0][1].z, fd_v.z, epsilon = 1e-4);
+
+            // Check 2nd derivative S_uu vs finite difference of S_u
+            let d_up = surf.derivatives_order(u + eps, v, 1);
+            let d_um = surf.derivatives_order(u - eps, v, 1);
+            let fd_uu = (d_up[1][0] - d_um[1][0]) / (2.0 * eps);
+            assert_relative_eq!(d[2][0].x, fd_uu.x, epsilon = 1e-3);
+            assert_relative_eq!(d[2][0].y, fd_uu.y, epsilon = 1e-3);
+            assert_relative_eq!(d[2][0].z, fd_uu.z, epsilon = 1e-3);
+        }
+    }
+
+    #[test]
+    fn test_rational_surface_curvature() {
+        let r = 5.0;
+        let surf = make_rational_cylinder(r, 10.0);
+        let expected_kappa = 1.0 / r;
+
+        // Test curvature at several interior points
+        for &(u, v) in &[(0.25, 0.5), (0.5, 0.5), (0.75, 0.3)] {
+            let curv = surf.curvature_at(u, v);
+            // κ₁ = 1/R (circumferential), κ₂ = 0 (axial)
+            let (kmax, kmin) = if curv.kappa_1.abs() > curv.kappa_2.abs() {
+                (curv.kappa_1, curv.kappa_2)
+            } else {
+                (curv.kappa_2, curv.kappa_1)
+            };
+            assert_relative_eq!(kmax.abs(), expected_kappa, epsilon = 1e-6);
+            assert_relative_eq!(kmin, 0.0, epsilon = 1e-6);
+            assert_relative_eq!(curv.gaussian, 0.0, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_non_rational_surface_derivatives_order() {
+        // Bilinear patch (non-rational): S(u,v) = (u, v, 0)
+        let surf = SurfaceBSpline {
+            u_degree: 1,
+            v_degree: 1,
+            control_points: vec![
+                vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)],
+                vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
+            ],
+            u_knots: vec![0.0, 0.0, 1.0, 1.0],
+            v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            weights: None,
+        };
+
+        let d = surf.derivatives_order(0.5, 0.5, 2);
+        // S(u,v) = (u, v, 0) → S_u = (1,0,0), S_v = (0,1,0), all 2nd derivs = 0
+        assert_relative_eq!(d[0][0], Vector3::new(0.5, 0.5, 0.0), epsilon = 1e-10);
+        assert_relative_eq!(d[1][0], Vector3::new(1.0, 0.0, 0.0), epsilon = 1e-10);
+        assert_relative_eq!(d[0][1], Vector3::new(0.0, 1.0, 0.0), epsilon = 1e-10);
     }
 }
