@@ -30,6 +30,7 @@ pub enum ShadingMode {
 }
 
 impl ShadingMode {
+    #[must_use]
     pub fn next(self) -> Self {
         match self {
             Self::Smooth => Self::Flat,

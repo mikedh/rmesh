@@ -9,7 +9,7 @@
 //! - [`discretize`] - Discretization algorithms (De Casteljau, arc stepping)
 //! - [`svg`] - SVG parsing/export for Path2D
 //! - [`graph`] - Entity connectivity graph and ring detection
-//! - [`polygon`] - Polygon2D with hole support using i_overlay
+//! - [`polygons`] - Polygon2D with hole support using i_overlay
 //!
 //! # Indexed Vertex Storage
 //!
@@ -54,7 +54,7 @@
 pub mod discretize;
 pub mod entity;
 pub mod graph;
-pub mod polygon;
+pub mod polygons;
 pub mod svg;
 
 /// Default deviation ratio for curve discretization.
@@ -102,7 +102,7 @@ pub use entity::{
     Winding,
 };
 pub use graph::EntityGraph;
-pub use polygon::Polygon2D;
+pub use polygons::Polygon2D;
 pub use svg::SvgError;
 
 // =============================================================================
@@ -641,7 +641,7 @@ impl Path2D {
     /// Results are cached on first access.
     pub fn polygons(&self) -> &[Polygon2D] {
         self.cache_polygons
-            .get_or_init(|| polygon::polygons_from_path(self, resolve_deviation!(self)))
+            .get_or_init(|| polygons::polygons_from_path(self, resolve_deviation!(self)))
     }
 
     /// Triangulate the path's polygons into a flat triangle mesh.
@@ -812,7 +812,7 @@ impl Path2D {
         if rings.is_empty() {
             return 0.0;
         }
-        polygon::signed_area(&rings[0]).abs()
+        polygons::signed_area(&rings[0]).abs()
     }
 }
 

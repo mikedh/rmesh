@@ -9,7 +9,7 @@ mod viewer_thread;
 use anyhow::Result;
 use nalgebra::Point2;
 use rmesh::path::Path2D;
-use rmesh::path::polygon::Polygon2D;
+use rmesh::path::Polygon2D;
 use rmesh::scene::Scene;
 
 /// A filled polygon: (vertices, triangle indices, RGBA color)

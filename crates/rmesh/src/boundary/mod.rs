@@ -2,7 +2,6 @@ pub mod bspline;
 pub(crate) mod cdt;
 pub mod faces;
 pub(crate) mod hex_grid;
-pub(crate) mod polygon_query;
 pub mod step;
 pub mod tesselate;
 pub mod topology;

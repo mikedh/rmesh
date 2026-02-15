@@ -97,8 +97,8 @@ fn validate_triangulation(
     triangles: &[[usize; 3]],
     local_to_pool: &[usize],
     boundary_edges: &HashSet<(usize, usize)>,
-    face_idx: usize,
-    phase: &str,
+    _face_idx: usize,
+    _phase: &str,
     skip_self_loops: bool,
 ) -> usize {
     let mut warnings = 0;
@@ -907,32 +907,34 @@ fn triangulate_face_robust_pts(
         .collect();
 
     // Try 2: CDT in best-fit 3D plane projection (skip if CDT diverged)
-    if !cdt_diverged && positions.len() >= 3 {
-        if let Ok(plane) = Plane::from_points(&positions, true) {
-            let pts_2d: Vec<(f64, f64)> = plane
-                .to_2d(&positions)
-                .into_iter()
-                .map(|p| (p.x, p.y))
-                .collect();
+    if !cdt_diverged
+        && positions.len() >= 3
+        && let Ok(plane) = Plane::from_points(&positions, true)
+    {
+        let pts_2d: Vec<(f64, f64)> = plane
+            .to_2d(&positions)
+            .into_iter()
+            .map(|p| (p.x, p.y))
+            .collect();
 
-            match cdt::triangulate_contours(&pts_2d, contours) {
-                Ok(tris) => {
-                    let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
-                    if contours_complete_with(&result, &expected) {
-                        return (result, 1, false);
-                    }
-                    track_best(&result, 1, &expected);
+        match cdt::triangulate_contours(&pts_2d, contours) {
+            Ok(tris) => {
+                let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
+                if contours_complete_with(&result, &expected) {
+                    return (result, 1, false);
                 }
-                Err(e) if is_diverged(&e) => {
-                    cdt_diverged = true;
-                }
-                Err(_) => {}
+                track_best(&result, 1, &expected);
             }
+            Err(e) if is_diverged(&e) => {
+                cdt_diverged = true;
+            }
+            Err(_) => {}
         }
     }
 
     // Try 2b: CDT in axis-aligned plane projections (XY, XZ, YZ) — skip if CDT diverged
     if !cdt_diverged && positions.len() >= 3 {
+        #[allow(clippy::type_complexity)]
         let projections: [(fn(&Point3<f64>) -> (f64, f64), &str); 3] = [
             (|p| (p.x, p.y), "XY"),
             (|p| (p.x, p.z), "XZ"),
@@ -994,10 +996,10 @@ fn triangulate_face_robust_pts(
     let fan_count = count_boundary_edges(&fan, &expected);
 
     // Return best incomplete if it preserves more boundary edges than fan
-    if let Some((best_tris, best_count, _)) = best_incomplete {
-        if best_count > fan_count {
-            return (best_tris, 3, cdt_diverged);
-        }
+    if let Some((best_tris, best_count, _)) = best_incomplete
+        && best_count > fan_count
+    {
+        return (best_tris, 3, cdt_diverged);
     }
 
     (fan, 4, cdt_diverged)
@@ -1111,12 +1113,12 @@ fn tessellate_face(
     }
 
     // 1.5. Add pole vertex from vertex loop as an interior CDT point
-    if let Some(pole_brep_idx) = vertex_loop_vertex {
-        if let Some(&pole_pool_idx) = brep_vertex_to_pool.get(&pole_brep_idx) {
-            let pole_point = &pool_vertices[pole_pool_idx];
-            let pole_uv = surface.to_parametric(pole_point);
-            state.add_vertex(pole_uv, pole_pool_idx);
-        }
+    if let Some(pole_brep_idx) = vertex_loop_vertex
+        && let Some(&pole_pool_idx) = brep_vertex_to_pool.get(&pole_brep_idx)
+    {
+        let pole_point = &pool_vertices[pole_pool_idx];
+        let pole_uv = surface.to_parametric(pole_point);
+        state.add_vertex(pole_uv, pole_pool_idx);
     }
 
     // Record boundary vertex count before adding interior points
@@ -1149,7 +1151,7 @@ fn tessellate_face(
     let (dedup_pts, dedup_contours, dedup_map) = dedup_by_pool(&state, &contours);
 
     // 3. CDT triangulation
-    let (dedup_tris, _strategy, cdt_diverged) = triangulate_face_robust_pts(
+    let (dedup_tris, strategy, cdt_diverged) = triangulate_face_robust_pts(
         &dedup_pts,
         &dedup_contours,
         &state,
@@ -1167,7 +1169,7 @@ fn tessellate_face(
     // 3.5. If CDT with hex-grid interior points failed boundary check, retry without them.
     // Skip this retry if CDT diverged — same constraints will hit the same O(n²) behavior.
     let expected_edges = contour_edge_set(&contours);
-    let mut final_strategy = _strategy;
+    let mut final_strategy = strategy;
     if !cdt_diverged
         && !contours_complete_with(&mapped_tris, &expected_edges)
         && n_boundary < state.vertices_uv.len()
@@ -1511,7 +1513,7 @@ impl<'a> ShellTessellator<'a> {
 
                     // Check each inner vertex against the outer polygon
                     let inside =
-                        super::polygon_query::point_in_polygon(&outer_uvs, &[], &inner_uvs);
+                        crate::path::polygons::point_in_polygon(&outer_uvs, &[], &inner_uvs);
                     for (i, inner_uv) in inner_uvs.iter().enumerate() {
                         if !inside[i] {
                             // Find closest outer edge
@@ -1733,6 +1735,7 @@ impl<'a> ShellTessellator<'a> {
             .collect();
 
         // Serial merge: rewrite sentinel indices to real pool indices
+        #[allow(clippy::unused_enumerate_index)]
         for (_face_idx, (mut state, new_verts)) in face_results.into_iter().enumerate() {
             let actual_base = self.vertices.len();
             for idx in &mut state.local_to_pool {
@@ -2843,7 +2846,7 @@ mod tests {
 
     #[test]
     fn test_point_in_polygon_convex() {
-        use crate::boundary::polygon_query::point_in_polygon;
+        use crate::path::polygons::point_in_polygon;
         // Unit square: (0,0), (1,0), (1,1), (0,1)
         let square = vec![
             Point2::new(0.0, 0.0),
@@ -2861,7 +2864,7 @@ mod tests {
 
     #[test]
     fn test_point_in_polygon_concave() {
-        use crate::boundary::polygon_query::point_in_polygon;
+        use crate::path::polygons::point_in_polygon;
         // L-shape: concave polygon
         let l_shape = vec![
             Point2::new(0.0, 0.0),
@@ -2882,7 +2885,7 @@ mod tests {
 
     #[test]
     fn test_point_in_polygon_degenerate() {
-        use crate::boundary::polygon_query::point_in_polygon;
+        use crate::path::polygons::point_in_polygon;
         // Fewer than 3 points
         let line = vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)];
         assert!(!point_in_polygon(&line, &[], &[Point2::new(0.5, 0.0)])[0]);

@@ -2104,7 +2104,7 @@ mod tests {
         let t = Triangulation::build_from_contours(&pts, &contours).unwrap();
 
         // Verify no triangle centroid is inside any hole or outside the outer contour
-        use crate::boundary::polygon_query::point_in_polygon;
+        use crate::path::polygons::point_in_polygon;
         use nalgebra::Point2;
 
         let to_p2 = |s: &[(f64, f64)]| -> Vec<Point2<f64>> {

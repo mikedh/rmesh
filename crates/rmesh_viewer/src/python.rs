@@ -111,7 +111,7 @@ fn show_polygon2d(
     height: u32,
     background: Option<[f32; 3]>,
 ) -> PyResult<()> {
-    use rmesh::path::polygon::Polygon2D;
+    use rmesh::path::Polygon2D;
 
     let ext: Vec<Point2<f64>> = exterior
         .as_array()

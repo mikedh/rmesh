@@ -434,11 +434,11 @@ impl CurveBSpline {
             let t1 = t0 + dt;
             let p0 = self.evaluate(t0);
             let p1 = self.evaluate(t1);
-            let p_mid = self.evaluate((t0 + t1) / 2.0);
+            let p_mid = self.evaluate(f64::midpoint(t0, t1));
             let linear_mid = Point3::new(
-                (p0.x + p1.x) / 2.0,
-                (p0.y + p1.y) / 2.0,
-                (p0.z + p1.z) / 2.0,
+                f64::midpoint(p0.x, p1.x),
+                f64::midpoint(p0.y, p1.y),
+                f64::midpoint(p0.z, p1.z),
             );
             max_dev = max_dev.max((p_mid - linear_mid).norm());
         }
@@ -446,7 +446,10 @@ impl CurveBSpline {
             n_probe
         } else {
             let ratio = (max_dev / tolerance).sqrt();
-            (n_probe as f64 * ratio).ceil() as usize
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                (n_probe as f64 * ratio).ceil() as usize
+            }
         }
     }
 }

@@ -156,6 +156,7 @@ impl SlabIndex {
             };
         }
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let num_slabs = ((n as f64).sqrt().ceil() as usize).min(n).max(1);
         let inv_slab_height = num_slabs as f64 / y_range;
 
@@ -165,16 +166,19 @@ impl SlabIndex {
         for i in 0..n {
             let j = if i + 1 < n { i + 1 } else { 0 };
             let (xi, yi, xj, yj) = (polygon[i].x, polygon[i].y, polygon[j].x, polygon[j].y);
+            #[allow(clippy::float_cmp)] // Exact comparison intentional: skip horizontal edges
             if yi == yj {
                 continue;
             }
             let slope = (xj - xi) / (yj - yi);
             let x_base = xi - slope * yi;
             let (ey_min, ey_max) = if yi < yj { (yi, yj) } else { (yj, yi) };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let lo = ((ey_min - y_min) * inv_slab_height) as usize;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let hi = ((ey_max - y_min) * inv_slab_height).ceil() as usize;
-            for s in lo.min(num_slabs)..hi.min(num_slabs) {
-                slabs[s].extend_from_slice(&[slope, x_base, yi, yj]);
+            for slab in &mut slabs[lo.min(num_slabs)..hi.min(num_slabs)] {
+                slab.extend_from_slice(&[slope, x_base, yi, yj]);
             }
         }
 
@@ -197,6 +201,7 @@ impl SlabIndex {
             return false;
         }
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let slab_idx = ((py - self.bbox[1]) * self.inv_slab_height) as usize;
         let slab_idx = slab_idx.min(num_slabs - 1);
 
@@ -590,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_cross_check_polygon2d_oracle() {
-        use crate::path::polygon::Polygon2D;
+        use crate::path::Polygon2D;
 
         let mut rng = Xorshift64::new(7777);
         for trial in 0..1000 {
@@ -604,12 +609,12 @@ mod tests {
 
             let poly2d = Polygon2D::with_holes(exterior.clone(), holes_owned.clone());
 
+            let oracle = poly2d.contains(&points);
             for (i, pt) in points.iter().enumerate() {
-                let oracle = poly2d.contains(*pt);
                 assert_eq!(
-                    batch[i], oracle,
-                    "trial {trial}, point {i} ({}, {}): batch={} oracle={oracle}",
-                    pt.x, pt.y, batch[i],
+                    batch[i], oracle[i],
+                    "trial {trial}, point {i} ({}, {}): batch={} oracle={}",
+                    pt.x, pt.y, batch[i], oracle[i],
                 );
             }
         }

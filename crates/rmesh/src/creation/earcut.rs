@@ -59,6 +59,8 @@ struct Node<T: Float> {
     steiner: bool,
 }
 
+#[derive(Copy, Clone)]
+#[allow(clippy::struct_field_names)]
 struct LinkInfo {
     prev_i: NodeIndex,
     next_i: NodeIndex,
@@ -204,7 +206,7 @@ impl<T: Float> Earcut<T> {
                 let idx = start + i;
                 last_i = Some(insert_node(&mut self.nodes, idx as u32, xy, last_i));
             }
-        };
+        }
 
         if let Some(li) = last_i {
             let last = node!(self.nodes, li);
@@ -232,6 +234,7 @@ impl<T: Float> Earcut<T> {
                 self.data.len()
             };
             if let Some(list_i) = self.linked_list(start, end, false) {
+                #[allow(clippy::mut_mut)]
                 let list = &mut node_mut!(self.nodes, list_i);
                 if list_i == list.next_i {
                     list.steiner = true;
@@ -253,7 +256,7 @@ impl<T: Float> Earcut<T> {
                 Some(Ordering::Equal) => {}
                 Some(ordering) => return ordering,
                 None => return Ordering::Equal,
-            };
+            }
             let a_slope = (node!(self.nodes, a.next_i).xy[1] - a.xy[1])
                 / (node!(self.nodes, a.next_i).xy[0] - a.xy[0]);
             let b_slope = (node!(self.nodes, b.next_i).xy[1] - b.xy[1])
@@ -301,10 +304,10 @@ fn earcut_linked<T: Float>(
         }
         let ni = ear.next_i;
 
-        let (is_ear, prev, next) = if inv_size != T::zero() {
-            is_ear_hashed(nodes, ear, min_x, min_y, inv_size)
-        } else {
+        let (is_ear, prev, next) = if inv_size == T::zero() {
             is_ear(nodes, ear)
+        } else {
+            is_ear_hashed(nodes, ear, min_x, min_y, inv_size)
         };
         if is_ear {
             let next_i = next.i;
@@ -402,15 +405,14 @@ fn is_ear_hashed<'a, T: Float>(
     let mut o_p = ear.prev_z_i.map(|i| node!(nodes, i));
     let mut o_n = ear.next_z_i.map(|i| node!(nodes, i));
 
-    loop {
-        let Some(p) = o_p else { break };
+    while let Some(p) = o_p {
         if p.z < min_z {
             break;
-        };
+        }
         let Some(n) = o_n else { break };
         if n.z > max_z {
             break;
-        };
+        }
 
         if ((p.xy[0] >= xy_min[0])
             & (p.xy[0] <= xy_max[0])
@@ -440,7 +442,7 @@ fn is_ear_hashed<'a, T: Float>(
     while let Some(p) = o_p {
         if p.z < min_z {
             break;
-        };
+        }
         if ((p.xy[0] >= xy_min[0])
             & (p.xy[0] <= xy_max[0])
             & (p.xy[1] >= xy_min[1])
@@ -457,7 +459,7 @@ fn is_ear_hashed<'a, T: Float>(
     while let Some(n) = o_n {
         if n.z > max_z {
             break;
-        };
+        }
         if ((n.xy[0] >= xy_min[0])
             & (n.xy[0] <= xy_max[0])
             & (n.xy[1] >= xy_min[1])
@@ -898,7 +900,7 @@ fn filter_points<T: Float>(
                 return end_i;
             }
             p = p_next;
-        };
+        }
     }
 }
 
@@ -993,11 +995,11 @@ fn signed_area<T: Float>(data: &[[T; 2]], start: usize, end: usize) -> T {
 fn z_order<T: Float>(xy: [T; 2], min_x: T, min_y: T, inv_size: T) -> i32 {
     let x = ((xy[0] - min_x) * inv_size).to_u32().unwrap_or(0);
     let y = ((xy[1] - min_y) * inv_size).to_u32().unwrap_or(0);
-    let mut xy = (x as i64) << 32 | y as i64;
-    xy = (xy | (xy << 8)) & 0x00FF00FF00FF00FF;
-    xy = (xy | (xy << 4)) & 0x0F0F0F0F0F0F0F0F;
-    xy = (xy | (xy << 2)) & 0x3333333333333333;
-    xy = (xy | (xy << 1)) & 0x5555555555555555;
+    let mut xy = i64::from(x) << 32 | i64::from(y);
+    xy = (xy | (xy << 8)) & 0x00FF_00FF_00FF_00FF;
+    xy = (xy | (xy << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    xy = (xy | (xy << 2)) & 0x3333_3333_3333_3333;
+    xy = (xy | (xy << 1)) & 0x5555_5555_5555_5555;
     (xy >> 32 | xy << 1) as i32
 }
 
@@ -1025,5 +1027,5 @@ fn on_segment<T: Float>(p: &Node<T>, q: &Node<T>, r: &Node<T>) -> bool {
 }
 
 fn sign<T: Float>(v: T) -> i32 {
-    (v > T::zero()) as i32 - (v < T::zero()) as i32
+    i32::from(v > T::zero()) - i32::from(v < T::zero())
 }

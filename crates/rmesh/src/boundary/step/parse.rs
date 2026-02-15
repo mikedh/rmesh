@@ -119,7 +119,7 @@ fn parse_select_raw(s: &str) -> IResult<'_, &str> {
     for i in 0..bytes.len() {
         match bytes[i] {
             b'(' => depth += 1,
-            b')' if depth == 0 => {
+            b')' | b',' if depth == 0 => {
                 return if i == 0 {
                     nom_err(s, ErrorKind::Alpha)
                 } else {
@@ -127,13 +127,6 @@ fn parse_select_raw(s: &str) -> IResult<'_, &str> {
                 };
             }
             b')' => depth -= 1,
-            b',' if depth == 0 => {
-                return if i == 0 {
-                    nom_err(s, ErrorKind::Alpha)
-                } else {
-                    Ok((&s[i..], &s[..i]))
-                };
-            }
             _ => {}
         }
     }

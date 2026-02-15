@@ -10,7 +10,7 @@ use nalgebra::Point2;
 
 use super::Surface;
 use super::faces::{CURVATURE_TOL, GEOMETRY_TOL};
-use super::polygon_query;
+use crate::path::polygons::point_in_polygon;
 
 /// Maximum interior points per face.
 const MAX_INTERIOR_POINTS: usize = 256;
@@ -184,7 +184,7 @@ fn generate_hex_grid(
     }
 
     // Batch point-in-polygon with hole support
-    let inside = polygon_query::point_in_polygon(boundary, holes, &candidates);
+    let inside = point_in_polygon(boundary, holes, &candidates);
 
     // Filter: keep points that are inside the polygon and have valid curvature spacing
     let span = (u_max - u_min).max(v_max - v_min);

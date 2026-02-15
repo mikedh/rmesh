@@ -527,12 +527,12 @@ fn convert_loop<'a>(
         );
         let (final_edge_idx, flip) = if let Some(candidates) = vertex_pair_map.get(&vp) {
             // Check curve midpoints to confirm geometric match
-            let t_mid = (edge.t_start + edge.t_end) / 2.0;
+            let t_mid = f64::midpoint(edge.t_start, edge.t_end);
             let mid = model.curves[edge.curve].evaluate(t_mid);
             let mut found = None;
             for &candidate_idx in candidates {
                 let cand = &model.edges[candidate_idx];
-                let ct_mid = (cand.t_start + cand.t_end) / 2.0;
+                let ct_mid = f64::midpoint(cand.t_start, cand.t_end);
                 let cmid = model.curves[cand.curve].evaluate(ct_mid);
                 if (mid - cmid).norm_squared() < EDGE_MERGE_TOL_SQ {
                     let needs_flip = cand.start_vertex != edge.start_vertex;

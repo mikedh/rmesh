@@ -8,7 +8,7 @@
 //! When BREP data is available, discrete polygon rings are converted
 //! to analytical `Path2D` entities (circles, arcs) via `ring_to_segments`.
 
-use crate::path::polygon::signed_area;
+use crate::path::polygons::{Contour, Shape, shapes_to_polygons, signed_area};
 use crate::path::{Arc2, Circle2, Line, Path2D, Polygon2D, Segment2D, Winding};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::solver::{Precision, Solver};
@@ -18,9 +18,6 @@ use kiddo::ImmutableKdTree;
 use kiddo::SquaredEuclidean;
 use nalgebra::{Matrix4, Point2, Point3, Vector3};
 use rayon::prelude::*;
-
-type Contour = Vec<[f64; 2]>;
-type Shape = Vec<Contour>;
 
 /// Absolute tolerance for vertex snapping (tied to i_overlay MEDIUM_HIGH precision).
 const EPSILON_MERGE: f64 = 1e-8;
@@ -508,26 +505,6 @@ fn clip_face(
         pts.reverse();
     }
     Some(pts)
-}
-
-/// Convert i_overlay shapes to `Vec<Polygon2D>`.
-fn shapes_to_polygons(shapes: &[Shape], to_3d: Option<Matrix4<f64>>) -> Vec<Polygon2D> {
-    shapes
-        .iter()
-        .filter(|s| !s.is_empty() && !s[0].is_empty())
-        .map(|shape| {
-            let exterior = shape[0].iter().map(|p| Point2::new(p[0], p[1])).collect();
-            let interiors = shape[1..]
-                .iter()
-                .map(|c| c.iter().map(|p| Point2::new(p[0], p[1])).collect())
-                .collect();
-            Polygon2D {
-                exterior,
-                interiors,
-                to_3d,
-            }
-        })
-        .collect()
 }
 
 /// Convert a discrete ring of points into a sequence of `Segment2D`,
