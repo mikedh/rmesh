@@ -9,8 +9,7 @@
 pub mod feature;
 
 use anyhow::Result;
-use approx::relative_eq;
-use nalgebra::{Matrix3, Matrix4, Point2, Point3, Rotation3, Transform3, Unit, Vector3};
+use nalgebra::{Isometry3, Matrix3, Matrix4, Point2, Point3, Rotation3, UnitQuaternion, Unit, Vector3};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::mesh::Trimesh;
@@ -462,12 +461,12 @@ impl Plane {
     /// transform
     ///   The transformation matrix that moves from the XY plane to this plane.
     pub fn transform_to_2d(&self) -> Matrix4<f64> {
-        // this transform aligns the vectors then offsets the origin
-        align_vectors(self.normal, Vector3::z()).append_translation(&Vector3::new(
-            -self.origin.x,
-            -self.origin.y,
-            -self.origin.z,
-        ))
+        // Rotation that maps our normal onto Z, then translate so
+        // the plane origin maps to the world origin.
+        let rotation = align_vectors(self.normal, Vector3::z());
+        let translation = (rotation * (-self.origin.coords)).into();
+        let rotation = UnitQuaternion::from_rotation_matrix(&rotation);
+        Isometry3::from_parts(translation, rotation).to_homogeneous()
     }
 
     /// Project 3D points onto the plane defined by this object.
@@ -529,32 +528,15 @@ impl Plane {
 /// -------------
 /// rotation
 ///   The rotation matrix that rotates `a` to `b`.
-pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Matrix4<f64> {
-    // Normalize the input vectors
+pub fn align_vectors(a: Vector3<f64>, b: Vector3<f64>) -> Rotation3<f64> {
     let a = Unit::new_normalize(a);
     let b = Unit::new_normalize(b);
 
-    // if they are the same vector we can just return the identity matrix
-    if relative_eq!(a, b, epsilon = f64::EPSILON) {
-        return Transform3::identity().to_homogeneous();
-    }
-
-    // find the axis as the mutually perpendicular vector from the cross product
-    let axis = a.cross(&b);
-    // find the angle between the two vectors
-    let angle = a.dot(&b).acos();
-
-    if axis.norm() < f64::EPSILON {
-        // If the axis is zero here since we already checked for equality
-        // it means the vectors are exactly reverse of each other
+    // `rotation_between` returns None for anti-parallel vectors
+    Rotation3::rotation_between(a.as_ref(), b.as_ref()).unwrap_or_else(|| {
         let perp = Unit::new_normalize(perpendicular(&a));
-        // we can rotate by 180 degrees around any perpendicular axis
-        return Rotation3::from_axis_angle(&perp, std::f64::consts::PI).to_homogeneous();
-    }
-
-    // Normalize the axis and create the rotation matrix
-    let axis = Unit::new_normalize(axis);
-    Rotation3::from_axis_angle(&axis, angle).to_homogeneous()
+        Rotation3::from_axis_angle(&perp, std::f64::consts::PI)
+    })
 }
 
 /// Find an arbitrary vector that is perpendicular to a
@@ -614,7 +596,7 @@ mod tests {
             let rotation = align_vectors(a, b);
 
             // Check if the rotation matrix rotates a to b
-            let rotated_a = rotation * a.to_homogeneous();
+            let rotated_a = rotation * a;
             assert_relative_eq!(rotated_a.x, b.x, epsilon = 1e-6);
             assert_relative_eq!(rotated_a.y, b.y, epsilon = 1e-6);
         }

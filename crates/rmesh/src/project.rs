@@ -412,15 +412,11 @@ pub fn project_polygons(
         }
 
         // 4. Convert accumulated shapes to Polygon2D
-        //    Adjust to_3d so (x, y, 0) maps to the plane at this level,
-        //    i.e. shift the translation by level * normal (column 2 of to_3d).
+        //    Compose to_3d with a local-frame Z translation so that
+        //    (x, y, 0) maps to the plane at this level.
         if !accumulated.is_empty() {
             let level_to_3d = to_3d.map(|base| {
-                let mut m = base;
-                m[(0, 3)] += level * m[(0, 2)];
-                m[(1, 3)] += level * m[(1, 2)];
-                m[(2, 3)] += level * m[(2, 2)];
-                m
+                base * Matrix4::new_translation(&Vector3::new(0.0, 0.0, level))
             });
             let polygons = shapes_to_polygons(&accumulated, level_to_3d);
             if !polygons.is_empty() {
@@ -887,6 +883,58 @@ mod tests {
             let polys = results[i].as_ref().expect("Should have projection");
             let area: f64 = polys.iter().map(|p| p.area()).sum();
             assert_relative_eq!(area, 1.0, epsilon = 0.1);
+        }
+    }
+
+    #[test]
+    fn test_project_to_3d_offset_origin() {
+        // A cube placed far from the world origin: verify that
+        // reconstructed 3D vertices land inside the cube's AABB,
+        // not 1000 miles away due to a broken transform.
+        let offset = Vector3::new(100.0, -200.0, 50.0);
+        let extents = [2.0, 2.0, 2.0];
+        let base = create_box(&extents);
+        let verts_3d: Vec<Point3<f64>> = base.vertices.iter().map(|v| v + offset).collect();
+
+        let center = Point3::from(offset);
+        let normal = Vector3::new(0.0, 0.0, 1.0);
+        let plane = Plane::new(normal, center);
+
+        let dots = vertex_dots(&verts_3d, &normal, &center);
+        let projected = plane.to_2d(&verts_3d);
+        let to_3d = plane.transform_to_2d().try_inverse();
+        // levels are negative (below the origin plane)
+        let levels = vec![-0.8, -0.4, 0.0];
+
+        let results = project_polygons(&base.faces, &dots, &projected, &levels, to_3d);
+
+        // Cube AABB
+        let half = extents[0] / 2.0;
+        let aabb_min = center - Vector3::new(half, half, half);
+        let aabb_max = center + Vector3::new(half, half, half);
+
+        for (i, level) in levels.iter().enumerate() {
+            let polys = results[i].as_ref().expect("should have projection");
+            for poly in polys {
+                let to_3d = poly.to_3d.expect("should have to_3d");
+                for p in &poly.exterior {
+                    let p3 = to_3d.transform_point(&Point3::new(p.x, p.y, 0.0));
+                    // Height relative to origin should equal the level
+                    let height = (p3 - center).dot(&normal);
+                    assert_relative_eq!(height, *level, epsilon = 1e-6);
+                    // Must be inside the cube's AABB (with tolerance)
+                    let tol = 1e-6;
+                    assert!(
+                        p3.x >= aabb_min.x - tol
+                            && p3.x <= aabb_max.x + tol
+                            && p3.y >= aabb_min.y - tol
+                            && p3.y <= aabb_max.y + tol
+                            && p3.z >= aabb_min.z - tol
+                            && p3.z <= aabb_max.z + tol,
+                        "Vertex {p3:?} outside cube AABB [{aabb_min:?}, {aabb_max:?}]"
+                    );
+                }
+            }
         }
     }
 

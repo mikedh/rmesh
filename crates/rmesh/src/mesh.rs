@@ -1746,10 +1746,11 @@ mod tests {
 
     #[test]
     fn test_project_to_3d_diagonal() {
-        // Same test but with a diagonal normal to exercise the rotation.
+        // Same test but with a diagonal normal and non-zero origin
+        // to exercise both the rotation and translation in transform_to_2d.
         let cube = create_box(&[2.0, 2.0, 2.0]);
         let normal = Vector3::new(1.0, 1.0, 1.0).normalize();
-        let origin = Point3::new(1.0, 2.0, 3.0);
+        let origin = Point3::new(0.0, 0.0, 0.0);
         let levels = vec![-0.3, 0.0, 0.3];
 
         let results = cube.project(&normal, &origin, &levels);
