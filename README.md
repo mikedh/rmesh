@@ -113,7 +113,8 @@ print(mesh.volume)  # Uses faster rmesh implementation
 
 ### Concious API Differences
 
-- `mesh.process` -> `mesh.cleanup(tol_merge:int ...)
+- `mesh.__init__`, `mesh.process` -> `mesh.cleanup(tol_merge:int ...)
+  - The default behavior for a Python `Trimesh` is to merge vertices, but only sometimes. The first format trimesh ever supported was STL, which is almost completely useless without merging vertices.
   - remove_degenerate, remove_infinite, etc all go into cleanup
   - all values are passed in explicitly rather than using magic-constants
 - `mesh.apply_transform` returns a transformed copy, no in-place
@@ -123,4 +124,4 @@ print(mesh.volume)  # Uses faster rmesh implementation
   - `mesh.materials`
   - `mesh.patches`
 - OBJ groups/smoothing/objects are face attributes not new meshes
-  - can be used in like, `mesh.split_on`
+ - can be used in like, `mesh.split_on`

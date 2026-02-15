@@ -103,7 +103,7 @@ impl Half {
         if edge.buddy != EMPTY_EDGE {
             self.edges[index].sign = self.edges[edge.buddy].sign;
             std::mem::swap(&mut self.edges[edge.buddy].buddy, &mut index);
-            assert!(index == EMPTY_EDGE);
+            debug_assert!(index == EMPTY_EDGE);
         }
     }
 
@@ -299,7 +299,9 @@ impl Half {
          *           b
          */
         let edge = self.edge(e_ba);
-        assert!(edge.buddy != EMPTY_EDGE);
+        if edge.buddy == EMPTY_EDGE {
+            return;
+        }
 
         let e_ac = self.next(e_ba);
         let e_cb = self.prev(e_ba);

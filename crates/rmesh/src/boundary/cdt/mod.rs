@@ -83,6 +83,11 @@ pub enum Error {
     /// CDT exceeded time budget (safety backstop)
     #[error("CDT exceeded time budget")]
     TimeBudgetExceeded,
+
+    /// CDT hit corrupt internal state for this particular projection.
+    /// Does NOT set `cdt_diverged` — other projections may succeed.
+    #[error("CDT internal inconsistency")]
+    Inconsistent,
 }
 
 ////////////////////////////////////////////////////////////////////////////////

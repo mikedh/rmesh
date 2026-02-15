@@ -177,8 +177,12 @@ impl SlabIndex {
             let lo = ((ey_min - y_min) * inv_slab_height) as usize;
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let hi = ((ey_max - y_min) * inv_slab_height).ceil() as usize;
-            for slab in &mut slabs[lo.min(num_slabs)..hi.min(num_slabs)] {
-                slab.extend_from_slice(&[slope, x_base, yi, yj]);
+            let lo = lo.min(num_slabs);
+            let hi = hi.min(num_slabs);
+            if lo < hi {
+                for slab in &mut slabs[lo..hi] {
+                    slab.extend_from_slice(&[slope, x_base, yi, yj]);
+                }
             }
         }
 

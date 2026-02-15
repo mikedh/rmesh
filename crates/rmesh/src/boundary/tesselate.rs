@@ -20,6 +20,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::f64::consts::TAU;
 
 use rayon::prelude::*;
 
@@ -193,6 +194,128 @@ fn count_boundary_edges(triangles: &[[usize; 3]], expected: &HashSet<(usize, usi
         .iter()
         .filter(|e| counts.get(e).copied().unwrap_or(0) == 1)
         .count()
+}
+
+/// Shift `inner_uvs` by the nearest multiple of 2π so its mean
+/// aligns with `outer_uvs` in each angular coordinate.
+fn align_angular_uvs(
+    outer_uvs: &[Point2<f64>],
+    inner_uvs: &mut [Point2<f64>],
+    doubly_angular: bool,
+) {
+    if inner_uvs.is_empty() || outer_uvs.is_empty() {
+        return;
+    }
+    let outer_u_mean = outer_uvs.iter().map(|p| p.x).sum::<f64>() / outer_uvs.len() as f64;
+    let inner_u_mean = inner_uvs.iter().map(|p| p.x).sum::<f64>() / inner_uvs.len() as f64;
+    let shift = ((outer_u_mean - inner_u_mean) / TAU).round() * TAU;
+    if shift.abs() > 1e-10 {
+        for uv in inner_uvs.iter_mut() {
+            uv.x += shift;
+        }
+    }
+    if doubly_angular {
+        let outer_v_mean = outer_uvs.iter().map(|p| p.y).sum::<f64>() / outer_uvs.len() as f64;
+        let inner_v_mean = inner_uvs.iter().map(|p| p.y).sum::<f64>() / inner_uvs.len() as f64;
+        let v_shift = ((outer_v_mean - inner_v_mean) / TAU).round() * TAU;
+        if v_shift.abs() > 1e-10 {
+            for uv in inner_uvs.iter_mut() {
+                uv.y += v_shift;
+            }
+        }
+    }
+}
+
+/// Repair interior holes in a triangulation by fan-filling them.
+///
+/// After earcut or CDT fallback, some triangulations may have all boundary edges
+/// present but contain interior holes — interior edges that appear in only one
+/// triangle, forming closed loops inside the mesh. This detects those loops and
+/// fills each with a simple fan triangulation from the first vertex.
+fn fill_interior_holes(
+    triangles: &mut Vec<[usize; 3]>,
+    expected_boundary: &HashSet<(usize, usize)>,
+) {
+    let counts = build_edge_counts(triangles);
+    // Collect interior edges with count=1 (hole boundary edges)
+    let mut hole_edges: Vec<(usize, usize)> = counts
+        .iter()
+        .filter(|&(e, &c)| c == 1 && !expected_boundary.contains(e))
+        .map(|(e, _)| *e)
+        .collect();
+    if hole_edges.is_empty() {
+        return;
+    }
+    // Sort for deterministic iteration order
+    hole_edges.sort();
+
+    // Build adjacency: vertex → set of connected vertices via hole edges
+    let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(a, b) in &hole_edges {
+        adj.entry(a).or_default().push(b);
+        adj.entry(b).or_default().push(a);
+    }
+    // Verify simple topology: every vertex must have exactly 2 neighbors.
+    // If not, the hole is too complex for simple fan-fill.
+    if adj.values().any(|neighbors| neighbors.len() != 2) {
+        return;
+    }
+
+    // Chain hole edges into closed loops
+    let mut visited_edges: HashSet<(usize, usize)> = HashSet::new();
+    for &(start_a, start_b) in &hole_edges {
+        let start_key = canonical_edge(start_a, start_b);
+        if visited_edges.contains(&start_key) {
+            continue;
+        }
+        // Walk the chain starting from start_a → start_b
+        let mut loop_verts = vec![start_a, start_b];
+        visited_edges.insert(start_key);
+        let mut current = start_b;
+        let mut prev = start_a;
+        loop {
+            let neighbors = match adj.get(&current) {
+                Some(n) => n,
+                None => break,
+            };
+            let next = neighbors.iter().find(|&&n| n != prev);
+            match next {
+                Some(&n) => {
+                    let key = canonical_edge(current, n);
+                    if visited_edges.contains(&key) {
+                        break;
+                    }
+                    visited_edges.insert(key);
+                    if n == start_a {
+                        break; // closed the loop
+                    }
+                    loop_verts.push(n);
+                    prev = current;
+                    current = n;
+                }
+                None => break,
+            }
+        }
+        // Fan-triangulate the hole from vertex 0 of the loop
+        if loop_verts.len() >= 3 {
+            // Check winding against an existing triangle sharing one of the hole edges
+            // to ensure our fan triangles have consistent winding.
+            let (a, b) = (loop_verts[0], loop_verts[1]);
+            let should_reverse = triangles.iter().any(|tri| {
+                // If existing tri has edge a→b, our fan should use b→a (reverse loop)
+                (tri[0] == a && tri[1] == b)
+                    || (tri[1] == a && tri[2] == b)
+                    || (tri[2] == a && tri[0] == b)
+            });
+            if should_reverse {
+                loop_verts.reverse();
+            }
+            let v0 = loop_verts[0];
+            for i in 1..loop_verts.len() - 1 {
+                triangles.push([v0, loop_verts[i], loop_verts[i + 1]]);
+            }
+        }
+    }
 }
 
 /// Fan triangulation: connect every contour edge to a central vertex.
@@ -847,7 +970,7 @@ fn collect_loop_indices(
 /// Triangulate a face with a multi-strategy fallback chain.
 /// Returns (triangles, strategy_code) where strategy codes are:
 /// 0=uv_cdt, 1=plane_cdt, 2=earcut_uv, 3=best_incomplete, 4=fan,
-/// 5=earcut_3d, 6=multi_axis_cdt
+/// 5=earcut_3d, 6=axis_cdt
 fn triangulate_face_robust_pts(
     pts: &[(f64, f64)],
     contours: &[Vec<usize>],
@@ -855,6 +978,8 @@ fn triangulate_face_robust_pts(
     pool_vertices: &[Point3<f64>],
     new_vertices: &[Point3<f64>],
     sentinel_base: usize,
+    surface_normal_hint: Option<Vector3<f64>>,
+    initial_cdt_diverged: bool,
 ) -> (Vec<[usize; 3]>, u8, bool) {
     // Build contour edge set once — invariant across all CDT attempts
     let expected = contour_edge_set(contours);
@@ -877,7 +1002,7 @@ fn triangulate_face_robust_pts(
 
     // Track whether CDT diverged — if so, all projections will hit the same
     // O(n²) behavior (same constraint topology), so skip remaining CDT attempts.
-    let mut cdt_diverged = false;
+    let mut cdt_diverged = initial_cdt_diverged;
 
     /// Check if a CDT error is a divergence error (Diverged or TimeBudgetExceeded).
     fn is_diverged(e: &cdt::Error) -> bool {
@@ -907,9 +1032,19 @@ fn triangulate_face_robust_pts(
         .collect();
 
     // Try 2: CDT in best-fit 3D plane projection (skip if CDT diverged)
+    // Use surface-derived plane if hint available, else fit from points.
+    // When no hint is available (BSpline/Offset), use SVD least-squares fit
+    // instead of cross-product to get a better plane for non-planar faces.
+    let maybe_plane = if let Some(hint) = surface_normal_hint {
+        let centroid = positions.iter().fold(Point3::origin(), |a, p| a + p.coords)
+            * (1.0 / positions.len() as f64);
+        Some(Plane::new(hint, centroid))
+    } else {
+        Plane::from_points(&positions, false).ok()
+    };
     if !cdt_diverged
         && positions.len() >= 3
-        && let Ok(plane) = Plane::from_points(&positions, true)
+        && let Some(plane) = maybe_plane
     {
         let pts_2d: Vec<(f64, f64)> = plane
             .to_2d(&positions)
@@ -932,27 +1067,36 @@ fn triangulate_face_robust_pts(
         }
     }
 
-    // Try 2b: CDT in axis-aligned plane projections (XY, XZ, YZ) — skip if CDT diverged
+    // Try 2b: CDT in best-axis projection (skip if CDT diverged)
+    // Drop the coordinate most aligned with the face normal to maximize 2D spread.
     if !cdt_diverged && positions.len() >= 3 {
-        #[allow(clippy::type_complexity)]
-        let projections: [(fn(&Point3<f64>) -> (f64, f64), &str); 3] = [
-            (|p| (p.x, p.y), "XY"),
-            (|p| (p.x, p.z), "XZ"),
-            (|p| (p.y, p.z), "YZ"),
-        ];
-        for (proj_fn, _) in &projections {
-            let pts_2d: Vec<(f64, f64)> = positions.iter().map(proj_fn).collect();
+        // Use known surface normal if available, else fit from points
+        // SVD fit (method_cross=false) when no hint, for better non-planar handling
+        let maybe_normal = surface_normal_hint
+            .or_else(|| Plane::from_points(&positions, false).ok().map(|p| p.normal));
+        if let Some(normal) = maybe_normal {
+            let n = normal.abs();
+            let pts_2d: Vec<(f64, f64)> = if n.x >= n.y && n.x >= n.z {
+                // Normal mostly along X → project to YZ
+                positions.iter().map(|p| (p.y, p.z)).collect()
+            } else if n.y >= n.z {
+                // Normal mostly along Y → project to XZ
+                positions.iter().map(|p| (p.x, p.z)).collect()
+            } else {
+                // Normal mostly along Z → project to XY
+                positions.iter().map(|p| (p.x, p.y)).collect()
+            };
+
             match cdt::triangulate_contours(&pts_2d, contours) {
                 Ok(tris) => {
                     let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
                     if contours_complete_with(&result, &expected) {
-                        return (result, 6, false);
+                        return (result, 6, cdt_diverged);
                     }
                     track_best(&result, 6, &expected);
                 }
                 Err(e) if is_diverged(&e) => {
                     cdt_diverged = true;
-                    break;
                 }
                 Err(_) => {}
             }
@@ -970,6 +1114,8 @@ fn triangulate_face_robust_pts(
         let mut tri = Triangulator::new();
         let result = tri.triangulate_2d(&exterior, &interiors, &vertices, false);
         if !result.is_empty() && contours_complete_with(&result, &expected) {
+            let mut result = result;
+            fill_interior_holes(&mut result, &expected);
             return (result, 2, cdt_diverged);
         }
         track_best(&result, 2, &expected);
@@ -985,6 +1131,8 @@ fn triangulate_face_robust_pts(
         let mut tri = Triangulator::new();
         if let Ok(result) = tri.triangulate_3d(&exterior, &interiors, &positions, false, false) {
             if !result.is_empty() && contours_complete_with(&result, &expected) {
+                let mut result = result;
+                fill_interior_holes(&mut result, &expected);
                 return (result, 5, cdt_diverged);
             }
             track_best(&result, 5, &expected);
@@ -996,9 +1144,10 @@ fn triangulate_face_robust_pts(
     let fan_count = count_boundary_edges(&fan, &expected);
 
     // Return best incomplete if it preserves more boundary edges than fan
-    if let Some((best_tris, best_count, _)) = best_incomplete
+    if let Some((mut best_tris, best_count, _)) = best_incomplete
         && best_count > fan_count
     {
+        fill_interior_holes(&mut best_tris, &expected);
         return (best_tris, 3, cdt_diverged);
     }
 
@@ -1053,14 +1202,14 @@ fn tessellate_face(
     // 1. Collect boundary vertices
     let outer_pool_indices = collect_loop_indices(edge_discretization, effective_outer_loop);
 
-    let mut raw_uvs: Vec<Point2<f64>> = outer_pool_indices
+    let mut outer_uvs: Vec<Point2<f64>> = outer_pool_indices
         .iter()
         .map(|&pool_idx| surface.to_parametric(&pool_vertices[pool_idx]))
         .collect();
-    surface.unwrap_uvs(&mut raw_uvs);
+    surface.unwrap_uvs(&mut outer_uvs);
 
     for (i, &pool_idx) in outer_pool_indices.iter().enumerate() {
-        state.add_vertex(raw_uvs[i], pool_idx);
+        state.add_vertex(outer_uvs[i], pool_idx);
     }
 
     let outer_len = outer_pool_indices.len();
@@ -1091,6 +1240,13 @@ fn tessellate_face(
             .map(|&pool_idx| surface.to_parametric(&pool_vertices[pool_idx]))
             .collect();
         surface.unwrap_uvs(&mut inner_uvs);
+
+        // Align inner loop angular window to match the outer loop.
+        // Each loop is unwrapped independently and can land in a different 2π window,
+        // causing the inner hole to appear outside the outer polygon in UV space.
+        if surface.is_angular() {
+            align_angular_uvs(&outer_uvs, &mut inner_uvs, surface.is_doubly_angular());
+        }
 
         for (i, &pool_idx) in loop_indices.iter().enumerate() {
             state.add_vertex(inner_uvs[i], pool_idx);
@@ -1147,6 +1303,30 @@ fn tessellate_face(
         }
     }
 
+    // Compute surface normal hint at UV centroid for CDT projection strategy.
+    // Skip for BSpline/Offset: their normal_at uses finite differences and the
+    // UV centroid of a complex face can map to a poor location, producing a worse
+    // hint than the Plane::from_points fallback.
+    let surface_normal_hint: Option<Vector3<f64>> = match surface {
+        Surface::BSpline(_) | Surface::Offset(_) => None,
+        _ => {
+            let uvs = &state.vertices_uv;
+            if uvs.len() >= 3 {
+                let (u_sum, v_sum) = uvs.iter().fold((0.0, 0.0), |(u, v), p| (u + p.x, v + p.y));
+                let n = uvs.len() as f64;
+                let normal = surface.normal_at(u_sum / n, v_sum / n);
+                let len = normal.norm();
+                if len > 1e-10 {
+                    Some(normal / len)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+    };
+
     // 2.5. Deduplicate vertices that share the same pool index
     let (dedup_pts, dedup_contours, dedup_map) = dedup_by_pool(&state, &contours);
 
@@ -1158,6 +1338,8 @@ fn tessellate_face(
         pool_vertices,
         &new_vertices,
         sentinel_base,
+        surface_normal_hint,
+        false,
     );
 
     // Map dedup triangles back to original local indices
@@ -1187,6 +1369,8 @@ fn tessellate_face(
             pool_vertices,
             &new_vertices,
             sentinel_base,
+            surface_normal_hint,
+            cdt_diverged,
         );
         mapped_tris = dedup_tris2
             .into_iter()
@@ -1404,17 +1588,23 @@ impl<'a> ShellTessellator<'a> {
                 let n = (angle / max_step).ceil() as usize;
                 n.clamp(self.params.min_segments, self.params.max_segments)
             }
-            Curve::BSpline(bs) => {
-                let base_segments =
-                    (bs.control_points.len() * (bs.degree + 1)).max(self.params.min_segments);
-                base_segments.clamp(self.params.min_segments, self.params.max_segments)
-            }
+            Curve::BSpline(bs) => bs.sample_count(
+                edge.t_start,
+                edge.t_end,
+                self.effective_tolerance,
+                self.params.max_segments,
+            ),
         };
 
-        // Segment count from surface curvature
-        let surface_count = self.compute_surface_segment_count(curve, edge, edge_idx);
-
-        curve_count.max(surface_count)
+        // Segment count from surface curvature — skip expensive BSpline
+        // curvature_at() + parameter_at() calls when curve geometry already
+        // demands many segments.
+        if curve_count >= self.params.min_segments * 4 {
+            curve_count
+        } else {
+            let surface_count = self.compute_surface_segment_count(curve, edge, edge_idx);
+            curve_count.max(surface_count)
+        }
     }
 
     /// Compute segment count based on surface curvature along the edge.
@@ -1510,6 +1700,11 @@ impl<'a> ShellTessellator<'a> {
                         .map(|&pi| surface.to_parametric(&self.vertices[pi]))
                         .collect();
                     surface.unwrap_uvs(&mut inner_uvs);
+
+                    // Align inner loop angular window to match the outer loop.
+                    if surface.is_angular() {
+                        align_angular_uvs(&outer_uvs, &mut inner_uvs, surface.is_doubly_angular());
+                    }
 
                     // Check each inner vertex against the outer polygon
                     let inside =

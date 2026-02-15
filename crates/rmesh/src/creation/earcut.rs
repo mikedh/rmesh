@@ -279,6 +279,19 @@ enum Pass {
     P2 = 2,
 }
 
+/// Count vertices in a circular linked list starting at `start`.
+fn count_ring<T: Float>(nodes: &[Node<T>], start: NodeIndex) -> usize {
+    let mut count = 0;
+    let mut p = start;
+    loop {
+        count += 1;
+        p = node!(nodes, p).next_i;
+        if p == start {
+            return count;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn earcut_linked<T: Float>(
     nodes: &mut Vec<Node<T>>,
@@ -336,7 +349,12 @@ fn earcut_linked<T: Float>(
                 ear_i = cure_local_intersections(nodes, filtered, triangles);
                 earcut_linked(nodes, ear_i, triangles, min_x, min_y, inv_size, Pass::P2);
             } else if pass == Pass::P2 {
-                split_earcut(nodes, ear_i, triangles, min_x, min_y, inv_size);
+                // Skip split_earcut for large remaining polygons to avoid O(n³).
+                // For ≤80 vertices split_earcut is harmless (80³ = 512K ops).
+                let remaining = count_ring(nodes, ear_i);
+                if remaining <= 80 {
+                    split_earcut(nodes, ear_i, triangles, min_x, min_y, inv_size);
+                }
             }
             return;
         }
@@ -1028,4 +1046,44 @@ fn on_segment<T: Float>(p: &Node<T>, q: &Node<T>, r: &Node<T>) -> bool {
 
 fn sign<T: Float>(v: T) -> i32 {
     i32::from(v > T::zero()) - i32::from(v < T::zero())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Generate a self-intersecting polygon that simulates projecting a
+    /// cylinder's boundary onto a plane. Vertices alternate between two
+    /// circles at different heights, creating overlapping edges when
+    /// flattened to 2D. This triggers earcut's O(n³) split_earcut fallback.
+    fn cylinder_projection_polygon(n: usize) -> Vec<[f64; 2]> {
+        let mut pts = Vec::with_capacity(2 * n);
+        for i in 0..n {
+            let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+            let x = theta.cos();
+            let y = theta.sin();
+            // Bottom circle vertex
+            pts.push([x, y]);
+            // Top circle vertex (offset slightly to create crossing edges)
+            pts.push([x * 0.95, y * 0.95 + 0.1]);
+        }
+        pts
+    }
+
+    #[test]
+    fn test_earcut_degenerate_large_polygon() {
+        let pts = cylinder_projection_polygon(1500); // 3000 points
+        let mut earcut = Earcut::new();
+        let mut result = Vec::new();
+        let start = std::time::Instant::now();
+        earcut.earcut(pts, &[], &mut result);
+        let elapsed = start.elapsed();
+        eprintln!(
+            "earcut 3000-point degenerate: {elapsed:?}, {} tris",
+            result.len() / 3
+        );
+        assert!(elapsed.as_secs() < 2, "took {elapsed:?}");
+        // P0/P1/P2 may produce some partial triangles before bailing,
+        // but split_earcut is skipped so it completes fast
+    }
 }

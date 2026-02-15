@@ -115,7 +115,9 @@ impl Contour {
             next: EMPTY_CONTOUR,
             prev: self.end,
         });
-        assert!(self.pts[self.end].next == EMPTY_CONTOUR);
+        if self.pts[self.end].next != EMPTY_CONTOUR {
+            return Err(Error::Inconsistent);
+        }
         self.pts[self.end].next = i;
         self.end = i;
 
@@ -129,7 +131,9 @@ impl Contour {
         }
         // Advance to the end of the triangulation
         self.index = self.pts[self.index].next;
-        assert!(self.pts[self.index].next == EMPTY_CONTOUR);
+        if self.pts[self.index].next != EMPTY_CONTOUR {
+            return Err(Error::Inconsistent);
+        }
         Ok(out)
     }
 
@@ -141,7 +145,9 @@ impl Contour {
         // the caller will shuffle self.index forward.  We're not allowed
         // to be at the end of the list, since this must be called right
         // after push() extends the list without moving self.index
-        assert!(c.next != EMPTY_CONTOUR);
+        if c.next == EMPTY_CONTOUR {
+            return Err(Error::Inconsistent);
+        }
         if c.prev == EMPTY_CONTOUR {
             return Ok(None);
         }
@@ -210,9 +216,9 @@ impl Contour {
                e_ba is a new edge inserted here
             */
             let (a, b) = (self.pts[c.next], self.pts[c.prev]);
-            assert!(a.point != b.point);
-            assert!(a.point != c.point);
-            assert!(b.point != c.point);
+            if a.point == b.point || a.point == c.point || b.point == c.point {
+                return Ok(None);
+            }
 
             // If the ear isn't strictly convex, then return immediately
             if t.orient2d(a.point, c.point, b.point) <= 0.0 {

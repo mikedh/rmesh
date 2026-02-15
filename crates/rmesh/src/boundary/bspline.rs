@@ -284,6 +284,42 @@ impl CurveBSpline {
         (self.knots[p], self.knots[self.knots.len() - 1 - p])
     }
 
+    /// Compute the number of segments needed to approximate the curve between
+    /// `t_start` and `t_end` within the given chord tolerance.
+    ///
+    /// Probes the curve at a coarse resolution, measures the maximum chord
+    /// error (distance from curve midpoint to linear interpolation), then
+    /// scales segment count using the quadratic relationship (error ∝ 1/n²).
+    pub fn sample_count(
+        &self,
+        t_start: f64,
+        t_end: f64,
+        chord_tol: f64,
+        max_segments: usize,
+    ) -> usize {
+        let n_probe = 8_usize;
+        let mut max_error = 0.0_f64;
+        let t_range = t_end - t_start;
+        for i in 0..n_probe {
+            let t0 = t_start + t_range * (i as f64 / n_probe as f64);
+            let t1 = t_start + t_range * ((i as f64 + 0.5) / n_probe as f64);
+            let t2 = t_start + t_range * ((i + 1) as f64 / n_probe as f64);
+            let p0 = self.evaluate(t0);
+            let p2 = self.evaluate(t2);
+            let p_mid = self.evaluate(t1);
+            let p_linear = p0.coords.lerp(&p2.coords, 0.5);
+            max_error = max_error.max((p_mid - Point3::from(p_linear)).norm());
+        }
+        if max_error < chord_tol {
+            n_probe
+        } else {
+            // error ∝ 1/n², so n_needed = n_probe * sqrt(error / tolerance)
+            let ratio = (max_error / chord_tol).sqrt();
+            let n = (n_probe as f64 * ratio).ceil() as usize;
+            n.clamp(n_probe, max_segments)
+        }
+    }
+
     /// Evaluate C(u) and derivatives C'(u), C''(u), ... up to order `n_ders`
     /// in a single find_span + basis_funs_ders pass (Algorithm A2.3).
     /// For rational (NURBS) curves, uses Algorithm A4.2 from "The NURBS Book".

@@ -70,7 +70,7 @@ impl Hull {
         }
 
         let b = self.bucket(angle);
-        assert!(self.buckets[b] == EMPTY_HULL);
+        debug_assert!(self.buckets[b] == EMPTY_HULL);
         self.buckets[b] = h;
     }
 
@@ -115,7 +115,7 @@ impl Hull {
                 }
             }
         }
-        assert!(h != EMPTY_HULL);
+        debug_assert!(h != EMPTY_HULL);
 
         // Walk backwards one step to return the HullIndex which will be split
         // by this new point being inserted
@@ -192,10 +192,10 @@ impl Hull {
 
     /// Returns the hull index associated with the given point
     pub fn index_of(&self, p: PointIndex) -> HullIndex {
-        assert!(!self.points.is_empty());
+        debug_assert!(!self.points.is_empty());
         let h = self.points[p];
-        assert!(h != EMPTY_HULL);
-        assert!(self.data[h].left != EMPTY_HULL || self.data[h].right != EMPTY_HULL);
+        debug_assert!(h != EMPTY_HULL);
+        debug_assert!(self.data[h].left != EMPTY_HULL || self.data[h].right != EMPTY_HULL);
         h
     }
 
