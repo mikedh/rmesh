@@ -16,6 +16,12 @@ use super::faces::{GEOMETRY_TOL, METRIC_TOL, NEWTON_TOL};
 /// Tolerance for knot vector comparisons in B-spline evaluation.
 const KNOT_TOL: f64 = 1e-14;
 
+/// Maximum supported polynomial degree (covers all practical CAD degrees).
+const MAX_DEGREE: usize = 9;
+
+/// Maximum derivative order we ever request (0th, 1st, 2nd).
+const MAX_DERS: usize = 3;
+
 /// Compute binomial coefficient C(n, k).
 pub(crate) fn binomial(n: usize, k: usize) -> usize {
     if k > n {
@@ -66,15 +72,22 @@ pub(crate) fn find_span(u: f64, degree: usize, knots: &[f64], n_control: usize) 
 /// Compute the non-vanishing basis functions at parameter `u` (Algorithm A2.2).
 ///
 /// Returns array `N[0..=degree]` where `N[j] = N_{span-degree+j, degree}(u)`.
+/// Entries beyond index `degree` are zero-initialized and unused.
 ///
 /// When the denominator `right[r+1] + left[j-r]` is zero (repeated knots),
 /// we follow the NURBS Book convention of treating 0/0 = 0, which maintains
 /// the partition-of-unity property.
-pub(crate) fn basis_funs(span: usize, u: f64, degree: usize, knots: &[f64]) -> Vec<f64> {
+pub(crate) fn basis_funs(
+    span: usize,
+    u: f64,
+    degree: usize,
+    knots: &[f64],
+) -> [f64; MAX_DEGREE + 1] {
+    debug_assert!(degree <= MAX_DEGREE);
     let p = degree;
-    let mut n = vec![0.0; p + 1];
-    let mut left = vec![0.0; p + 1];
-    let mut right = vec![0.0; p + 1];
+    let mut n = [0.0; MAX_DEGREE + 1];
+    let mut left = [0.0; MAX_DEGREE + 1];
+    let mut right = [0.0; MAX_DEGREE + 1];
 
     n[0] = 1.0;
     for j in 1..=p {
@@ -99,6 +112,7 @@ pub(crate) fn basis_funs(span: usize, u: f64, degree: usize, knots: &[f64]) -> V
 /// Compute basis function derivatives (Algorithm A2.3 from "The NURBS Book").
 ///
 /// Returns `ders[k][j]` = k-th derivative of `N_{span-degree+j, degree}(u)`.
+/// Entries beyond the active degree/derivative range are zero-initialized.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -111,12 +125,14 @@ pub(crate) fn basis_funs_ders(
     degree: usize,
     knots: &[f64],
     n_ders: usize,
-) -> Vec<Vec<f64>> {
+) -> [[f64; MAX_DEGREE + 1]; MAX_DERS + 1] {
+    debug_assert!(degree <= MAX_DEGREE);
+    debug_assert!(n_ders <= MAX_DERS);
     let p = degree;
-    let mut ders = vec![vec![0.0; p + 1]; n_ders + 1];
-    let mut ndu = vec![vec![0.0; p + 1]; p + 1];
-    let mut left = vec![0.0; p + 1];
-    let mut right = vec![0.0; p + 1];
+    let mut ders = [[0.0; MAX_DEGREE + 1]; MAX_DERS + 1];
+    let mut ndu = [[0.0; MAX_DEGREE + 1]; MAX_DEGREE + 1];
+    let mut left = [0.0; MAX_DEGREE + 1];
+    let mut right = [0.0; MAX_DEGREE + 1];
 
     ndu[0][0] = 1.0;
     for j in 1..=p {
@@ -142,7 +158,7 @@ pub(crate) fn basis_funs_ders(
     }
 
     // Compute derivatives
-    let mut a = vec![vec![0.0; p + 1]; 2];
+    let mut a = [[0.0; MAX_DEGREE + 1]; 2];
     for r in 0..=p {
         let mut s1 = 0;
         let mut s2 = 1;
@@ -231,6 +247,28 @@ impl CurveBSpline {
             .zip(multiplicities.iter())
             .flat_map(|(&k, &m)| std::iter::repeat_n(k, m))
             .collect();
+        debug_assert!(
+            degree <= MAX_DEGREE,
+            "degree {degree} exceeds MAX_DEGREE {MAX_DEGREE}"
+        );
+        debug_assert_eq!(
+            knots.len(),
+            control_points.len() + degree + 1,
+            "knot vector length {} != control_points {} + degree {} + 1",
+            knots.len(),
+            control_points.len(),
+            degree
+        );
+        debug_assert!(
+            weights
+                .as_ref()
+                .map_or(true, |w| w.len() == control_points.len()),
+            "weights length mismatch"
+        );
+        debug_assert!(
+            knots.windows(2).all(|w| w[0] <= w[1]),
+            "knot vector is not non-decreasing"
+        );
         Self {
             degree,
             control_points,
@@ -245,7 +283,7 @@ impl CurveBSpline {
     }
 
     /// Compute the non-vanishing basis functions at parameter u.
-    fn basis_funs(&self, span: usize, u: f64) -> Vec<f64> {
+    fn basis_funs(&self, span: usize, u: f64) -> [f64; MAX_DEGREE + 1] {
         basis_funs(span, u, self.degree, &self.knots)
     }
 
@@ -275,6 +313,53 @@ impl CurveBSpline {
                 point.coords += basis[i] * self.control_points[idx].coords;
             }
             point
+        }
+    }
+
+    /// Evaluate the curve at multiple parameters, writing results into `out`.
+    ///
+    /// Optimized for sorted (monotonically increasing) parameters as produced
+    /// by tessellation: reuses a single scratch array and caches the current
+    /// knot span to avoid redundant binary searches when consecutive parameters
+    /// fall in the same span.
+    #[allow(clippy::needless_range_loop)]
+    pub fn evaluate_batch(&self, params: &[f64], out: &mut [Point3<f64>]) {
+        assert_eq!(params.len(), out.len());
+        let p = self.degree;
+        let n_control = self.control_points.len();
+        let mut cached_span = self.find_span(params.first().copied().unwrap_or(0.0));
+
+        for (idx, &u) in params.iter().enumerate() {
+            // Reuse cached span if still valid, otherwise find new span
+            let span = if u >= self.knots[cached_span]
+                && (cached_span + 1 >= self.knots.len() || u < self.knots[cached_span + 1])
+            {
+                cached_span
+            } else {
+                find_span(u, p, &self.knots, n_control)
+            };
+            cached_span = span;
+
+            let basis = basis_funs(span, u, p, &self.knots);
+
+            if let Some(ref weights) = self.weights {
+                let mut numerator = Vector3::zeros();
+                let mut denominator = 0.0;
+                for i in 0..=p {
+                    let ci = span - p + i;
+                    let wn = weights[ci] * basis[i];
+                    numerator += wn * self.control_points[ci].coords;
+                    denominator += wn;
+                }
+                out[idx] = Point3::from(numerator / denominator);
+            } else {
+                let mut point = Point3::origin();
+                for i in 0..=p {
+                    let ci = span - p + i;
+                    point.coords += basis[i] * self.control_points[ci].coords;
+                }
+                out[idx] = point;
+            }
         }
     }
 
@@ -454,40 +539,6 @@ impl CurveBSpline {
 
         u
     }
-
-    /// Compute the segment count needed for a parameter range `[t_start, t_end]`
-    /// to stay within a given chord-error tolerance.
-    ///
-    /// Samples at `n_probe` equally-spaced intervals, measures the maximum
-    /// midpoint deviation from the chord, then extrapolates using the
-    /// O(1/n²) chord-error scaling law.
-    pub fn chord_error_segments(&self, t_start: f64, t_end: f64, tolerance: f64) -> usize {
-        let n_probe = 8usize;
-        let dt = (t_end - t_start) / n_probe as f64;
-        let mut max_dev = 0.0_f64;
-        for i in 0..n_probe {
-            let t0 = t_start + dt * i as f64;
-            let t1 = t0 + dt;
-            let p0 = self.evaluate(t0);
-            let p1 = self.evaluate(t1);
-            let p_mid = self.evaluate(f64::midpoint(t0, t1));
-            let linear_mid = Point3::new(
-                f64::midpoint(p0.x, p1.x),
-                f64::midpoint(p0.y, p1.y),
-                f64::midpoint(p0.z, p1.z),
-            );
-            max_dev = max_dev.max((p_mid - linear_mid).norm());
-        }
-        if max_dev <= tolerance {
-            n_probe
-        } else {
-            let ratio = (max_dev / tolerance).sqrt();
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            {
-                (n_probe as f64 * ratio).ceil() as usize
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -539,12 +590,55 @@ impl SurfaceBSpline {
                 .collect()
         };
 
+        let u_knots = expand_knots(u_knot_values, u_multiplicities);
+        let v_knots = expand_knots(v_knot_values, v_multiplicities);
+
+        debug_assert!(
+            u_degree <= MAX_DEGREE,
+            "u_degree {u_degree} exceeds MAX_DEGREE {MAX_DEGREE}"
+        );
+        debug_assert!(
+            v_degree <= MAX_DEGREE,
+            "v_degree {v_degree} exceeds MAX_DEGREE {MAX_DEGREE}"
+        );
+        debug_assert_eq!(
+            u_knots.len(),
+            control_points.len() + u_degree + 1,
+            "u_knots length {} != control_points.len() {} + u_degree {} + 1",
+            u_knots.len(),
+            control_points.len(),
+            u_degree
+        );
+        debug_assert_eq!(
+            v_knots.len(),
+            control_points[0].len() + v_degree + 1,
+            "v_knots length {} != control_points[0].len() {} + v_degree {} + 1",
+            v_knots.len(),
+            control_points[0].len(),
+            v_degree
+        );
+        debug_assert!(
+            weights
+                .as_ref()
+                .map_or(true, |w| w.len() == control_points.len()
+                    && w.iter().all(|row| row.len() == control_points[0].len())),
+            "weights dimensions mismatch"
+        );
+        debug_assert!(
+            u_knots.windows(2).all(|w| w[0] <= w[1]),
+            "u_knot vector is not non-decreasing"
+        );
+        debug_assert!(
+            v_knots.windows(2).all(|w| w[0] <= w[1]),
+            "v_knot vector is not non-decreasing"
+        );
+
         Self {
             u_degree,
             v_degree,
             control_points,
-            u_knots: expand_knots(u_knot_values, u_multiplicities),
-            v_knots: expand_knots(v_knot_values, v_multiplicities),
+            u_knots,
+            v_knots,
             weights,
         }
     }
@@ -700,23 +794,36 @@ impl SurfaceBSpline {
     pub fn parameter_at(&self, point: &Point3<f64>) -> Point2<f64> {
         let ((u_min, u_max), (v_min, v_max)) = self.domain();
 
-        // Initial guess: start at center of domain
+        // Initial guess via closest control point mapped through Greville abscissae.
+        // O(n_u × n_v) distance comparisons, no surface evaluations.
+        // Newton-Raphson below refines from this starting point.
+        let p = self.u_degree;
+        let q = self.v_degree;
+
+        let greville_u = |idx: usize| -> f64 {
+            if p == 0 {
+                return (u_min + u_max) * 0.5;
+            }
+            (1..=p).map(|j| self.u_knots[idx + j]).sum::<f64>() / p as f64
+        };
+        let greville_v = |idx: usize| -> f64 {
+            if q == 0 {
+                return (v_min + v_max) * 0.5;
+            }
+            (1..=q).map(|j| self.v_knots[idx + j]).sum::<f64>() / q as f64
+        };
+
         let mut u = f64::midpoint(u_min, u_max);
         let mut v = f64::midpoint(v_min, v_max);
+        let mut best_dist_sq = f64::MAX;
 
-        // Try a 3×3 grid of initial guesses to find the best starting point
-        // (reduced from 4×4 = 16 evaluations to 9 evaluations)
-        let mut best_dist = f64::MAX;
-        for ui in 0..3 {
-            for vi in 0..3 {
-                let test_u = u_min + (u_max - u_min) * (f64::from(ui) + 0.5) / 3.0;
-                let test_v = v_min + (v_max - v_min) * (f64::from(vi) + 0.5) / 3.0;
-                let test_p = self.evaluate(test_u, test_v);
-                let dist = (test_p - point).norm_squared();
-                if dist < best_dist {
-                    best_dist = dist;
-                    u = test_u;
-                    v = test_v;
+        for (i, row) in self.control_points.iter().enumerate() {
+            for (j, cp) in row.iter().enumerate() {
+                let dist_sq = (cp - point).norm_squared();
+                if dist_sq < best_dist_sq {
+                    best_dist_sq = dist_sq;
+                    u = greville_u(i).clamp(u_min, u_max);
+                    v = greville_v(j).clamp(v_min, v_max);
                 }
             }
         }
@@ -1138,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chord_error_segments_straight() {
+    fn test_sample_count_straight() {
         // A degree-1 (line) BSpline should return ~n_probe (minimal segments)
         let bs = CurveBSpline {
             degree: 1,
@@ -1147,13 +1254,13 @@ mod tests {
             weights: None,
         };
 
-        let n = bs.chord_error_segments(0.0, 1.0, 0.01);
+        let n = bs.sample_count(0.0, 1.0, 0.01, 1000);
         // A perfectly straight line has zero chord error → returns n_probe = 8
         assert_eq!(n, 8);
     }
 
     #[test]
-    fn test_chord_error_segments_curved() {
+    fn test_sample_count_curved() {
         // A curved BSpline should return more segments than a straight one
         let bs = CurveBSpline {
             degree: 3,
@@ -1167,8 +1274,8 @@ mod tests {
             weights: None,
         };
 
-        let tight = bs.chord_error_segments(0.0, 1.0, 0.001);
-        let loose = bs.chord_error_segments(0.0, 1.0, 1.0);
+        let tight = bs.sample_count(0.0, 1.0, 0.001, 1000);
+        let loose = bs.sample_count(0.0, 1.0, 1.0, 1000);
 
         // Tighter tolerance should require more segments
         assert!(tight > loose, "tight={tight} should be > loose={loose}");
