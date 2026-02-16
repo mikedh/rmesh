@@ -11,8 +11,9 @@ pub use light::*;
 pub use trackball::*;
 
 use indexmap::IndexMap;
-use nalgebra::{Matrix4, Point3};
+use nalgebra::Matrix4;
 
+use crate::bounds::Bounds3;
 use crate::geometry::Geometry;
 
 /// The type of content a scene node references.
@@ -343,10 +344,8 @@ impl Scene {
     /// Walks the scene graph to apply world transforms. If the graph is empty
     /// but geometry exists, uses identity transforms. Returns `None` if the
     /// scene has no geometry with valid bounds.
-    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
-        let mut global_min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-        let mut global_max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
-        let mut found = false;
+    pub fn bounds(&self) -> Option<Bounds3> {
+        let mut global = Bounds3::empty();
 
         let geometry_names: Vec<String> = self.geometry.keys().cloned().collect();
 
@@ -363,15 +362,8 @@ impl Scene {
                 let name = &geometry_names[geom_idx];
                 if let Some(geom) = self.geometry.get(name) {
                     used_graph = true;
-                    if let Some((local_min, local_max)) = geom.bounds() {
-                        transform_bounds(
-                            &local_min,
-                            &local_max,
-                            world_transform,
-                            &mut global_min,
-                            &mut global_max,
-                        );
-                        found = true;
+                    if let Some(local) = geom.bounds() {
+                        global = global.union(&local.transformed(world_transform));
                     }
                 }
             }
@@ -381,60 +373,21 @@ impl Scene {
         if !used_graph {
             let identity = Matrix4::identity();
             for geom in self.geometry.values() {
-                if let Some((local_min, local_max)) = geom.bounds() {
-                    transform_bounds(
-                        &local_min,
-                        &local_max,
-                        &identity,
-                        &mut global_min,
-                        &mut global_max,
-                    );
-                    found = true;
+                if let Some(local) = geom.bounds() {
+                    global = global.union(&local.transformed(&identity));
                 }
             }
         }
 
-        if found {
-            Some((global_min, global_max))
-        } else {
-            None
-        }
+        global.to_option()
     }
 
     /// Get the extents of the scene bounding box (max - min per axis).
     pub fn extents(&self) -> Option<[f64; 3]> {
-        self.bounds()
-            .map(|(min, max)| [max.x - min.x, max.y - min.y, max.z - min.z])
-    }
-}
-
-/// Transform the 8 corners of an AABB and update global min/max.
-fn transform_bounds(
-    local_min: &Point3<f64>,
-    local_max: &Point3<f64>,
-    transform: &Matrix4<f64>,
-    global_min: &mut Point3<f64>,
-    global_max: &mut Point3<f64>,
-) {
-    let corners = [
-        Point3::new(local_min.x, local_min.y, local_min.z),
-        Point3::new(local_max.x, local_min.y, local_min.z),
-        Point3::new(local_min.x, local_max.y, local_min.z),
-        Point3::new(local_max.x, local_max.y, local_min.z),
-        Point3::new(local_min.x, local_min.y, local_max.z),
-        Point3::new(local_max.x, local_min.y, local_max.z),
-        Point3::new(local_min.x, local_max.y, local_max.z),
-        Point3::new(local_max.x, local_max.y, local_max.z),
-    ];
-    for corner in &corners {
-        let v = transform * nalgebra::Vector4::new(corner.x, corner.y, corner.z, 1.0);
-        let p = Point3::new(v.x, v.y, v.z);
-        global_min.x = global_min.x.min(p.x);
-        global_min.y = global_min.y.min(p.y);
-        global_min.z = global_min.z.min(p.z);
-        global_max.x = global_max.x.max(p.x);
-        global_max.y = global_max.y.max(p.y);
-        global_max.z = global_max.z.max(p.z);
+        self.bounds().map(|b| {
+            let e = b.extents();
+            [e.x, e.y, e.z]
+        })
     }
 }
 
@@ -442,6 +395,7 @@ fn transform_bounds(
 mod tests {
     use super::*;
     use crate::creation;
+    use nalgebra::Point3;
 
     #[test]
     fn test_scene_basic() {

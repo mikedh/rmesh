@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 use nalgebra::Point3;
 
+use crate::bounds::Bounds3;
+
 /// A hull candidate voxel from GPU-side convex candidate extraction.
 #[derive(Debug, Clone, Copy)]
 pub struct HullCandidate {
@@ -90,8 +92,8 @@ impl VoxelGrid {
         fill_mode: FillMode,
     ) -> Self {
         // Compute AABB
-        let (aabb_min, aabb_max) = compute_aabb(vertices);
-        let extent = aabb_max - aabb_min;
+        let aabb = Bounds3::from_points(vertices).unwrap();
+        let extent = aabb.extents();
         let longest = extent.x.max(extent.y).max(extent.z);
 
         // Grid sizing: target dim along longest axis
@@ -111,7 +113,7 @@ impl VoxelGrid {
         let dims = [dims[0].min(1023), dims[1].min(1023), dims[2].min(1023)];
 
         // Offset origin by one voxel for boundary padding
-        let origin = Point3::new(aabb_min.x - scale, aabb_min.y - scale, aabb_min.z - scale);
+        let origin = Point3::new(aabb.min.x - scale, aabb.min.y - scale, aabb.min.z - scale);
 
         let total_voxels = u64::from(dims[0]) * u64::from(dims[1]) * u64::from(dims[2]);
 
@@ -2311,17 +2313,6 @@ fn bgl_storage_rw(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 // ── Utility ─────────────────────────────────────────────────────────────
-
-fn compute_aabb(vertices: &[Point3<f64>]) -> (Point3<f64>, Point3<f64>) {
-    let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
-
-    for v in vertices {
-        min = min.inf(v);
-        max = max.sup(v);
-    }
-    (min, max)
-}
 
 /// Request a WGPU device and queue suitable for compute work.
 ///

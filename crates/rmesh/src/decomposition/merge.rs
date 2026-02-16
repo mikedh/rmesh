@@ -12,6 +12,7 @@ use nalgebra::Point3;
 use rayon::prelude::*;
 
 use super::ConvexHull;
+use crate::bounds::Bounds3;
 
 /// A pair of hulls with their merge cost, for the priority queue.
 #[derive(Debug, Clone)]
@@ -43,46 +44,6 @@ impl Ord for HullPair {
     }
 }
 
-/// AABB for fast overlap testing.
-#[derive(Debug, Clone, Copy)]
-struct Aabb {
-    min: Point3<f64>,
-    max: Point3<f64>,
-}
-
-impl Aabb {
-    fn from_points(points: &[Point3<f64>]) -> Self {
-        let mut min = points[0];
-        let mut max = points[0];
-        for p in &points[1..] {
-            min = min.inf(p);
-            max = max.sup(p);
-        }
-        Self { min, max }
-    }
-
-    fn union(&self, other: &Aabb) -> Self {
-        Self {
-            min: self.min.inf(&other.min),
-            max: self.max.sup(&other.max),
-        }
-    }
-
-    fn volume(&self) -> f64 {
-        let e = self.max - self.min;
-        e.x * e.y * e.z
-    }
-
-    fn overlaps(&self, other: &Aabb) -> bool {
-        self.min.x <= other.max.x
-            && self.max.x >= other.min.x
-            && self.min.y <= other.max.y
-            && self.max.y >= other.min.y
-            && self.min.z <= other.max.z
-            && self.max.z >= other.min.z
-    }
-}
-
 /// Merge cost between two hulls.
 ///
 /// `concavity = |vol_A + vol_B - vol_combined| / vol_total`
@@ -92,8 +53,8 @@ impl Aabb {
 fn merge_cost(
     a: &ConvexHull,
     b: &ConvexHull,
-    aabb_a: &Aabb,
-    aabb_b: &Aabb,
+    aabb_a: &Bounds3,
+    aabb_b: &Bounds3,
     total_volume: f64,
 ) -> f64 {
     if total_volume < 1e-15 {
@@ -193,13 +154,13 @@ pub fn greedy_merge(mut hulls: Vec<ConvexHull>, max_hulls: u32) -> Vec<ConvexHul
 
     // Build hull map and AABB cache
     let mut hull_map: AHashMap<u32, ConvexHull> = AHashMap::new();
-    let mut aabb_map: AHashMap<u32, Aabb> = AHashMap::new();
+    let mut aabb_map: AHashMap<u32, Bounds3> = AHashMap::new();
     let mut next_id: u32 = 0;
 
     for hull in hulls {
         let id = next_id;
         next_id += 1;
-        aabb_map.insert(id, Aabb::from_points(&hull.vertices));
+        aabb_map.insert(id, Bounds3::from_points(&hull.vertices).unwrap());
         hull_map.insert(id, hull);
     }
 
@@ -256,17 +217,23 @@ pub fn greedy_merge(mut hulls: Vec<ConvexHull>, max_hulls: u32) -> Vec<ConvexHul
             // Can't merge, keep the larger one
             if hull_a.volume >= hull_b.volume {
                 hull_map.insert(pair.id_a, hull_a);
-                aabb_map.insert(pair.id_a, Aabb::from_points(&hull_map[&pair.id_a].vertices));
+                aabb_map.insert(
+                    pair.id_a,
+                    Bounds3::from_points(&hull_map[&pair.id_a].vertices).unwrap(),
+                );
             } else {
                 hull_map.insert(pair.id_b, hull_b);
-                aabb_map.insert(pair.id_b, Aabb::from_points(&hull_map[&pair.id_b].vertices));
+                aabb_map.insert(
+                    pair.id_b,
+                    Bounds3::from_points(&hull_map[&pair.id_b].vertices).unwrap(),
+                );
             }
             continue;
         };
 
         let new_id = next_id;
         next_id += 1;
-        let new_aabb = Aabb::from_points(&merged.vertices);
+        let new_aabb = Bounds3::from_points(&merged.vertices).unwrap();
         aabb_map.insert(new_id, new_aabb);
         hull_map.insert(new_id, merged);
 
@@ -343,7 +310,7 @@ mod tests {
     #[test]
     fn test_merge_cost_identical() {
         let hull = make_box_hull(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
-        let aabb = Aabb::from_points(&hull.vertices);
+        let aabb = Bounds3::from_points(&hull.vertices).unwrap();
         let cost = merge_cost(&hull, &hull, &aabb, &aabb, 2.0);
         // Merging identical hulls: combined vol == each vol, cost should be ~vol/total
         assert!(cost < 1.0);
@@ -353,8 +320,8 @@ mod tests {
     fn test_merge_cost_distant() {
         let a = make_box_hull(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
         let b = make_box_hull(Point3::new(10.0, 10.0, 10.0), Point3::new(11.0, 11.0, 11.0));
-        let aabb_a = Aabb::from_points(&a.vertices);
-        let aabb_b = Aabb::from_points(&b.vertices);
+        let aabb_a = Bounds3::from_points(&a.vertices).unwrap();
+        let aabb_b = Bounds3::from_points(&b.vertices).unwrap();
         let cost = merge_cost(&a, &b, &aabb_a, &aabb_b, 2.0);
         // Distant hulls should have high merge cost
         assert!(cost > 0.1);

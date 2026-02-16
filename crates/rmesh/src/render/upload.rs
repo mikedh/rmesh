@@ -3,6 +3,7 @@ use nalgebra::{Matrix4, Point3, Vector4};
 use wgpu::util::DeviceExt;
 
 use crate::attributes::{DEFAULT_COLOR, Material};
+use crate::bounds::Bounds3;
 use crate::geometry::Geometry;
 use crate::image::LazyImage;
 use crate::render::ShadingMode;
@@ -108,8 +109,7 @@ pub struct SceneGpuData {
     pub meshes: Vec<GpuMesh>,
     pub paths: Vec<GpuPath>,
     pub points: Vec<GpuPointCloud>,
-    pub bounds_min: Point3<f64>,
-    pub bounds_max: Point3<f64>,
+    pub bounds: Bounds3,
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -220,8 +220,7 @@ pub fn upload_scene(
     let mut paths = Vec::new();
     let mut points = Vec::new();
 
-    let mut bounds_min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut bounds_max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut bounds = Bounds3::empty();
 
     // Walk the scene graph to get geometry with world transforms
     let geometry_names: Vec<String> = scene.geometry.keys().cloned().collect();
@@ -249,39 +248,17 @@ pub fn upload_scene(
                         world_transform,
                         shading_mode,
                         &mut meshes,
-                        &mut bounds_min,
-                        &mut bounds_max,
+                        &mut bounds,
                     );
                 }
                 Geometry::Path2D(path) => {
-                    upload_path2d(
-                        device,
-                        path,
-                        world_transform,
-                        &mut paths,
-                        &mut bounds_min,
-                        &mut bounds_max,
-                    );
+                    upload_path2d(device, path, world_transform, &mut paths, &mut bounds);
                 }
                 Geometry::Path3D(path) => {
-                    upload_path3d(
-                        device,
-                        path,
-                        world_transform,
-                        &mut paths,
-                        &mut bounds_min,
-                        &mut bounds_max,
-                    );
+                    upload_path3d(device, path, world_transform, &mut paths, &mut bounds);
                 }
                 Geometry::PointCloud(pc) => {
-                    upload_point_cloud(
-                        device,
-                        pc,
-                        world_transform,
-                        &mut points,
-                        &mut bounds_min,
-                        &mut bounds_max,
-                    );
+                    upload_point_cloud(device, pc, world_transform, &mut points, &mut bounds);
                 }
                 Geometry::Feature(_) => {
                     // FeatureModel not directly renderable; would need meshing first.
@@ -297,8 +274,7 @@ pub fn upload_scene(
                         world_transform,
                         shading_mode,
                         &mut meshes,
-                        &mut bounds_min,
-                        &mut bounds_max,
+                        &mut bounds,
                     );
                 }
             }
@@ -318,39 +294,17 @@ pub fn upload_scene(
                         &identity,
                         shading_mode,
                         &mut meshes,
-                        &mut bounds_min,
-                        &mut bounds_max,
+                        &mut bounds,
                     );
                 }
                 Geometry::Path2D(path) => {
-                    upload_path2d(
-                        device,
-                        path,
-                        &identity,
-                        &mut paths,
-                        &mut bounds_min,
-                        &mut bounds_max,
-                    );
+                    upload_path2d(device, path, &identity, &mut paths, &mut bounds);
                 }
                 Geometry::Path3D(path) => {
-                    upload_path3d(
-                        device,
-                        path,
-                        &identity,
-                        &mut paths,
-                        &mut bounds_min,
-                        &mut bounds_max,
-                    );
+                    upload_path3d(device, path, &identity, &mut paths, &mut bounds);
                 }
                 Geometry::PointCloud(pc) => {
-                    upload_point_cloud(
-                        device,
-                        pc,
-                        &identity,
-                        &mut points,
-                        &mut bounds_min,
-                        &mut bounds_max,
-                    );
+                    upload_point_cloud(device, pc, &identity, &mut points, &mut bounds);
                 }
                 Geometry::Feature(_) => {}
                 Geometry::Brep(brep) => {
@@ -364,8 +318,7 @@ pub fn upload_scene(
                         &identity,
                         shading_mode,
                         &mut meshes,
-                        &mut bounds_min,
-                        &mut bounds_max,
+                        &mut bounds,
                     );
                 }
             }
@@ -373,9 +326,8 @@ pub fn upload_scene(
     }
 
     // Ensure valid bounds
-    if bounds_min.x > bounds_max.x {
-        bounds_min = Point3::new(-1.0, -1.0, -1.0);
-        bounds_max = Point3::new(1.0, 1.0, 1.0);
+    if bounds.is_empty() {
+        bounds = Bounds3::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
     }
 
     log::info!(
@@ -383,41 +335,19 @@ pub fn upload_scene(
         meshes.len(),
         paths.len(),
         points.len(),
-        bounds_min.x,
-        bounds_min.y,
-        bounds_min.z,
-        bounds_max.x,
-        bounds_max.y,
-        bounds_max.z,
+        bounds.min.x,
+        bounds.min.y,
+        bounds.min.z,
+        bounds.max.x,
+        bounds.max.y,
+        bounds.max.z,
     );
 
     SceneGpuData {
         meshes,
         paths,
         points,
-        bounds_min,
-        bounds_max,
-    }
-}
-
-fn update_bounds(p: &Point3<f64>, min: &mut Point3<f64>, max: &mut Point3<f64>) {
-    if p.x < min.x {
-        min.x = p.x;
-    }
-    if p.y < min.y {
-        min.y = p.y;
-    }
-    if p.z < min.z {
-        min.z = p.z;
-    }
-    if p.x > max.x {
-        max.x = p.x;
-    }
-    if p.y > max.y {
-        max.y = p.y;
-    }
-    if p.z > max.z {
-        max.z = p.z;
+        bounds,
     }
 }
 
@@ -434,8 +364,7 @@ fn upload_mesh(
     world_transform: &Matrix4<f64>,
     shading_mode: ShadingMode,
     meshes: &mut Vec<GpuMesh>,
-    bounds_min: &mut Point3<f64>,
-    bounds_max: &mut Point3<f64>,
+    bounds: &mut Bounds3,
 ) {
     if mesh.faces.is_empty() {
         return;
@@ -470,7 +399,7 @@ fn upload_mesh(
         let mut verts = Vec::with_capacity(mesh.vertices.len());
         for (vi, p) in mesh.vertices.iter().enumerate() {
             let wp = transform_point(p, world_transform);
-            update_bounds(&wp, bounds_min, bounds_max);
+            bounds.include_point(&wp);
 
             let n = normals
                 .get(vi)
@@ -537,7 +466,7 @@ fn upload_mesh(
             for (ci, &vi) in face.iter().enumerate() {
                 let p = &mesh.vertices[vi];
                 let wp = transform_point(p, world_transform);
-                update_bounds(&wp, bounds_min, bounds_max);
+                bounds.include_point(&wp);
 
                 let n = corner_normals[fi * 3 + ci];
                 let color = vertex_colors
@@ -642,10 +571,9 @@ fn upload_path2d(
     path: &crate::path::Path2D,
     world_transform: &Matrix4<f64>,
     paths: &mut Vec<GpuPath>,
-    bounds_min: &mut Point3<f64>,
-    bounds_max: &mut Point3<f64>,
+    bounds: &mut Bounds3,
 ) {
-    let segments = path.discretize();
+    let segments = path.to_segments();
     let color = [0.0f32, 0.8, 0.2]; // Green for 2D paths
 
     for segment_points in &segments {
@@ -658,8 +586,8 @@ fn upload_path2d(
             let p1 = Point3::new(window[1].x, window[1].y, 0.0);
             let wp0 = transform_point(&p0, world_transform);
             let wp1 = transform_point(&p1, world_transform);
-            update_bounds(&wp0, bounds_min, bounds_max);
-            update_bounds(&wp1, bounds_min, bounds_max);
+            bounds.include_point(&wp0);
+            bounds.include_point(&wp1);
             vertices.push(LineVertex {
                 position: [wp0.x as f32, wp0.y as f32, wp0.z as f32],
                 color,
@@ -693,10 +621,9 @@ fn upload_path3d(
     path: &crate::path::Path3D,
     world_transform: &Matrix4<f64>,
     paths: &mut Vec<GpuPath>,
-    bounds_min: &mut Point3<f64>,
-    bounds_max: &mut Point3<f64>,
+    bounds: &mut Bounds3,
 ) {
-    let segments = path.discretize();
+    let segments = path.to_segments();
     let color = [0.8f32, 0.6, 0.0]; // Orange for 3D paths
 
     for segment_points in &segments {
@@ -707,8 +634,8 @@ fn upload_path3d(
         for window in segment_points.windows(2) {
             let wp0 = transform_point(&window[0], world_transform);
             let wp1 = transform_point(&window[1], world_transform);
-            update_bounds(&wp0, bounds_min, bounds_max);
-            update_bounds(&wp1, bounds_min, bounds_max);
+            bounds.include_point(&wp0);
+            bounds.include_point(&wp1);
             vertices.push(LineVertex {
                 position: [wp0.x as f32, wp0.y as f32, wp0.z as f32],
                 color,
@@ -742,8 +669,7 @@ fn upload_point_cloud(
     pc: &crate::geometry::PointCloud,
     world_transform: &Matrix4<f64>,
     points: &mut Vec<GpuPointCloud>,
-    bounds_min: &mut Point3<f64>,
-    bounds_max: &mut Point3<f64>,
+    bounds: &mut Bounds3,
 ) {
     if pc.points.is_empty() {
         return;
@@ -756,7 +682,7 @@ fn upload_point_cloud(
         .enumerate()
         .map(|(i, p)| {
             let wp = transform_point(p, world_transform);
-            update_bounds(&wp, bounds_min, bounds_max);
+            bounds.include_point(&wp);
             let c = pc
                 .colors
                 .as_ref()

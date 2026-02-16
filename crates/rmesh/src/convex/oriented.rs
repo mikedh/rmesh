@@ -512,12 +512,8 @@ mod tests {
         let obb = oriented_bounding_box(&rotated_verts, &hull_faces);
 
         // AABB
-        let (mut min_p, mut max_p) = (rotated_verts[0], rotated_verts[0]);
-        for v in &rotated_verts {
-            min_p = min_p.inf(v);
-            max_p = max_p.sup(v);
-        }
-        let aabb_volume = (max_p.x - min_p.x) * (max_p.y - min_p.y) * (max_p.z - min_p.z);
+        let aabb = crate::bounds::Bounds3::from_points(&rotated_verts).unwrap();
+        let aabb_volume = aabb.volume();
 
         assert!(
             hull_volume <= obb.volume() + 1e-10,

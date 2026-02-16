@@ -394,8 +394,12 @@ impl PyScene {
     /// or None if the scene has no geometry with valid bounds.
     #[getter]
     fn bounds(&self, py: Python<'_>) -> Option<Py<numpy::PyArray2<f64>>> {
-        self.data.bounds().map(|(min, max)| {
-            readonly_bounds(py, vec![min.x, min.y, min.z, max.x, max.y, max.z], 3)
+        self.data.bounds().map(|b| {
+            readonly_bounds(
+                py,
+                vec![b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z],
+                3,
+            )
         })
     }
 

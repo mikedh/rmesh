@@ -122,8 +122,8 @@ impl FidgetBackend {
         // Maps octree space [-1, 1]³ to model space (centered at center, size `size`)
         let half_size = size / 2.0;
 
-        // Create Matrix4 using nalgebra 0.34 (fidget's version)
-        let world_to_model = nalgebra_034::Matrix4::new(
+        // Create Matrix4 for fidget's OctreeSettings
+        let world_to_model = nalgebra::Matrix4::new(
             half_size, 0.0, 0.0, cx, 0.0, half_size, 0.0, cy, 0.0, 0.0, half_size, cz, 0.0, 0.0,
             0.0, 1.0,
         );

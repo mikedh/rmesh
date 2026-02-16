@@ -1,6 +1,7 @@
 use nalgebra::Point3;
 
 use crate::boundary::BrepModel;
+use crate::bounds::Bounds3;
 use crate::creation::feature::FeatureModel;
 use crate::mesh::Trimesh;
 use crate::path::{Path2D, Path3D};
@@ -18,21 +19,8 @@ pub struct PointCloud {
 
 impl PointCloud {
     /// Compute the axis-aligned bounding box of the point cloud.
-    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
-        if self.points.is_empty() {
-            return None;
-        }
-        let mut min = self.points[0];
-        let mut max = self.points[0];
-        for p in &self.points[1..] {
-            min.x = min.x.min(p.x);
-            min.y = min.y.min(p.y);
-            min.z = min.z.min(p.z);
-            max.x = max.x.max(p.x);
-            max.y = max.y.max(p.y);
-            max.z = max.z.max(p.z);
-        }
-        Some((min, max))
+    pub fn bounds(&self) -> Option<Bounds3> {
+        Bounds3::from_points(&self.points)
     }
 }
 
@@ -58,15 +46,10 @@ impl Geometry {
     ///
     /// Returns `None` if the geometry is empty or the type doesn't support bounds.
     /// For `Path2D`, the z-component is always 0.
-    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
+    pub fn bounds(&self) -> Option<Bounds3> {
         match self {
             Geometry::Mesh(mesh) => mesh.bounds(),
-            Geometry::Path2D(path) => path.as_ref().bounds().map(|(min, max)| {
-                (
-                    Point3::new(min.x, min.y, 0.0),
-                    Point3::new(max.x, max.y, 0.0),
-                )
-            }),
+            Geometry::Path2D(path) => path.as_ref().bounds().map(Bounds3::from_bounds2),
             Geometry::Path3D(path) => path.bounds(),
             Geometry::PointCloud(pc) => pc.bounds(),
             Geometry::Feature(_) => None,

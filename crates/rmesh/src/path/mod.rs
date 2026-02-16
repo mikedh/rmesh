@@ -42,19 +42,18 @@
 //! // Or from SVG
 //! let path = Path2D::from_svg("M0,0 L10,0 L10,5 L0,5 Z").unwrap();
 //!
-//! // Discretize with automatic scale-relative tolerance
+//! // Discretize to a single polyline
 //! let points = path.discretize();
 //!
-//! // Override deviation for specific tolerance
-//! let mut path_fine = path.clone();
-//! path_fine.deviation = Some(0.0001);
-//! let points_fine = path_fine.discretize();
+//! // Or get per-segment polylines (for rendering)
+//! let segments = path.to_segments();
 //! ```
 
 pub mod discretize;
 pub mod entity;
 pub mod graph;
 pub mod polygons;
+pub mod raster;
 pub mod svg;
 
 /// Default deviation ratio for curve discretization.
@@ -91,9 +90,49 @@ macro_rules! resolve_deviation {
 use nalgebra::{Matrix4, Point2, Point3};
 use serde::{Deserialize, Serialize};
 
+use crate::bounds::{Bounds2, Bounds3};
 use crate::cache::Cache;
 use crate::creation::Triangulator;
 use crate::project::EPSILON_RELATIVE;
+
+/// Snap ring vertices radially onto the nearest expected circle.
+///
+/// For each vertex, finds the circle whose center is closest and projects
+/// the vertex radially onto that circle if the radial error is below a
+/// sagitta-based tolerance. This ensures `ring_to_segments` can detect
+/// circle membership within `EPSILON_RELATIVE` after i_overlay buffering
+/// introduces discretization error.
+fn snap_ring_to_circles(ring: &mut [Point2<f64>], circles: &[(Point2<f64>, f64)]) {
+    if circles.is_empty() {
+        return;
+    }
+    for pt in ring.iter_mut() {
+        // Find the circle whose center is nearest
+        let mut best_ci = 0;
+        let mut best_dist = f64::INFINITY;
+        for (ci, (center, _)) in circles.iter().enumerate() {
+            let d = (pt.x - center.x).powi(2) + (pt.y - center.y).powi(2);
+            if d < best_dist {
+                best_dist = d;
+                best_ci = ci;
+            }
+        }
+        let (center, radius) = circles[best_ci];
+        let offset_x = pt.x - center.x;
+        let offset_y = pt.y - center.y;
+        let d = (offset_x * offset_x + offset_y * offset_y).sqrt();
+        if d < 1e-15 {
+            continue;
+        }
+        let radial_error = (d - radius).abs();
+        // Snap if within 1% of radius (generous enough for polygon buffering)
+        if radial_error < radius * 0.01 {
+            let scale = radius / d;
+            pt.x = center.x + offset_x * scale;
+            pt.y = center.y + offset_y * scale;
+        }
+    }
+}
 
 // Re-export commonly used types
 pub use entity::arc::{arc_center, arc_center_from_3_points};
@@ -284,7 +323,7 @@ pub struct Path2D {
 
     // Cached - computed lazily on first access (skip in serde)
     #[serde(skip)]
-    cache_bounds: Cache<Option<(Point2<f64>, Point2<f64>)>>,
+    cache_bounds: Cache<Option<Bounds2>>,
     #[serde(skip)]
     cache_polygons: Cache<Vec<Polygon2D>>,
     #[serde(skip)]
@@ -470,81 +509,64 @@ impl Path2D {
     /// Get the axis-aligned bounding box of this path
     ///
     /// Returns `None` if the path is empty. Cached on first access.
-    pub fn bounds(&self) -> Option<(Point2<f64>, Point2<f64>)> {
+    pub fn bounds(&self) -> Option<Bounds2> {
         *self.cache_bounds.get_or_init(|| self.compute_bounds())
     }
 
     /// Compute bounds (internal, called by cache)
-    fn compute_bounds(&self) -> Option<(Point2<f64>, Point2<f64>)> {
-        if self.vertices.is_empty() {
-            return None;
-        }
-
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        // Include all vertices in bounds
-        for v in &self.vertices {
-            min_x = min_x.min(v.x);
-            min_y = min_y.min(v.y);
-            max_x = max_x.max(v.x);
-            max_y = max_y.max(v.y);
-        }
+    fn compute_bounds(&self) -> Option<Bounds2> {
+        let mut b = Bounds2::from_points(&self.vertices)?;
 
         // Expand for circles/ellipses
         for segment in &self.segments {
             match segment {
                 Segment2D::Circle(circle) => {
                     let center = self.vertices[circle.center];
-                    min_x = min_x.min(center.x - circle.radius);
-                    min_y = min_y.min(center.y - circle.radius);
-                    max_x = max_x.max(center.x + circle.radius);
-                    max_y = max_y.max(center.y + circle.radius);
+                    let r = circle.radius;
+                    b.include_point(&Point2::new(center.x - r, center.y - r));
+                    b.include_point(&Point2::new(center.x + r, center.y + r));
                 }
                 Segment2D::Ellipse(ellipse) => {
                     let center = self.vertices[ellipse.center];
                     let r = ellipse.major.max(ellipse.minor);
-                    min_x = min_x.min(center.x - r);
-                    min_y = min_y.min(center.y - r);
-                    max_x = max_x.max(center.x + r);
-                    max_y = max_y.max(center.y + r);
+                    b.include_point(&Point2::new(center.x - r, center.y - r));
+                    b.include_point(&Point2::new(center.x + r, center.y + r));
                 }
                 Segment2D::Arc(arc) => {
                     if let (Some(center), Some(r)) =
                         (arc.center(&self.vertices), arc.radius(&self.vertices))
                     {
-                        min_x = min_x.min(center.x - r);
-                        min_y = min_y.min(center.y - r);
-                        max_x = max_x.max(center.x + r);
-                        max_y = max_y.max(center.y + r);
+                        b.include_point(&Point2::new(center.x - r, center.y - r));
+                        b.include_point(&Point2::new(center.x + r, center.y + r));
                     }
                 }
                 _ => {}
             }
         }
 
-        Some((Point2::new(min_x, min_y), Point2::new(max_x, max_y)))
+        Some(b)
     }
 
     /// Get the extents (dimensions) of this path as [width, height]
     ///
     /// Returns None for empty paths.
     pub fn extents(&self) -> Option<[f64; 2]> {
-        self.bounds()
-            .map(|(min, max)| [max.x - min.x, max.y - min.y])
+        self.bounds().map(|b| {
+            let e = b.extents();
+            [e.x, e.y]
+        })
     }
 
     // === Discretization ===
 
-    /// Discretize all segments to point sequences
+    /// Discretize all segments to per-segment point sequences.
     ///
     /// Uses `deviation` field if set, otherwise computes from extents * DEVIATION_RATIO.
     ///
     /// # Returns
-    /// A vector of point sequences, one per segment.
-    pub fn discretize(&self) -> Vec<Vec<Point2<f64>>> {
+    /// A vector of point sequences, one per segment. Useful for rendering
+    /// where each segment needs to be drawn independently.
+    pub fn to_segments(&self) -> Vec<Vec<Point2<f64>>> {
         let tol = resolve_deviation!(self);
         self.segments
             .iter()
@@ -557,11 +579,11 @@ impl Path2D {
             .collect()
     }
 
-    /// Discretize this path into a single polyline (flattened)
+    /// Discretize this path into a single polyline.
     ///
-    /// This is a convenience method that concatenates all discretized segments.
-    /// For paths with multiple connected components, use `discretize()` instead.
-    pub fn discretize_flat(&self) -> Vec<Point2<f64>> {
+    /// Concatenates all discretized segments into one contiguous point sequence.
+    /// For per-segment polylines (e.g. rendering), use `to_segments()` instead.
+    pub fn discretize(&self) -> Vec<Point2<f64>> {
         let tol = resolve_deviation!(self);
         let mut points = Vec::new();
         for segment in &self.segments {
@@ -695,7 +717,7 @@ impl Path2D {
 
     /// Calculate the total length of this path
     pub fn length(&self) -> f64 {
-        let points = self.discretize_flat();
+        let points = self.discretize();
         points
             .windows(2)
             .map(|w| ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt())
@@ -794,7 +816,15 @@ impl Path2D {
                 let mut path = if adjusted.is_empty() {
                     bp.to_path2d()
                 } else {
-                    polygon_to_path(bp, &adjusted, None)
+                    // Snap buffered polygon vertices onto expected circles
+                    // so that ring_to_segments can detect them within
+                    // EPSILON_RELATIVE tolerance.
+                    let mut snapped = bp.clone();
+                    snap_ring_to_circles(&mut snapped.exterior, &adjusted);
+                    for interior in &mut snapped.interiors {
+                        snap_ring_to_circles(interior, &adjusted);
+                    }
+                    polygon_to_path(&snapped, &adjusted, None)
                 };
                 path.to_3d = self.to_3d;
                 results.push(path);
@@ -802,6 +832,28 @@ impl Path2D {
         }
 
         results
+    }
+
+    /// Clip this path against a boolean image mask, returning visible fragments as polylines.
+    ///
+    /// Discretizes the path, resamples at pixel-level density, batch-checks
+    /// against the mask, inflates transitions to close small gaps, links
+    /// nearby blocks, and returns contiguous visible fragments in metric coordinates.
+    ///
+    /// # Arguments
+    /// * `mask` - Boolean image mask (nonzero = inside)
+    /// * `to_raster` - Affine transform from metric → pixel coordinates
+    /// * `inflate_radius` - 1D dilation radius in samples for gap closing along curve
+    /// * `link_distance` - Metric distance threshold for merging nearby visible blocks
+    pub fn raster_clip(
+        &self,
+        mask: &raster::BooleanImage,
+        to_raster: &nalgebra::Matrix3<f64>,
+        inflate_radius: usize,
+        link_distance: f64,
+    ) -> Vec<Vec<Point2<f64>>> {
+        let polyline = self.discretize();
+        raster::raster_clip(&polyline, mask, to_raster, inflate_radius, link_distance)
     }
 
     /// Get the area of the first ring
@@ -836,7 +888,7 @@ pub struct Path3D {
 
     // Cached - computed lazily on first access (skip in serde)
     #[serde(skip)]
-    cache_bounds: Cache<Option<(Point3<f64>, Point3<f64>)>>,
+    cache_bounds: Cache<Option<Bounds3>>,
 }
 
 impl Clone for Path3D {
@@ -927,66 +979,43 @@ impl Path3D {
     /// Get the axis-aligned bounding box of this path
     ///
     /// Returns `None` if the path is empty. Cached on first access.
-    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
+    pub fn bounds(&self) -> Option<Bounds3> {
         *self.cache_bounds.get_or_init(|| self.compute_bounds())
     }
 
     /// Compute bounds (internal, called by cache)
-    fn compute_bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
-        if self.vertices.is_empty() {
-            return None;
-        }
-
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut min_z = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        let mut max_z = f64::NEG_INFINITY;
-
-        // Include all vertices
-        for v in &self.vertices {
-            min_x = min_x.min(v.x);
-            min_y = min_y.min(v.y);
-            min_z = min_z.min(v.z);
-            max_x = max_x.max(v.x);
-            max_y = max_y.max(v.y);
-            max_z = max_z.max(v.z);
-        }
+    fn compute_bounds(&self) -> Option<Bounds3> {
+        let mut b = Bounds3::from_points(&self.vertices)?;
 
         // Expand for circles
         for segment in &self.segments {
             if let Segment3D::Circle(circle) = segment {
                 let center = self.vertices[circle.center];
-                min_x = min_x.min(center.x - circle.radius);
-                min_y = min_y.min(center.y - circle.radius);
-                min_z = min_z.min(center.z - circle.radius);
-                max_x = max_x.max(center.x + circle.radius);
-                max_y = max_y.max(center.y + circle.radius);
-                max_z = max_z.max(center.z + circle.radius);
+                let r = circle.radius;
+                b.include_point(&Point3::new(center.x - r, center.y - r, center.z - r));
+                b.include_point(&Point3::new(center.x + r, center.y + r, center.z + r));
             }
         }
 
-        Some((
-            Point3::new(min_x, min_y, min_z),
-            Point3::new(max_x, max_y, max_z),
-        ))
+        Some(b)
     }
 
     /// Get the extents (dimensions) of this path as [width, height, depth]
     ///
     /// Returns None for empty paths.
     pub fn extents(&self) -> Option<[f64; 3]> {
-        self.bounds()
-            .map(|(min, max)| [max.x - min.x, max.y - min.y, max.z - min.z])
+        self.bounds().map(|b| {
+            let e = b.extents();
+            [e.x, e.y, e.z]
+        })
     }
 
     // === Discretization ===
 
-    /// Discretize all segments to point sequences
+    /// Discretize all segments to per-segment point sequences.
     ///
     /// Uses `deviation` field if set, otherwise computes from extents * DEVIATION_RATIO.
-    pub fn discretize(&self) -> Vec<Vec<Point3<f64>>> {
+    pub fn to_segments(&self) -> Vec<Vec<Point3<f64>>> {
         let tol = resolve_deviation!(self);
         self.segments
             .iter()
@@ -998,8 +1027,8 @@ impl Path3D {
             .collect()
     }
 
-    /// Discretize this path into a single polyline (flattened)
-    pub fn discretize_flat(&self) -> Vec<Point3<f64>> {
+    /// Discretize this path into a single polyline.
+    pub fn discretize(&self) -> Vec<Point3<f64>> {
         let tol = resolve_deviation!(self);
         let mut points = Vec::new();
         for segment in &self.segments {
@@ -1063,7 +1092,7 @@ impl Path3D {
 
     /// Calculate the total length of this path
     pub fn length(&self) -> f64 {
-        let points = self.discretize_flat();
+        let points = self.discretize();
         points.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
     }
 }
@@ -1105,9 +1134,9 @@ mod tests {
     }
 
     #[test]
-    fn test_discretize() {
+    fn test_to_segments() {
         let path = Path2D::rectangle(10.0, 5.0);
-        let segments = path.discretize();
+        let segments = path.to_segments();
 
         // Should have 4 segments
         assert_eq!(segments.len(), 4);
@@ -1119,9 +1148,9 @@ mod tests {
     }
 
     #[test]
-    fn test_discretize_flat() {
+    fn test_discretize() {
         let path = Path2D::rectangle(10.0, 5.0);
-        let points = path.discretize_flat();
+        let points = path.discretize();
 
         // Should have 4 corners + final endpoint = 5 points
         assert_eq!(points.len(), 5);
@@ -1207,12 +1236,12 @@ mod tests {
         // Coarse deviation = fewer points
         let mut coarse_path = path.clone();
         coarse_path.deviation = Some(1.0);
-        let coarse = coarse_path.discretize();
+        let coarse = coarse_path.to_segments();
 
         // Fine deviation = more points
         let mut fine_path = path.clone();
         fine_path.deviation = Some(0.001);
-        let fine = fine_path.discretize();
+        let fine = fine_path.to_segments();
 
         let coarse_count: usize = coarse.iter().map(|s| s.len()).sum();
         let fine_count: usize = fine.iter().map(|s| s.len()).sum();
@@ -1309,6 +1338,174 @@ mod tests {
                     c_verts.len()
                 );
             }
+        }
+    }
+
+    // =========================================================================
+    // Buffer arc preservation tests
+    // =========================================================================
+
+    /// Helper: find all Circle2 segments and return their radii
+    fn circle_radii(paths: &[Path2D]) -> Vec<f64> {
+        paths
+            .iter()
+            .flat_map(|p| {
+                p.segments.iter().filter_map(|s| {
+                    if let Segment2D::Circle(c) = s {
+                        Some(c.radius)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Helper: find all Arc2 segments and return their radii
+    fn arc_radii(paths: &[Path2D]) -> Vec<f64> {
+        paths
+            .iter()
+            .flat_map(|p| {
+                p.segments.iter().filter_map(|s| {
+                    if let Segment2D::Arc(a) = s {
+                        a.radius(&p.vertices)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Helper: find all circular radii (Circle2 or Arc2)
+    fn all_circular_radii(paths: &[Path2D]) -> Vec<f64> {
+        let mut r = circle_radii(paths);
+        r.extend(arc_radii(paths));
+        r
+    }
+
+    #[test]
+    fn test_buffer_circle_expand_geometry() {
+        let path = Path2D::circle(10.0);
+        let buffered = path.buffer(2.0);
+        assert_eq!(buffered.len(), 1, "buffer should produce 1 path");
+
+        // Verify geometry: circumference should be ~2*pi*12
+        let expected_length = 2.0 * std::f64::consts::PI * 12.0;
+        assert_relative_eq!(buffered[0].length(), expected_length, epsilon = 1.0);
+
+        // Verify area: pi*12^2
+        let expected_area = std::f64::consts::PI * 144.0;
+        assert_relative_eq!(buffered[0].area(), expected_area, epsilon = 5.0);
+    }
+
+    #[test]
+    fn test_buffer_circle_shrink_geometry() {
+        let path = Path2D::circle(10.0);
+        let buffered = path.buffer(-3.0);
+        assert_eq!(buffered.len(), 1);
+
+        // Shrunk circle should be smaller than original
+        assert!(
+            buffered[0].length() < path.length(),
+            "shrunk circle should have smaller circumference"
+        );
+        assert!(
+            buffered[0].area() < path.area(),
+            "shrunk circle should have smaller area"
+        );
+    }
+
+    #[test]
+    fn test_buffer_circle_to_zero() {
+        let path = Path2D::circle(5.0);
+        let buffered = path.buffer(-5.0);
+        // Should collapse to nothing
+        assert!(
+            buffered.is_empty() || buffered.iter().all(|p| p.segments.is_empty()),
+            "circle buffered by -radius should vanish"
+        );
+    }
+
+    #[test]
+    fn test_buffer_circle_shrink_past_zero() {
+        let path = Path2D::circle(5.0);
+        let buffered = path.buffer(-6.0);
+        assert!(
+            buffered.is_empty() || buffered.iter().all(|p| p.segments.is_empty()),
+            "circle buffered past zero should vanish"
+        );
+    }
+
+    #[test]
+    fn test_buffer_preserves_to_3d() {
+        let mut path = Path2D::circle(10.0);
+        path.to_3d = Some(Matrix4::identity());
+        let buffered = path.buffer(2.0);
+        assert_eq!(buffered.len(), 1);
+        assert!(
+            buffered[0].to_3d.is_some(),
+            "to_3d transform should be preserved through buffer"
+        );
+    }
+
+    #[test]
+    fn test_buffer_rectangle_expand() {
+        let path = Path2D::rectangle(10.0, 5.0);
+        let buffered = path.buffer(1.0);
+        assert!(!buffered.is_empty());
+
+        // Expanded rectangle should be larger
+        let original_area = path.area();
+        let buffered_area: f64 = buffered.iter().map(|p| p.area()).sum();
+        assert!(
+            buffered_area > original_area,
+            "buffered rectangle should have larger area"
+        );
+    }
+
+    #[test]
+    fn test_buffer_cylinder_project_roundtrip() {
+        use crate::creation::create_cylinder;
+
+        let mesh = create_cylinder(10.0, 20.0, 64);
+
+        // Project along Z axis at z=0 (should intersect the barrel)
+        let normal = nalgebra::Vector3::new(0.0, 0.0, 1.0);
+        let origin = nalgebra::Point3::origin();
+        let projections = mesh.project(&normal, &origin, &[0.0]);
+
+        // project returns Vec<Option<Vec<Path2D>>>, one per level
+        assert!(!projections.is_empty());
+        let paths = projections[0].as_ref().expect("should have paths at z=0");
+
+        // Find the path that contains circles
+        let path_with_circle = paths
+            .iter()
+            .find(|p| p.segments.iter().any(|s| matches!(s, Segment2D::Circle(_))));
+
+        if let Some(path) = path_with_circle {
+            let radii = circle_radii(&[path.clone()]);
+            assert!(
+                !radii.is_empty(),
+                "projected cylinder should have Circle2 segments"
+            );
+            // Original radius should be ~10
+            assert_relative_eq!(radii[0], 10.0, epsilon = 0.5);
+
+            // Buffer outward by 3 - check geometry
+            let expanded = path.buffer(3.0);
+            assert!(!expanded.is_empty());
+            let expected_length = 2.0 * std::f64::consts::PI * 13.0;
+            assert_relative_eq!(expanded[0].length(), expected_length, epsilon = 2.0);
+
+            // Buffer inward by 2 - check it produces something smaller
+            let shrunk = path.buffer(-2.0);
+            assert!(!shrunk.is_empty());
+            assert!(
+                shrunk[0].length() < expanded[0].length(),
+                "shrunk should be shorter than expanded"
+            );
         }
     }
 }

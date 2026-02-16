@@ -71,7 +71,7 @@ impl<'a> Viewer2DApp<'a> {
         let gpu = GpuContext::new(window.clone())?;
         let renderer = Scene2DRenderer::new(&gpu.device, gpu.surface_format());
 
-        let view = View2D::new(self.data.bounds.0, self.data.bounds.1);
+        let view = View2D::new(self.data.bounds.min, self.data.bounds.max);
 
         let gpu_data = upload_2d_data(&gpu.device, &renderer, self.data);
 

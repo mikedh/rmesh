@@ -625,7 +625,7 @@ impl PyPolygon2D {
     fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
         self.data
             .bounds()
-            .map(|(min, max)| readonly_bounds(py, vec![min.x, min.y, max.x, max.y], 2))
+            .map(|b| readonly_bounds(py, vec![b.min.x, b.min.y, b.max.x, b.max.y], 2))
     }
 
     /// Extents of the bounding box [width, height] as a (2,) array,
@@ -815,7 +815,7 @@ impl PyPath2D {
     /// Returns a list of (M, 2) arrays, one per segment.
     fn discretize(&self, py: Python<'_>) -> Vec<Py<PyArray2<f64>>> {
         self.data
-            .discretize()
+            .to_segments()
             .into_iter()
             .map(|pts| {
                 let flat: Vec<f64> = pts.iter().flat_map(|p| [p.x, p.y]).collect();
@@ -833,7 +833,7 @@ impl PyPath2D {
     fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
         self.data
             .bounds()
-            .map(|(min, max)| readonly_bounds(py, vec![min.x, min.y, max.x, max.y], 2))
+            .map(|b| readonly_bounds(py, vec![b.min.x, b.min.y, b.max.x, b.max.y], 2))
     }
 
     /// Extents of the bounding box [width, height] as a (2,) array,
@@ -887,7 +887,7 @@ impl PyPath3D {
     /// Discretize the path into a list of (M, 3) polylines.
     fn discretize(&self, py: Python<'_>) -> Vec<Py<PyArray2<f64>>> {
         self.data
-            .discretize()
+            .to_segments()
             .into_iter()
             .map(|pts| {
                 let flat: Vec<f64> = pts.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
@@ -903,8 +903,12 @@ impl PyPath3D {
     /// or None if the path has no vertices.
     #[getter]
     fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
-        self.data.bounds().map(|(min, max)| {
-            readonly_bounds(py, vec![min.x, min.y, min.z, max.x, max.y, max.z], 3)
+        self.data.bounds().map(|b| {
+            readonly_bounds(
+                py,
+                vec![b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z],
+                3,
+            )
         })
     }
 
@@ -1213,8 +1217,12 @@ impl PyTrimesh {
 
     #[getter]
     fn bounds(&self, py: Python<'_>) -> Option<Py<PyArray2<f64>>> {
-        self.data.bounds().map(|(min, max)| {
-            readonly_bounds(py, vec![min.x, min.y, min.z, max.x, max.y, max.z], 3)
+        self.data.bounds().map(|b| {
+            readonly_bounds(
+                py,
+                vec![b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z],
+                3,
+            )
         })
     }
 
@@ -1790,6 +1798,17 @@ impl PyTrimesh {
         img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(pyo3::types::PyBytes::new(py, &buf))
+    }
+    /// Serialize the mesh to bytes for cross-extension transfer.
+    ///
+    /// Returns
+    /// -------
+    /// bytes
+    ///     Compressed binary representation of the mesh.
+    fn to_bytes(&self) -> PyResult<Vec<u8>> {
+        use rmesh::serialize::RmeshSerializable;
+        RmeshSerializable::to_bytes(&self.data, None, false)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 }
 

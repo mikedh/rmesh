@@ -335,7 +335,7 @@ pub fn render_to_image(scene: &crate::scene::Scene, options: &RenderOptions) -> 
         .prepare_bind_groups(&device, &scene_data.meshes);
 
     #[allow(clippy::cast_possible_truncation)]
-    let scene_extent = (scene_data.bounds_max - scene_data.bounds_min).norm() as f32;
+    let scene_extent = scene_data.bounds.diagonal() as f32;
     let scene_extent = if scene_extent > 0.001 {
         scene_extent
     } else {
@@ -345,7 +345,7 @@ pub fn render_to_image(scene: &crate::scene::Scene, options: &RenderOptions) -> 
 
     // Camera auto-fit
     let mut trackball = crate::scene::Trackball::default();
-    trackball.fit(scene_data.bounds_min, scene_data.bounds_max);
+    trackball.fit(scene_data.bounds.min, scene_data.bounds.max);
     let camera = crate::scene::Camera::perspective(
         std::f64::consts::FRAC_PI_4,
         f64::from(scene_extent) * 0.001,
@@ -424,6 +424,7 @@ pub fn render_to_image(scene: &crate::scene::Scene, options: &RenderOptions) -> 
         })
         .ok();
 
+    #[allow(clippy::disallowed_methods)]
     let data = slice.get_mapped_range();
     let mut rgba = Vec::with_capacity((w * h * bytes_per_pixel) as usize);
     for row in 0..h {

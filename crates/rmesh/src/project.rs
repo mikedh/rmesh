@@ -335,7 +335,7 @@ pub fn project_polygons(
 
     let solver = Solver::with_precision(Precision::MEDIUM_HIGH);
     let options = OverlayOptions {
-        min_output_area: 1e-20,
+        min_output_area: EPSILON_MERGE_SQ,
         ..Default::default()
     };
 
@@ -412,16 +412,11 @@ pub fn project_polygons(
         }
 
         // 4. Convert accumulated shapes to Polygon2D
-        //    Adjust to_3d so (x, y, 0) maps to the plane at this level,
-        //    i.e. shift the translation by level * normal (column 2 of to_3d).
+        //    Compose to_3d with a local-frame Z translation so that
+        //    (x, y, 0) maps to the plane at this level.
         if !accumulated.is_empty() {
-            let level_to_3d = to_3d.map(|base| {
-                let mut m = base;
-                m[(0, 3)] += level * m[(0, 2)];
-                m[(1, 3)] += level * m[(1, 2)];
-                m[(2, 3)] += level * m[(2, 2)];
-                m
-            });
+            let level_to_3d =
+                to_3d.map(|base| base * Matrix4::new_translation(&Vector3::new(0.0, 0.0, level)));
             let polygons = shapes_to_polygons(&accumulated, level_to_3d);
             if !polygons.is_empty() {
                 results[orig_idx] = Some(polygons);
@@ -436,14 +431,20 @@ pub fn project_polygons(
 fn face_contour(face: [usize; 3], vertices: &[Point2<f64>]) -> Option<Contour> {
     let (a, b, c) = (vertices[face[0]], vertices[face[1]], vertices[face[2]]);
     let cross = cross_2d(&a, &b, &c);
-    if cross.abs() < 1e-30 {
+    if cross.abs() < EPSILON_MERGE_SQ {
         return None;
     }
-    let mut tri = vec![[a.x, a.y], [b.x, b.y], [c.x, c.y]];
-    if cross < 0.0 {
-        tri.reverse();
+    if (b - a).norm_squared() < EPSILON_MERGE_SQ
+        || (c - b).norm_squared() < EPSILON_MERGE_SQ
+        || (a - c).norm_squared() < EPSILON_MERGE_SQ
+    {
+        return None;
     }
-    Some(tri)
+    Some(if cross > 0.0 {
+        vec![[a.x, a.y], [b.x, b.y], [c.x, c.y]]
+    } else {
+        vec![[c.x, c.y], [b.x, b.y], [a.x, a.y]]
+    })
 }
 
 /// Clip a triangle to the half-space above `level`, returned as a CCW contour.
@@ -481,30 +482,33 @@ fn clip_face(
     ];
     let d = [d[r], d[(r + 1) % 3], d[(r + 2) % 3]];
     let cross = cross_2d(&p[0], &p[1], &p[2]);
-    if cross.abs() < 1e-30 {
+    if cross.abs() < EPSILON_MERGE_SQ {
         return None;
     }
 
-    let lerp = |a: usize, b: usize| -> [f64; 2] {
+    let lerp = |a: usize, b: usize| -> Point2<f64> {
         let t = -d[a] / (d[b] - d[a]);
-        [
-            p[a].x + t * (p[b].x - p[a].x),
-            p[a].y + t * (p[b].y - p[a].y),
-        ]
+        p[a] + t * (p[b] - p[a])
     };
-    let pt = |i: usize| -> [f64; 2] { [p[i].x, p[i].y] };
 
-    // count==1: vertex 0 inside, 1+2 outside → clipped triangle
-    // count==2: vertex 0 outside, 1+2 inside → clipped quad
-    let mut pts = if count == 1 {
-        vec![pt(0), lerp(0, 1), lerp(0, 2)]
+    // count==1: vertex 0 inside, 1+2 outside → clipped triangle (3 pts)
+    // count==2: vertex 0 outside, 1+2 inside → clipped quad (4 pts)
+    let (pts, n) = if count == 1 {
+        ([p[0], lerp(0, 1), lerp(0, 2), Point2::origin()], 3)
     } else {
-        vec![lerp(0, 1), pt(1), pt(2), lerp(0, 2)]
+        ([lerp(0, 1), p[1], p[2], lerp(0, 2)], 4)
     };
-    if cross < 0.0 {
-        pts.reverse();
+
+    // Reject polygons with any near-zero-length edge (grazing clips, slivers).
+    if (0..n).any(|i| (pts[(i + 1) % n] - pts[i]).norm_squared() < EPSILON_MERGE_SQ) {
+        return None;
     }
-    Some(pts)
+
+    Some(if cross > 0.0 {
+        (0..n).map(|i| [pts[i].x, pts[i].y]).collect()
+    } else {
+        (0..n).rev().map(|i| [pts[i].x, pts[i].y]).collect()
+    })
 }
 
 /// Convert a discrete ring of points into a sequence of `Segment2D`,
@@ -891,6 +895,58 @@ mod tests {
     }
 
     #[test]
+    fn test_project_to_3d_offset_origin() {
+        // A cube placed far from the world origin: verify that
+        // reconstructed 3D vertices land inside the cube's AABB,
+        // not 1000 miles away due to a broken transform.
+        let offset = Vector3::new(100.0, -200.0, 50.0);
+        let extents = [2.0, 2.0, 2.0];
+        let base = create_box(&extents);
+        let verts_3d: Vec<Point3<f64>> = base.vertices.iter().map(|v| v + offset).collect();
+
+        let center = Point3::from(offset);
+        let normal = Vector3::new(0.0, 0.0, 1.0);
+        let plane = Plane::new(normal, center);
+
+        let dots = vertex_dots(&verts_3d, &normal, &center);
+        let projected = plane.to_2d(&verts_3d);
+        let to_3d = plane.transform_to_2d().try_inverse();
+        // levels are negative (below the origin plane)
+        let levels = vec![-0.8, -0.4, 0.0];
+
+        let results = project_polygons(&base.faces, &dots, &projected, &levels, to_3d);
+
+        // Cube AABB
+        let half = extents[0] / 2.0;
+        let aabb_min = center - Vector3::new(half, half, half);
+        let aabb_max = center + Vector3::new(half, half, half);
+
+        for (i, level) in levels.iter().enumerate() {
+            let polys = results[i].as_ref().expect("should have projection");
+            for poly in polys {
+                let to_3d = poly.to_3d.expect("should have to_3d");
+                for p in &poly.exterior {
+                    let p3 = to_3d.transform_point(&Point3::new(p.x, p.y, 0.0));
+                    // Height relative to origin should equal the level
+                    let height = (p3 - center).dot(&normal);
+                    assert_relative_eq!(height, *level, epsilon = 1e-6);
+                    // Must be inside the cube's AABB (with tolerance)
+                    let tol = 1e-6;
+                    assert!(
+                        p3.x >= aabb_min.x - tol
+                            && p3.x <= aabb_max.x + tol
+                            && p3.y >= aabb_min.y - tol
+                            && p3.y <= aabb_max.y + tol
+                            && p3.z >= aabb_min.z - tol
+                            && p3.z <= aabb_max.z + tol,
+                        "Vertex {p3:?} outside cube AABB [{aabb_min:?}, {aabb_max:?}]"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_project_empty() {
         let faces: Vec<[usize; 3]> = vec![];
         let dots: Vec<f64> = vec![];
@@ -1271,5 +1327,80 @@ mod tests {
         assert_eq!(result[1], Some(0));
         // Outer is not contained
         assert_eq!(result[0], None);
+    }
+
+    /// Projection of a real part should not produce tiny "speckle" rings.
+    ///
+    /// These are degenerate zero-area rings from triangle slivers at the
+    /// cut plane surviving through the polygon boolean union.
+    #[test]
+    fn test_project_no_speckles() {
+        use crate::exchange::{FileType, load};
+        use crate::geometry::Geometry;
+
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test/project/project");
+        let data = std::fs::read(base.with_extension("glb")).unwrap();
+        let scene = load(&data, Some(FileType::GLB), None).unwrap();
+        let mesh = scene
+            .geometry
+            .values()
+            .find_map(|g| match g {
+                Geometry::Mesh(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(base.with_extension("json")).unwrap())
+                .unwrap();
+        let arr = |key: &str| -> Vec<f64> {
+            json[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap())
+                .collect()
+        };
+        let o = arr("origin");
+        let n = arr("normal");
+        let levels = arr("levels");
+        let origin = Point3::new(o[0], o[1], o[2]);
+        let normal = Vector3::new(n[0], n[1], n[2]);
+
+        let results = mesh.project(&normal, &origin, &levels);
+
+        let mut speckle_count = 0usize;
+        for (li, result) in results.iter().enumerate() {
+            if let Some(paths) = result {
+                // Compute AABB area across all paths at this level.
+                let mut bounds = crate::bounds::Bounds2::empty();
+                for path in paths {
+                    if let Some(b) = path.bounds() {
+                        bounds = bounds.union(&b);
+                    }
+                }
+                let e = bounds.extents();
+                let threshold = e.x * e.y * 0.01;
+
+                for path in paths {
+                    for ring in &path.rings_discrete() {
+                        let area = crate::path::polygons::signed_area(ring).abs();
+                        if area < threshold {
+                            speckle_count += 1;
+                        }
+                    }
+                }
+                if speckle_count > 0 {
+                    eprintln!("level[{li}]={:.6}: {speckle_count} speckle(s)", levels[li],);
+                }
+            }
+        }
+
+        assert_eq!(speckle_count, 0, "found {speckle_count} speckle ring(s)");
     }
 }

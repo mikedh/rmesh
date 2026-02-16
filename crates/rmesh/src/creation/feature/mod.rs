@@ -163,19 +163,7 @@ impl FeatureModel {
     ///
     /// Returns `None` if no operations produce bounds.
     pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
-        let mut min = [f64::MAX; 3];
-        let mut max = [f64::MIN; 3];
-        let mut found = false;
-
-        let mut update = |p: nalgebra::Point3<f64>| {
-            found = true;
-            min[0] = min[0].min(p.x);
-            min[1] = min[1].min(p.y);
-            min[2] = min[2].min(p.z);
-            max[0] = max[0].max(p.x);
-            max[1] = max[1].max(p.y);
-            max[2] = max[2].max(p.z);
-        };
+        let mut b = crate::bounds::Bounds3::empty();
 
         for op in &self.operations {
             let (sketch, depth) = match op {
@@ -185,10 +173,10 @@ impl FeatureModel {
                 Operation::Loft(l) => {
                     // Use all loft profiles
                     for profile in &l.profiles {
-                        if let Some((lo, hi)) = profile.bounds() {
+                        if let Some(sb) = profile.bounds() {
                             let plane = &profile.plane;
-                            for corner in corners_2d(lo, hi) {
-                                update(plane.point_to_world(corner));
+                            for corner in corners_2d(sb.min, sb.max) {
+                                b.include_point(&plane.point_to_world(corner));
                             }
                         }
                     }
@@ -198,16 +186,16 @@ impl FeatureModel {
                 Operation::Fillet(_) | Operation::Chamfer(_) => continue,
             };
 
-            if let Some((lo, hi)) = sketch.bounds() {
+            if let Some(sb) = sketch.bounds() {
                 let plane = &sketch.plane;
                 let normal = plane.normal();
                 let end_offset = normal * depth;
 
-                for corner in corners_2d(lo, hi) {
+                for corner in corners_2d(sb.min, sb.max) {
                     let world = plane.point_to_world(corner);
-                    update(world);
+                    b.include_point(&world);
                     // Also include the extruded end
-                    update(nalgebra::Point3::new(
+                    b.include_point(&nalgebra::Point3::new(
                         world.x + end_offset.x,
                         world.y + end_offset.y,
                         world.z + end_offset.z,
@@ -216,7 +204,7 @@ impl FeatureModel {
             }
         }
 
-        if found { Some((min, max)) } else { None }
+        b.to_option().map(|b| b.to_arrays())
     }
 }
 

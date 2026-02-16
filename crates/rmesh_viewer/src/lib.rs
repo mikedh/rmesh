@@ -8,6 +8,7 @@ mod viewer_thread;
 
 use anyhow::Result;
 use nalgebra::Point2;
+use rmesh::bounds::Bounds2;
 use rmesh::path::Path2D;
 use rmesh::path::Polygon2D;
 use rmesh::scene::Scene;
@@ -51,7 +52,7 @@ pub struct View2DData {
     /// Filled polygons: each is (vertices, triangles, RGBA color).
     pub fills: Vec<FilledPolygon>,
     /// Axis-aligned bounding box.
-    pub bounds: (Point2<f64>, Point2<f64>),
+    pub bounds: Bounds2,
 }
 
 /// Trait for displaying 2D geometry in a viewer window.
@@ -75,35 +76,30 @@ pub trait Viewer2D {
 
 impl Viewer2D for Path2D {
     fn view_2d_data(&self) -> View2DData {
-        let segments = self.discretize();
+        let segments = self.to_segments();
         let color = [0.0_f32, 0.8, 0.2, 1.0]; // green
 
         let mut lines = Vec::new();
-        let mut min = Point2::new(f64::INFINITY, f64::INFINITY);
-        let mut max = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut bb = Bounds2::empty();
 
         for seg in &segments {
             if seg.len() < 2 {
                 continue;
             }
             for p in seg {
-                min.x = min.x.min(p.x);
-                min.y = min.y.min(p.y);
-                max.x = max.x.max(p.x);
-                max.y = max.y.max(p.y);
+                bb.include_point(p);
             }
             lines.push((seg.clone(), color));
         }
 
-        if min.x > max.x {
-            min = Point2::new(-1.0, -1.0);
-            max = Point2::new(1.0, 1.0);
+        if bb.is_empty() {
+            bb = Bounds2::new(Point2::new(-1.0, -1.0), Point2::new(1.0, 1.0));
         }
 
         View2DData {
             lines,
             fills: Vec::new(),
-            bounds: (min, max),
+            bounds: bb,
         }
     }
 }
@@ -113,9 +109,9 @@ impl Viewer2D for Polygon2D {
         let fill_color = [0.2_f32, 0.5, 0.8, 0.3];
         let outline_color = [0.2_f32, 0.4, 0.8, 1.0];
 
-        let (bmin, bmax) = self
+        let bb = self
             .bounds()
-            .unwrap_or((Point2::new(-1.0, -1.0), Point2::new(1.0, 1.0)));
+            .unwrap_or(Bounds2::new(Point2::new(-1.0, -1.0), Point2::new(1.0, 1.0)));
 
         // Build lines from exterior + interiors
         let mut lines = Vec::new();
@@ -138,7 +134,7 @@ impl Viewer2D for Polygon2D {
         View2DData {
             lines,
             fills,
-            bounds: (bmin, bmax),
+            bounds: bb,
         }
     }
 }
@@ -150,15 +146,11 @@ impl Viewer2D for [Polygon2D] {
 
         let mut lines = Vec::new();
         let mut fills = Vec::new();
-        let mut min = Point2::new(f64::INFINITY, f64::INFINITY);
-        let mut max = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut bb = Bounds2::empty();
 
         for poly in self {
-            if let Some((bmin, bmax)) = poly.bounds() {
-                min.x = min.x.min(bmin.x);
-                min.y = min.y.min(bmin.y);
-                max.x = max.x.max(bmax.x);
-                max.y = max.y.max(bmax.y);
+            if let Some(pb) = poly.bounds() {
+                bb = bb.union(&pb);
             }
 
             let mut ext_line = poly.exterior.clone();
@@ -177,15 +169,14 @@ impl Viewer2D for [Polygon2D] {
             fills.extend(triangulate_polygon(poly, fill_color));
         }
 
-        if min.x > max.x {
-            min = Point2::new(-1.0, -1.0);
-            max = Point2::new(1.0, 1.0);
+        if bb.is_empty() {
+            bb = Bounds2::new(Point2::new(-1.0, -1.0), Point2::new(1.0, 1.0));
         }
 
         View2DData {
             lines,
             fills,
-            bounds: (min, max),
+            bounds: bb,
         }
     }
 }

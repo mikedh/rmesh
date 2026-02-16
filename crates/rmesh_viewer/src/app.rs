@@ -66,10 +66,10 @@ impl<'a> ViewerApp<'a> {
             .prepare_bind_groups(&gpu.device, &scene_data.meshes);
 
         let mut trackball = Trackball::default();
-        trackball.fit(scene_data.bounds_min, scene_data.bounds_max);
+        trackball.fit(scene_data.bounds.min, scene_data.bounds.max);
 
         #[allow(clippy::cast_possible_truncation)]
-        let scene_extent = (scene_data.bounds_max - scene_data.bounds_min).norm() as f32;
+        let scene_extent = scene_data.bounds.diagonal() as f32;
         let scene_extent = if scene_extent > 0.001 {
             scene_extent
         } else {
@@ -225,7 +225,7 @@ fn handle_command(state: &mut ViewerState, cmd: &InputCommand) {
         InputCommand::ResetView => {
             state
                 .trackball
-                .fit(state.scene_data.bounds_min, state.scene_data.bounds_max);
+                .fit(state.scene_data.bounds.min, state.scene_data.bounds.max);
         }
         InputCommand::ToggleFullscreen => {
             let current = state.window.fullscreen();
