@@ -228,9 +228,12 @@ impl Scene {
         geom: Geometry,
         transforms: Option<&[Matrix4<f64>]>,
     ) -> String {
-        // Ensure a root node exists
+        // Ensure a root node exists (Custom kind so it doesn't inflate geometry counts)
         if self.graph.nodes.is_empty() {
-            self.graph.nodes.push(SceneNode::default());
+            self.graph.nodes.push(SceneNode {
+                kind: SceneNodeKind::Custom,
+                ..Default::default()
+            });
         }
 
         let (actual_name, geom_index) = self.add_geometry(name, geom);

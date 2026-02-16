@@ -20,7 +20,6 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::f64::consts::TAU;
 
 use rayon::prelude::*;
 
@@ -196,31 +195,50 @@ fn count_boundary_edges(triangles: &[[usize; 3]], expected: &HashSet<(usize, usi
         .count()
 }
 
-/// Shift `inner_uvs` by the nearest multiple of 2π so its mean
-/// aligns with `outer_uvs` in each angular coordinate.
+/// Compute the period-aligned shift to move `inner_mean` closest to `outer_mean`.
+fn snap_to_period(outer_mean: f64, inner_mean: f64, period: f64) -> f64 {
+    let ratio = (outer_mean - inner_mean) / period;
+    let floor = ratio.floor() * period;
+    let ceil = ratio.ceil() * period;
+    if (outer_mean - (inner_mean + floor)).abs() <= (outer_mean - (inner_mean + ceil)).abs() {
+        floor
+    } else {
+        ceil
+    }
+}
+
+/// Shift `inner_uvs` by the nearest multiple of the angular period so its mean
+/// aligns with `outer_uvs` in each periodic coordinate.
 fn align_angular_uvs(
     outer_uvs: &[Point2<f64>],
     inner_uvs: &mut [Point2<f64>],
-    doubly_angular: bool,
+    u_period: Option<f64>,
+    v_period: Option<f64>,
 ) {
     if inner_uvs.is_empty() || outer_uvs.is_empty() {
         return;
     }
-    let outer_u_mean = outer_uvs.iter().map(|p| p.x).sum::<f64>() / outer_uvs.len() as f64;
-    let inner_u_mean = inner_uvs.iter().map(|p| p.x).sum::<f64>() / inner_uvs.len() as f64;
-    let shift = ((outer_u_mean - inner_u_mean) / TAU).round() * TAU;
-    if shift.abs() > 1e-10 {
-        for uv in inner_uvs.iter_mut() {
-            uv.x += shift;
+    if let Some(period) = u_period {
+        let shift = snap_to_period(
+            outer_uvs.iter().map(|p| p.x).sum::<f64>() / outer_uvs.len() as f64,
+            inner_uvs.iter().map(|p| p.x).sum::<f64>() / inner_uvs.len() as f64,
+            period,
+        );
+        if shift.abs() > 1e-10 {
+            for uv in inner_uvs.iter_mut() {
+                uv.x += shift;
+            }
         }
     }
-    if doubly_angular {
-        let outer_v_mean = outer_uvs.iter().map(|p| p.y).sum::<f64>() / outer_uvs.len() as f64;
-        let inner_v_mean = inner_uvs.iter().map(|p| p.y).sum::<f64>() / inner_uvs.len() as f64;
-        let v_shift = ((outer_v_mean - inner_v_mean) / TAU).round() * TAU;
-        if v_shift.abs() > 1e-10 {
+    if let Some(period) = v_period {
+        let shift = snap_to_period(
+            outer_uvs.iter().map(|p| p.y).sum::<f64>() / outer_uvs.len() as f64,
+            inner_uvs.iter().map(|p| p.y).sum::<f64>() / inner_uvs.len() as f64,
+            period,
+        );
+        if shift.abs() > 1e-10 {
             for uv in inner_uvs.iter_mut() {
-                uv.y += v_shift;
+                uv.y += shift;
             }
         }
     }
@@ -339,11 +357,13 @@ fn fan_triangulate(contours: &[Vec<usize>]) -> Vec<[usize; 3]> {
     triangles
 }
 
-/// Deduplicate local vertices that share the same pool index.
+/// Deduplicate local vertices that share the same pool index AND similar UV coordinates.
 ///
 /// Returns (deduplicated UV points, remapped contours, mapping from dedup index → original local index).
 /// This prevents CDT from producing degenerate triangles when two local vertices
-/// have the same 3D position.
+/// have the same 3D position. Vertices with the same pool index but distant UVs
+/// (e.g., seam vertices on angular surfaces at u≈0 and u≈2π) are kept separate
+/// so CDT constraint edges don't span the full angular range.
 #[allow(clippy::type_complexity)]
 fn dedup_by_pool(
     state: &FaceTriangulation,
@@ -351,21 +371,41 @@ fn dedup_by_pool(
 ) -> (Vec<(f64, f64)>, Vec<Vec<usize>>, Vec<usize>) {
     let n = state.local_to_pool.len();
 
-    // Map each pool index to the first local index that uses it
-    let mut pool_to_dedup: HashMap<usize, usize> = HashMap::new();
+    // Map each pool index to the dedup indices that use it (may be multiple if UVs differ)
+    let mut pool_to_dedups: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut local_to_dedup: Vec<usize> = vec![0; n];
     let mut dedup_pts: Vec<(f64, f64)> = Vec::new();
     let mut dedup_to_local: Vec<usize> = Vec::new();
 
+    /// UV distance threshold for merging: vertices with the same pool index
+    /// but UV distance above this are kept separate (seam vertices on angular
+    /// surfaces differ by ~2π ≈ 6.28, so 1e-10 only merges vertices
+    /// with truly identical UV coordinates from the same to_parametric call).
+    const UV_DEDUP_THRESHOLD: f64 = 1e-10;
+
     for (local_idx, &pool_idx) in state.local_to_pool.iter().enumerate() {
-        if let Some(&dedup_idx) = pool_to_dedup.get(&pool_idx) {
+        let uv = state.vertices_uv[local_idx];
+        let uv_tup = (uv.x, uv.y);
+
+        // Check if any existing dedup entry for this pool index has close UV
+        let merged = pool_to_dedups
+            .get(&pool_idx)
+            .and_then(|dedup_indices| {
+                dedup_indices.iter().find(|&&di| {
+                    let (ex, ey) = dedup_pts[di];
+                    (ex - uv_tup.0).abs() < UV_DEDUP_THRESHOLD
+                        && (ey - uv_tup.1).abs() < UV_DEDUP_THRESHOLD
+                })
+            })
+            .copied();
+
+        if let Some(dedup_idx) = merged {
             local_to_dedup[local_idx] = dedup_idx;
         } else {
             let dedup_idx = dedup_pts.len();
-            pool_to_dedup.insert(pool_idx, dedup_idx);
+            pool_to_dedups.entry(pool_idx).or_default().push(dedup_idx);
             local_to_dedup[local_idx] = dedup_idx;
-            let uv = state.vertices_uv[local_idx];
-            dedup_pts.push((uv.x, uv.y));
+            dedup_pts.push(uv_tup);
             dedup_to_local.push(local_idx);
         }
     }
@@ -826,11 +866,12 @@ fn closest_polygon_edge(point: &Point2<f64>, polygon: &[Point2<f64>]) -> (usize,
 /// the u coordinate (theta/longitude) can jump from π to -π or vice versa.
 /// This creates self-intersecting polygons in UV space that triangulators can't handle.
 ///
-/// This function adjusts the u coordinate to be continuous by adding/subtracting 2π
-/// when consecutive vertices jump across the ±π boundary.
-/// Unwrap a single angular coordinate sequence to remove ±π discontinuities.
-fn unwrap_angular_sequence(values: impl Iterator<Item = f64>, out: &mut [f64]) {
-    use std::f64::consts::{PI, TAU};
+/// Unwrap a single angular coordinate sequence to remove discontinuities.
+///
+/// Uses `period / 2.0` as the jump threshold and `period` as the shift amount.
+/// This generalizes the previous hardcoded π / 2π to work with any periodic domain.
+fn unwrap_angular_sequence(values: impl Iterator<Item = f64>, out: &mut [f64], period: f64) {
+    let half = period / 2.0;
 
     let mut offset = 0.0;
     let mut prev = None;
@@ -839,10 +880,10 @@ fn unwrap_angular_sequence(values: impl Iterator<Item = f64>, out: &mut [f64]) {
         let curr = val + offset;
         if let Some(p) = prev {
             let diff = curr - p;
-            if diff > PI {
-                offset -= TAU;
-            } else if diff < -PI {
-                offset += TAU;
+            if diff > half {
+                offset -= period;
+            } else if diff < -half {
+                offset += period;
             }
         }
         out[i] = val + offset;
@@ -851,13 +892,12 @@ fn unwrap_angular_sequence(values: impl Iterator<Item = f64>, out: &mut [f64]) {
 }
 
 impl Surface {
-    /// Unwrap UV coordinates to remove angular discontinuities at ±π.
+    /// Unwrap UV coordinates to remove angular discontinuities.
     /// Dispatches to the appropriate unwrapping function based on surface type.
     fn unwrap_uvs(&self, uvs: &mut [Point2<f64>]) {
-        if self.is_doubly_angular() {
-            unwrap_angular_coords(uvs, true);
-        } else if self.is_angular() {
-            unwrap_angular_coords(uvs, false);
+        let (u_period, v_period) = self.angular_period();
+        if u_period.is_some() || v_period.is_some() {
+            unwrap_angular_coords(uvs, u_period, v_period);
         }
     }
 
@@ -865,7 +905,8 @@ impl Surface {
     /// For angular surfaces, averages in 3D then projects back to UV.
     /// Returns (uv_mid, p_mid_on_surface).
     fn midpoint_uv(&self, uv_a: &Point2<f64>, uv_b: &Point2<f64>) -> (Point2<f64>, Point3<f64>) {
-        if self.is_angular() {
+        let (u_period, v_period) = self.angular_period();
+        if u_period.is_some() || v_period.is_some() {
             let p_a = self.evaluate(uv_a.x, uv_a.y);
             let p_b = self.evaluate(uv_b.x, uv_b.y);
             let p_mid_3d = p_a.lerp(&p_b, 0.5);
@@ -880,18 +921,20 @@ impl Surface {
     }
 }
 
-fn unwrap_angular_coords(uvs: &mut [Point2<f64>], both: bool) {
+fn unwrap_angular_coords(uvs: &mut [Point2<f64>], u_period: Option<f64>, v_period: Option<f64>) {
     if uvs.len() < 2 {
         return;
     }
 
     let mut buf: Vec<f64> = vec![0.0; uvs.len()];
-    unwrap_angular_sequence(uvs.iter().map(|p| p.x), &mut buf);
-    for (i, uv) in uvs.iter_mut().enumerate() {
-        uv.x = buf[i];
+    if let Some(period) = u_period {
+        unwrap_angular_sequence(uvs.iter().map(|p| p.x), &mut buf, period);
+        for (i, uv) in uvs.iter_mut().enumerate() {
+            uv.x = buf[i];
+        }
     }
-    if both {
-        unwrap_angular_sequence(uvs.iter().map(|p| p.y), &mut buf);
+    if let Some(period) = v_period {
+        unwrap_angular_sequence(uvs.iter().map(|p| p.y), &mut buf, period);
         for (i, uv) in uvs.iter_mut().enumerate() {
             uv.y = buf[i];
         }
@@ -980,6 +1023,7 @@ fn triangulate_face_robust_pts(
     sentinel_base: usize,
     surface_normal_hint: Option<Vector3<f64>>,
     initial_cdt_diverged: bool,
+    dedup_to_local: &[usize],
 ) -> (Vec<[usize; 3]>, u8, bool) {
     // Build contour edge set once — invariant across all CDT attempts
     let expected = contour_edge_set(contours);
@@ -1024,11 +1068,14 @@ fn triangulate_face_robust_pts(
         Err(_) => {}
     }
 
-    // Build 3D positions once for plane-based fallbacks
-    let positions: Vec<Point3<f64>> = state
-        .local_to_pool
+    // Build 3D positions in dedup index space for plane-based fallbacks.
+    // CDT indices are in dedup space, so positions must match.
+    let positions: Vec<Point3<f64>> = dedup_to_local
         .iter()
-        .map(|&pool_idx| lookup_vertex(pool_idx, pool_vertices, new_vertices, sentinel_base))
+        .map(|&local_idx| {
+            let pool_idx = state.local_to_pool[local_idx];
+            lookup_vertex(pool_idx, pool_vertices, new_vertices, sentinel_base)
+        })
         .collect();
 
     // Try 2: CDT in best-fit 3D plane projection (skip if CDT diverged)
@@ -1242,10 +1289,13 @@ fn tessellate_face(
         surface.unwrap_uvs(&mut inner_uvs);
 
         // Align inner loop angular window to match the outer loop.
-        // Each loop is unwrapped independently and can land in a different 2π window,
+        // Each loop is unwrapped independently and can land in a different period window,
         // causing the inner hole to appear outside the outer polygon in UV space.
-        if surface.is_angular() {
-            align_angular_uvs(&outer_uvs, &mut inner_uvs, surface.is_doubly_angular());
+        {
+            let (u_period, v_period) = surface.angular_period();
+            if u_period.is_some() || v_period.is_some() {
+                align_angular_uvs(&outer_uvs, &mut inner_uvs, u_period, v_period);
+            }
         }
 
         for (i, &pool_idx) in loop_indices.iter().enumerate() {
@@ -1340,6 +1390,7 @@ fn tessellate_face(
         sentinel_base,
         surface_normal_hint,
         false,
+        &dedup_map,
     );
 
     // Map dedup triangles back to original local indices
@@ -1350,6 +1401,8 @@ fn tessellate_face(
 
     // 3.5. If CDT with hex-grid interior points failed boundary check, retry without them.
     // Skip this retry if CDT diverged — same constraints will hit the same O(n²) behavior.
+    // Check boundary completeness in local space using canonical (dedup-normalized) edges
+    // to avoid false failures when dedup merges vertices that share a pool index.
     let expected_edges = contour_edge_set(&contours);
     let mut final_strategy = strategy;
     if !cdt_diverged
@@ -1371,6 +1424,7 @@ fn tessellate_face(
             sentinel_base,
             surface_normal_hint,
             cdt_diverged,
+            &dedup_map2,
         );
         mapped_tris = dedup_tris2
             .into_iter()
@@ -1702,8 +1756,11 @@ impl<'a> ShellTessellator<'a> {
                     surface.unwrap_uvs(&mut inner_uvs);
 
                     // Align inner loop angular window to match the outer loop.
-                    if surface.is_angular() {
-                        align_angular_uvs(&outer_uvs, &mut inner_uvs, surface.is_doubly_angular());
+                    {
+                        let (u_period, v_period) = surface.angular_period();
+                        if u_period.is_some() || v_period.is_some() {
+                            align_angular_uvs(&outer_uvs, &mut inner_uvs, u_period, v_period);
+                        }
                     }
 
                     // Check each inner vertex against the outer polygon
@@ -2021,13 +2078,27 @@ impl<'a> ShellTessellator<'a> {
             indices: self.face_indices,
         });
 
-        Trimesh::new(
+        let mesh = Trimesh::new(
             self.vertices,
             self.triangles,
             Some(attrs_vertex),
             Some(attrs_face),
         )
-        .expect("tessellation produced valid mesh")
+        .expect("tessellation produced valid mesh");
+
+        // Safety net: fill any remaining boundary holes from tessellation defects.
+        // Only keep the filled result if it actually improves watertightness.
+        if !mesh.is_watertight() {
+            let filled = mesh.fill_holes();
+            if filled.is_watertight() || filled.edges_boundary().len() < mesh.edges_boundary().len()
+            {
+                filled
+            } else {
+                mesh
+            }
+        } else {
+            mesh
+        }
     }
 }
 
@@ -3018,25 +3089,31 @@ mod tests {
     }
 
     #[test]
-    fn test_surface_is_angular() {
-        // Test that is_angular correctly identifies angular surfaces
+    fn test_surface_angular_period() {
+        use std::f64::consts::TAU;
+
+        // Plane: no angular period
         let plane = Surface::Plane(SurfacePlane::new(Point3::origin(), Vector3::z()));
-        assert!(!plane.is_angular());
+        assert_eq!(plane.angular_period(), (None, None));
 
+        // Cylinder: u is angular (TAU), v is not
         let cylinder = Surface::Cylinder(Cylinder::new(Point3::origin(), Vector3::z(), 1.0));
-        assert!(cylinder.is_angular());
+        assert_eq!(cylinder.angular_period(), (Some(TAU), None));
 
+        // Sphere: u is angular (TAU), v is not
         let sphere = Surface::Sphere(Sphere {
             center: Point3::origin(),
             radius: 1.0,
         });
-        assert!(sphere.is_angular());
+        assert_eq!(sphere.angular_period(), (Some(TAU), None));
 
+        // Cone: u is angular (TAU), v is not
         let cone = Surface::Cone(Cone::new(Point3::origin(), Vector3::z(), 0.5));
-        assert!(cone.is_angular());
+        assert_eq!(cone.angular_period(), (Some(TAU), None));
 
+        // Torus: both angular (TAU, TAU)
         let torus = Surface::Torus(Torus::new(Point3::origin(), Vector3::z(), 2.0, 0.5));
-        assert!(torus.is_angular());
+        assert_eq!(torus.angular_period(), (Some(TAU), Some(TAU)));
     }
 
     #[test]

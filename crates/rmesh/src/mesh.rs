@@ -799,44 +799,65 @@ impl Trimesh {
             return self.clone();
         }
 
-        // Build adjacency: vertex -> next vertex in directed boundary
-        let mut next_map = std::collections::HashMap::with_capacity(boundary.len());
+        // Build multi-adjacency: vertex -> list of next vertices (handles bowtie vertices)
+        let mut next_map: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::with_capacity(boundary.len());
         for &[a, b] in &boundary {
-            if next_map.insert(a, b).is_some() {
-                // Non-manifold boundary: a vertex has multiple outgoing
-                // boundary edges (bowtie vertex). We can't reliably chain
-                // loops, so bail out and return the mesh unchanged.
-                return self.clone();
-            }
+            next_map.entry(a).or_default().push(b);
         }
 
-        // Walk chains to find closed loops
-        let mut visited = std::collections::HashSet::with_capacity(boundary.len());
+        // Track which directed edges have been consumed
+        let mut used_edges: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::with_capacity(boundary.len());
         let mut loops: Vec<Vec<usize>> = Vec::new();
 
         for &[start, _] in &boundary {
-            if visited.contains(&start) {
+            // Try to start a loop from each boundary edge origin
+            if used_edges.contains(&(start, next_map[&start][0]))
+                && next_map[&start]
+                    .iter()
+                    .all(|&b| used_edges.contains(&(start, b)))
+            {
                 continue;
             }
+
+            // Find an unused outgoing edge from `start`
+            let Some(&first_next) = next_map
+                .get(&start)
+                .and_then(|nexts| nexts.iter().find(|&&b| !used_edges.contains(&(start, b))))
+            else {
+                continue;
+            };
+
             let mut chain = vec![start];
-            visited.insert(start);
-            let mut current = start;
+            used_edges.insert((start, first_next));
+            let mut current = first_next;
 
             loop {
-                let Some(&next) = next_map.get(&current) else {
-                    break; // open chain, not a loop
-                };
-                if next == start {
+                if current == start {
                     // closed loop
                     loops.push(chain);
                     break;
                 }
-                if visited.contains(&next) {
-                    break; // already visited, skip
-                }
-                visited.insert(next);
-                chain.push(next);
+                chain.push(current);
+
+                // Find an unused outgoing edge from `current`
+                let next = next_map.get(&current).and_then(|nexts| {
+                    nexts
+                        .iter()
+                        .find(|&&b| !used_edges.contains(&(current, b)))
+                        .copied()
+                });
+                let Some(next) = next else {
+                    break; // open chain, not a loop
+                };
+                used_edges.insert((current, next));
                 current = next;
+
+                // Safety: prevent infinite loops on degenerate boundary
+                if chain.len() > boundary.len() {
+                    break;
+                }
             }
         }
 
@@ -845,6 +866,7 @@ impl Trimesh {
         }
 
         // Fan-triangulate each loop with reversed winding
+        let orig_face_count = self.faces.len();
         let mut new_faces = self.faces.clone();
         for loop_verts in &loops {
             if loop_verts.len() < 3 {
@@ -857,10 +879,22 @@ impl Trimesh {
             }
         }
 
+        // Preserve face attributes: extend grouping indices with UNSET for fill faces
+        let fill_count = new_faces.len() - orig_face_count;
+        let mut attrs_face = self.attributes_face.clone();
+        for grouping in &mut attrs_face.groupings {
+            if grouping.indices.len() == orig_face_count {
+                grouping
+                    .indices
+                    .extend(std::iter::repeat(UNSET).take(fill_count));
+            }
+        }
+
         Self {
             vertices: self.vertices.clone(),
             faces: new_faces,
             attributes_vertex: self.attributes_vertex.clone(),
+            attributes_face: attrs_face,
             materials: self.materials.clone(),
             face_surfaces: self.face_surfaces.clone(),
             source: self.source.clone(),

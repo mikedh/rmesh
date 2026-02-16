@@ -2,6 +2,7 @@ pub mod collada;
 pub mod gltf;
 mod mtl;
 mod obj;
+mod ply;
 mod stl;
 
 use anyhow::Result;
@@ -10,11 +11,12 @@ use crate::creation::feature::FeatureModel;
 use crate::creation::feature::exchange::{FeatureFormat, load_feature_model};
 use crate::geometry::Geometry;
 use crate::resolvers::Resolver;
-use crate::scene::{Scene, SceneNode, SceneNodeKind};
+use crate::scene::Scene;
 use crate::serialize::RmeshSerializable;
 
 pub use crate::exchange::gltf::GltfLoader;
 use crate::exchange::obj::ObjMesh;
+use crate::exchange::ply::PlyModel;
 use crate::exchange::stl::BinaryStl;
 
 /// Export a Scene to GLB (glTF 2.0 Binary) format.
@@ -79,6 +81,18 @@ impl FileType {
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 4 {
             return None;
+        }
+
+        // PLY magic: "ply\n" or "ply\r\n" (case-insensitive)
+        if data.len() >= 4 {
+            let first3 = [
+                data[0].to_ascii_lowercase(),
+                data[1].to_ascii_lowercase(),
+                data[2].to_ascii_lowercase(),
+            ];
+            if first3 == [b'p', b'l', b'y'] && (data[3] == b'\n' || data[3] == b'\r') {
+                return Some(FileType::PLY);
+            }
         }
 
         // GLB magic: "glTF" (little-endian: 0x46546C67)
@@ -185,7 +199,9 @@ pub fn load(
             (name, Geometry::Mesh(Box::new(mesh)))
         }
         FileType::PLY => {
-            return Err(anyhow::anyhow!("PLY format not yet implemented"));
+            let ply = PlyModel::from_bytes(data)?;
+            let mesh = ply.to_mesh(resolver)?;
+            ("ply".to_string(), Geometry::Mesh(Box::new(mesh)))
         }
         FileType::GLB => {
             let loader = GltfLoader::from_glb(data)?;
@@ -219,16 +235,7 @@ pub fn load(
     };
 
     let mut scene = Scene::new();
-    let (actual_name, geom_index) = scene.add_geometry(&name, geometry);
-    let root_node = SceneNode {
-        name: actual_name,
-        children: Vec::new(),
-        transform: None,
-        index: vec![geom_index],
-        kind: SceneNodeKind::Geometry,
-    };
-    let root_index = scene.graph.add_node(root_node);
-    scene.graph.root = root_index;
+    scene.add(&name, geometry, None);
     Ok(scene)
 }
 
@@ -384,7 +391,7 @@ mod tests {
         // Auto-detect format
         let scene = load(&stl_data, None, None).unwrap();
         assert_eq!(scene.geometry.len(), 1);
-        assert_eq!(scene.graph.nodes.len(), 1);
+        assert_eq!(scene.graph.nodes.len(), 2); // Custom root + geometry child
 
         // Explicit format
         let scene = load(&stl_data, Some(FileType::STL), None).unwrap();
@@ -398,6 +405,6 @@ mod tests {
         // OBJ requires explicit type (can't be reliably detected from magic bytes)
         let scene = load(obj_data, Some(FileType::OBJ), None).unwrap();
         assert_eq!(scene.geometry.len(), 1);
-        assert_eq!(scene.graph.nodes.len(), 1);
+        assert_eq!(scene.graph.nodes.len(), 2); // Custom root + geometry child
     }
 }

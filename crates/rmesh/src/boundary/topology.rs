@@ -98,6 +98,34 @@ impl Curve {
         }
     }
 
+    /// Uniformly scale all positional and length fields by `s`.
+    ///
+    /// Axes/normals (unit vectors), knots (parametric), and weights (dimensionless)
+    /// are left unchanged.  Edge `t_start`/`t_end` remain valid because
+    /// `evaluate(t)` uniformly scales with the geometry.
+    pub fn scale_by(&mut self, s: f64) {
+        match self {
+            Curve::Line(line) => {
+                line.origin.coords *= s;
+                line.direction *= s;
+            }
+            Curve::Circle(c) => {
+                c.center.coords *= s;
+                c.radius *= s;
+            }
+            Curve::Ellipse(e) => {
+                e.center.coords *= s;
+                e.semi_major *= s;
+                e.semi_minor *= s;
+            }
+            Curve::BSpline(b) => {
+                for p in &mut b.control_points {
+                    p.coords *= s;
+                }
+            }
+        }
+    }
+
     /// Compute the parameter t for a point on the curve.
     /// Returns the parameter value that, when passed to evaluate(), gives a point
     /// closest to the input point.
@@ -379,6 +407,19 @@ impl BrepModel {
             void_shells,
         });
         idx
+    }
+
+    /// Uniformly scale all geometry (vertices, curves, surfaces) by `s`.
+    pub fn scale_by(&mut self, s: f64) {
+        for v in &mut self.vertices {
+            v.point.coords *= s;
+        }
+        for c in &mut self.curves {
+            c.scale_by(s);
+        }
+        for surf in &mut self.face_surfaces {
+            surf.scale_by(s);
+        }
     }
 
     /// Return errors for invalid index references in the model.

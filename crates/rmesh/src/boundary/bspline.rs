@@ -916,6 +916,30 @@ impl SurfaceBSpline {
         skl
     }
 
+    /// Check whether the surface is closed (periodic) in each parametric direction.
+    ///
+    /// Returns `(u_closed, v_closed)` where each is `true` if the first and last
+    /// control point row/column (respectively) are approximately equal within
+    /// `GEOMETRY_TOL`. This detects surfaces of revolution represented as B-splines.
+    pub fn closed_directions(&self) -> (bool, bool) {
+        let n_u = self.control_points.len();
+        let n_v = self.control_points[0].len();
+
+        // u_closed: first row of control points ≈ last row
+        let u_closed = n_u >= 2
+            && (0..n_v).all(|j| {
+                (self.control_points[0][j] - self.control_points[n_u - 1][j]).norm() < GEOMETRY_TOL
+            });
+
+        // v_closed: first column of control points ≈ last column
+        let v_closed = n_v >= 2
+            && (0..n_u).all(|i| {
+                (self.control_points[i][0] - self.control_points[i][n_v - 1]).norm() < GEOMETRY_TOL
+            });
+
+        (u_closed, v_closed)
+    }
+
     /// Compute principal curvatures at (u, v) via the shape operator S = I⁻¹·II.
     ///
     /// First fundamental form I = [[E,F],[F,G]], second fundamental form II = [[L,M],[M,N]].

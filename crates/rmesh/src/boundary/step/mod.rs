@@ -163,11 +163,22 @@ impl RepGraph {
             }
         }
 
-        // Now filter SRR candidates against rrwt_pairs collected above
+        // Now filter SRR candidates against rrwt_pairs collected above.
+        // Link unidirectionally: from the RRWT-tree side to the geometry side.
+        // Bidirectional links caused duplicate transform accumulation during harvest.
         for (a, b) in srr_candidates {
-            if !rrwt_pairs.contains(&(a, b)) {
-                geometry_for.entry(a).or_default().push(b);
-                geometry_for.entry(b).or_default().push(a);
+            if !rrwt_pairs.contains(&(a, b)) && !rrwt_pairs.contains(&(b, a)) {
+                let a_in_tree = outgoing.contains(&a) || incoming.contains(&a);
+                let b_in_tree = outgoing.contains(&b) || incoming.contains(&b);
+                match (a_in_tree, b_in_tree) {
+                    (true, false) => {
+                        geometry_for.entry(a).or_default().push(b);
+                    }
+                    (false, true) => {
+                        geometry_for.entry(b).or_default().push(a);
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -282,11 +293,7 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
     }
 
     let to_mesh = graph.collect_instances(step);
-
-    // Build a uniform scale matrix from the file's length_scale factor
-    // (e.g. 0.0254 for inches→meters).
     let s = step.length_scale;
-    let scale = Matrix4::new_nonuniform_scaling(&Vector3::new(s, s, s));
 
     // Convert solids in parallel — each is independent with its own local BrepModel.
     let entries: Vec<_> = to_mesh.iter().collect();
@@ -294,10 +301,21 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
         .par_iter()
         .filter_map(|(msb_id, (name, transforms))| {
             if let ap214::Entity::ManifoldSolidBrep(msb) = &step.entities[**msb_id]
-                && let Ok((brep, _skipped)) = convert_manifold_solid_brep(step, msb)
+                && let Ok((mut brep, _skipped)) = convert_manifold_solid_brep(step, msb)
             {
-                // Apply length_scale to each instance transform.
-                let scaled: Vec<_> = transforms.iter().map(|t| scale * t).collect();
+                // Scale geometry from file units to meters.
+                brep.scale_by(s);
+                // Scale transform translations to meters (rotation stays unchanged).
+                let scaled: Vec<_> = transforms
+                    .iter()
+                    .map(|t| {
+                        let mut m = *t;
+                        m[(0, 3)] *= s;
+                        m[(1, 3)] *= s;
+                        m[(2, 3)] *= s;
+                        m
+                    })
+                    .collect();
                 Some((name.clone(), Geometry::Brep(Box::new(brep)), scaled))
             } else {
                 None
@@ -317,9 +335,28 @@ fn convert_to_scene<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
 fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError> {
     // Collect all (name, msb) pairs to convert in parallel.
     let mut work: Vec<(String, &ap214::ManifoldSolidBrep_<'a>)> = Vec::new();
+
+    // First pass: collect MSB IDs that are inside ABSRs (to avoid double-counting)
+    let mut absr_msb_ids: HashSet<usize> = HashSet::new();
+    for entity in &step.entities {
+        if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
+            for item_id in &absr.items {
+                if matches!(
+                    &step.entities[*item_id],
+                    ap214::Entity::ManifoldSolidBrep(_)
+                ) {
+                    absr_msb_ids.insert(*item_id);
+                }
+            }
+        }
+    }
+
+    // Second pass: collect work items, skipping MSBs already covered by ABSR
     for (id, entity) in step.entities.iter().enumerate() {
         if let ap214::Entity::ManifoldSolidBrep(msb) = entity {
-            work.push((format!("brep_{id}"), msb));
+            if !absr_msb_ids.contains(&id) {
+                work.push((format!("brep_{id}"), msb));
+            }
         }
         if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
             let name = absr.name.to_string();
@@ -331,22 +368,20 @@ fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError>
         }
     }
 
+    let s = step.length_scale;
     let results: Vec<_> = work
         .par_iter()
         .filter_map(|(name, msb)| {
-            let (brep, _skipped) = convert_manifold_solid_brep(step, msb).ok()?;
+            let (mut brep, _skipped) = convert_manifold_solid_brep(step, msb).ok()?;
+            // Scale geometry from file units to meters.
+            brep.scale_by(s);
             Some((name.clone(), Geometry::Brep(Box::new(brep))))
         })
         .collect();
 
-    // Build a uniform scale matrix from the file's length_scale factor
-    // (e.g. 0.0254 for inches→meters).
-    let s = step.length_scale;
-    let scale = Matrix4::new_nonuniform_scaling(&Vector3::new(s, s, s));
-
     let mut scene = Scene::new();
     for (name, geom) in results {
-        scene.add(&name, geom, Some(&[scale]));
+        scene.add(&name, geom, None);
     }
     Ok(scene)
 }
@@ -918,7 +953,15 @@ fn convert_surface(step: &StepFile<'_>, surface_id: usize) -> Result<Surface, St
             Ok(Surface::Cylinder(Cylinder::new(origin, axis, cyl.radius)))
         }
         ap214::Entity::ConicalSurface(cone) => {
-            let (apex, axis, _) = convert_axis2_placement_3d(step, cone.position)?;
+            // position.location is the base point (where the cone has the specified radius),
+            // NOT the apex. Compute the real apex by offsetting along the axis.
+            let (base_point, axis, _) = convert_axis2_placement_3d(step, cone.position)?;
+            let axis_unit = axis.normalize();
+            let apex = if cone.radius.abs() > 1e-14 && cone.semi_angle.tan().abs() > 1e-14 {
+                base_point - (cone.radius / cone.semi_angle.tan()) * axis_unit
+            } else {
+                base_point
+            };
             Ok(Surface::Cone(Cone::new(apex, axis, cone.semi_angle)))
         }
         ap214::Entity::SphericalSurface(sphere) => {
@@ -1221,13 +1264,15 @@ fn convert_surface_of_revolution(
                     radius,
                 )))
             } else if cos_angle < 1e-6 {
-                // Line perpendicular to axis (in axial plane) — could be a torus generatrix
-                // but more commonly this is just a general case; fall through to NURBS
-                Ok(Surface::BSpline(revolve_curve_to_nurbs(
-                    &curve,
-                    &axis_origin,
-                    &axis_dir,
-                )))
+                // Line perpendicular to axis → Plane (flat annular disc).
+                // STEP VECTOR magnitudes are parametric scale factors (commonly 1.0),
+                // not physical lengths, so the line's second control point can't be
+                // trusted as a spatial coordinate. A perpendicular line revolved
+                // around the axis always produces a flat plane.
+                let to_line = line.origin - axis_origin;
+                let h = to_line.dot(&axis_dir);
+                let plane_origin = axis_origin + h * axis_dir;
+                Ok(Surface::Plane(SurfacePlane::new(plane_origin, axis_dir)))
             } else {
                 // Line at angle to axis → Cone
                 let to_line = line.origin - axis_origin;
@@ -1330,6 +1375,7 @@ fn revolve_curve_to_nurbs(
 
     let (profile_degree, profile_pts, profile_knots, profile_weights) =
         curve_to_bspline_data(curve);
+
     let w_angle = FRAC_PI_4.cos(); // cos(45°) = 1/√2 for 90° arcs
 
     let n_profile = profile_pts.len();
@@ -2258,6 +2304,7 @@ mod tests {
         use crate::boundary::tesselate::TesselationParams;
         use crate::exchange::gltf::GltfLoader;
         use crate::mesh::Trimesh;
+        use crate::scene::SceneNodeKind;
         use crate::serialize::RmeshSerializable;
         use rayon::prelude::*;
         use std::time::Instant;
@@ -2294,11 +2341,13 @@ mod tests {
             tris: usize,
             wt_pass: usize,
             wt_total: usize,
-            ref_verts: usize,
-            ref_tris: usize,
         }
 
         let mut results = Vec::new();
+        let mut aabb_failures: Vec<String> = Vec::new();
+        let mut instance_failures: Vec<String> = Vec::new();
+        let mut aabb_matched: HashSet<String> = HashSet::new();
+
         for entry in &step_files {
             let path = entry.path();
             let name = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -2325,8 +2374,6 @@ mod tests {
                         tris: 0,
                         wt_pass: 0,
                         wt_total: 0,
-                        ref_verts: 0,
-                        ref_tris: 0,
                     });
                     continue;
                 }
@@ -2334,34 +2381,28 @@ mod tests {
             let convert_ms = t.elapsed().as_secs_f64() * 1e3;
 
             let t = Instant::now();
-            let breps: Vec<_> = scene
+
+            // Tessellate each BREP geometry in parallel
+            let geom_entries: Vec<_> = scene
                 .geometry
-                .values()
-                .filter_map(|geom| {
-                    if let Geometry::Brep(brep) = geom {
-                        Some(brep.as_ref())
+                .iter()
+                .filter_map(|(k, g)| {
+                    if let Geometry::Brep(brep) = g {
+                        Some((k.clone(), brep.as_ref()))
                     } else {
                         None
                     }
                 })
                 .collect();
-            let tess_results: Vec<(usize, usize, usize, bool)> = breps
+            let tess_meshes: Vec<(String, Trimesh)> = geom_entries
                 .par_iter()
-                .map(|brep| {
-                    let mesh = brep.tesselate(&params);
-                    (
-                        brep.faces.len(),
-                        mesh.vertices.len(),
-                        mesh.faces.len(),
-                        mesh.is_watertight(),
-                    )
-                })
+                .map(|(k, brep)| (k.clone(), brep.tesselate(&params)))
                 .collect();
 
             // Serialize debug_reduce() output for non-watertight bodies
             let regression_dir =
                 std::path::Path::new("/home/mikedh/dev/rmesh/feat_obj/test/regression/brep");
-            for (body_idx, brep) in breps.iter().enumerate() {
+            for (body_idx, (_, brep)) in geom_entries.iter().enumerate() {
                 if let Some(reduced) = brep.debug_reduce(&params) {
                     let filename = format!("wt_regression_{}_{}.json", name, body_idx);
                     let path = regression_dir.join(&filename);
@@ -2376,44 +2417,96 @@ mod tests {
             let mut total_verts = 0;
             let mut total_tris = 0;
             let mut wt_pass = 0;
-            let wt_total = tess_results.len();
+            let wt_total = tess_meshes.len();
 
-            for &(f, v, t, w) in &tess_results {
-                total_faces += f;
-                total_verts += v;
-                total_tris += t;
-                if w {
+            // Build name -> AABB map for STEP tessellations
+            let mut step_aabbs: HashMap<String, (Point3<f64>, Point3<f64>)> = HashMap::new();
+
+            for (i, (geom_name, mesh)) in tess_meshes.iter().enumerate() {
+                total_faces += geom_entries[i].1.faces.len();
+                total_verts += mesh.vertices.len();
+                total_tris += mesh.faces.len();
+                if mesh.is_watertight() {
                     wt_pass += 1;
+                }
+                if let Some(bounds) = mesh.bounds() {
+                    step_aabbs.insert(geom_name.clone(), bounds);
                 }
             }
             let tess_ms = t.elapsed().as_secs_f64() * 1e3;
 
-            // Load reference GLB (cascade tessellation) and compare per-body
+            // Load reference GLB and compare geometry names + AABBs
             let glb_path = path.with_extension("STEP.glb");
-            let (ref_verts, ref_tris) = if glb_path.exists() {
+            if glb_path.exists() {
                 let glb_data = std::fs::read(&glb_path).unwrap();
-                match GltfLoader::from_glb(&glb_data).and_then(|loader| loader.to_scene()) {
-                    Ok(ref_scene) => {
-                        let ref_meshes: Vec<&Trimesh> = ref_scene
-                            .geometry
-                            .iter()
-                            .filter_map(|(_, geom)| {
-                                if let Geometry::Mesh(mesh) = geom {
-                                    Some(mesh.as_ref())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        let rv: usize = ref_meshes.iter().map(|m| m.vertices.len()).sum();
-                        let rt: usize = ref_meshes.iter().map(|m| m.faces.len()).sum();
-                        (rv, rt)
+                if let Ok(ref_scene) =
+                    GltfLoader::from_glb(&glb_data).and_then(|loader| loader.to_scene())
+                {
+                    // Compare instance counts: STEP deduplicates geometry
+                    // and uses scene graph nodes for instancing, while GLB
+                    // expands each instance into a separate geometry entry.
+                    let step_instances = scene
+                        .graph
+                        .nodes
+                        .iter()
+                        .filter(|n| n.kind == SceneNodeKind::Geometry)
+                        .count();
+                    let ref_instances = ref_scene.geometry.len();
+                    if step_instances != ref_instances {
+                        instance_failures.push(format!(
+                            "{}: step_instances={} glb_instances={}",
+                            name, step_instances, ref_instances,
+                        ));
                     }
-                    Err(_) => (0, 0),
+
+                    // Compare per-mesh AABBs for matching names (1% of diagonal)
+                    for (ref_name, ref_geom) in &ref_scene.geometry {
+                        let ref_bounds = match ref_geom.bounds() {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        let Some(step_bounds) = step_aabbs.get(ref_name) else {
+                            continue;
+                        };
+                        let (ref_min, ref_max) = ref_bounds;
+                        let (step_min, step_max) = *step_bounds;
+                        let diag = (ref_max - ref_min).norm();
+                        let tol = diag * 0.01;
+
+                        let ok = (step_min.x - ref_min.x).abs() <= tol
+                            && (step_min.y - ref_min.y).abs() <= tol
+                            && (step_min.z - ref_min.z).abs() <= tol
+                            && (step_max.x - ref_max.x).abs() <= tol
+                            && (step_max.y - ref_max.y).abs() <= tol
+                            && (step_max.z - ref_max.z).abs() <= tol;
+
+                        if ok {
+                            aabb_matched.insert(format!("{}/{}", name, ref_name));
+                        } else {
+                            aabb_failures.push(format!(
+                                "{}/{}: step=[{:.4},{:.4},{:.4}]-[{:.4},{:.4},{:.4}] \
+                                 glb=[{:.4},{:.4},{:.4}]-[{:.4},{:.4},{:.4}] \
+                                 (tol={:.4})",
+                                name,
+                                ref_name,
+                                step_min.x,
+                                step_min.y,
+                                step_min.z,
+                                step_max.x,
+                                step_max.y,
+                                step_max.z,
+                                ref_min.x,
+                                ref_min.y,
+                                ref_min.z,
+                                ref_max.x,
+                                ref_max.y,
+                                ref_max.z,
+                                tol,
+                            ));
+                        }
+                    }
                 }
-            } else {
-                (0, 0)
-            };
+            }
 
             results.push(FileResult {
                 name,
@@ -2426,12 +2519,10 @@ mod tests {
                 tris: total_tris,
                 wt_pass,
                 wt_total,
-                ref_verts,
-                ref_tris,
             });
         }
 
-        // Print results as a compact 4-column table
+        // Print results
         let mut total_wt_pass = 0usize;
         let mut total_wt_total = 0usize;
         println!();
@@ -2459,12 +2550,160 @@ mod tests {
             "  {:<24} {:>5}/{:<5} {:>7.0}ms {:>10}",
             "TOTAL", total_wt_pass, total_wt_total, total_ms, total_tris,
         );
+
+        if !instance_failures.is_empty() {
+            println!("\n  Instance count mismatches:");
+            for f in &instance_failures {
+                println!("    {}", f);
+            }
+        }
+        if !aabb_failures.is_empty() {
+            println!("\n  AABB mismatches (>1% of ref diagonal):");
+            for f in &aabb_failures {
+                println!("    {}", f);
+            }
+        }
         println!();
 
-        assert!(
-            total_wt_pass >= 154,
-            "Watertight regression: {total_wt_pass}/{total_wt_total} (expected at least 154)"
+        assert_eq!(
+            total_wt_pass, total_wt_total,
+            "Watertight regression: {total_wt_pass}/{total_wt_total} (expected 100%)"
         );
+        // AABB comparison for instanced parts is unreliable: STEP stores
+        // each instance in world-space while GLB uses local-space, and the
+        // _0/_1 suffixes don't correspond to the same instances. Only
+        // hard-assert specific geometries below.
+        // Assert the actuator disc cams (b-spline surfaces of revolution)
+        // match the reference GLB exactly — these were previously exploding.
+        assert!(
+            aabb_matched.contains("actuator/disc_cam_A"),
+            "disc_cam_A AABB must match reference GLB"
+        );
+        assert!(
+            aabb_matched.contains("actuator/disc_cam_B"),
+            "disc_cam_B AABB must match reference GLB"
+        );
+    }
+
+    /// Verify that B-spline disc faces (surfaces of revolution) tessellate
+    /// with AABBs contained within the rest of the body. Before the angular_period
+    /// fix, these faces would explode into large pancakes spanning the parametric domain.
+    #[test]
+    fn test_actuator_disc_containment() {
+        use crate::attributes::GroupingKind;
+        use crate::boundary::tesselate::TesselationParams;
+        use nalgebra::Point3;
+
+        let actuator_path =
+            std::path::Path::new("/home/mikedh/dev/rmesh/feat_obj/reference/rosetta/actuator.STEP");
+        if !actuator_path.exists() {
+            eprintln!("Skipping: actuator.STEP not found");
+            return;
+        }
+
+        let data = std::fs::read(actuator_path).unwrap();
+        let processed = strip_flatten(&data);
+        let step_file = StepFile::parse(&processed);
+        let scene = convert_to_scene(&step_file).expect("Failed to convert actuator.STEP");
+
+        let params = TesselationParams::default();
+
+        for (_key, geom) in &scene.geometry {
+            let Geometry::Brep(brep) = geom else {
+                continue;
+            };
+
+            let mesh = brep.tesselate(&params);
+            if mesh.faces.is_empty() {
+                continue;
+            }
+
+            // Find the Surface grouping
+            let surface_grouping = mesh
+                .attributes_face
+                .groupings
+                .iter()
+                .find(|g| matches!(g.kind, GroupingKind::Surface));
+            let Some(grouping) = surface_grouping else {
+                continue;
+            };
+            if mesh.face_surfaces.is_empty() {
+                continue;
+            }
+
+            // Partition triangles into B-spline vs non-B-spline
+            let mut bspline_min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
+            let mut bspline_max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+            let mut other_min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
+            let mut other_max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+            let mut has_bspline = false;
+            let mut has_other = false;
+
+            for (tri_idx, tri) in mesh.faces.iter().enumerate() {
+                let face_idx = grouping.indices[tri_idx];
+                if face_idx == crate::attributes::UNSET || face_idx >= mesh.face_surfaces.len() {
+                    continue;
+                }
+                let surface = &mesh.face_surfaces[face_idx];
+                let is_bspline = matches!(surface, Surface::BSpline(_));
+
+                for &vi in tri {
+                    let v = &mesh.vertices[vi];
+                    if is_bspline {
+                        has_bspline = true;
+                        bspline_min.x = bspline_min.x.min(v.x);
+                        bspline_min.y = bspline_min.y.min(v.y);
+                        bspline_min.z = bspline_min.z.min(v.z);
+                        bspline_max.x = bspline_max.x.max(v.x);
+                        bspline_max.y = bspline_max.y.max(v.y);
+                        bspline_max.z = bspline_max.z.max(v.z);
+                    } else {
+                        has_other = true;
+                        other_min.x = other_min.x.min(v.x);
+                        other_min.y = other_min.y.min(v.y);
+                        other_min.z = other_min.z.min(v.z);
+                        other_max.x = other_max.x.max(v.x);
+                        other_max.y = other_max.y.max(v.y);
+                        other_max.z = other_max.z.max(v.z);
+                    }
+                }
+            }
+
+            if !has_bspline || !has_other {
+                continue;
+            }
+
+            // Tolerance: 1% of body diagonal
+            let diag = (other_max - other_min).norm();
+            let tol = diag * 0.01;
+
+            // Assert B-spline AABB is contained within non-B-spline AABB (with tolerance)
+            assert!(
+                bspline_min.x >= other_min.x - tol
+                    && bspline_min.y >= other_min.y - tol
+                    && bspline_min.z >= other_min.z - tol
+                    && bspline_max.x <= other_max.x + tol
+                    && bspline_max.y <= other_max.y + tol
+                    && bspline_max.z <= other_max.z + tol,
+                "B-spline faces exceed body bounds!\n\
+                 B-spline AABB: [{:.4}, {:.4}, {:.4}] to [{:.4}, {:.4}, {:.4}]\n\
+                 Non-B-spline AABB: [{:.4}, {:.4}, {:.4}] to [{:.4}, {:.4}, {:.4}]\n\
+                 Tolerance: {:.4}",
+                bspline_min.x,
+                bspline_min.y,
+                bspline_min.z,
+                bspline_max.x,
+                bspline_max.y,
+                bspline_max.z,
+                other_min.x,
+                other_min.y,
+                other_min.z,
+                other_max.x,
+                other_max.y,
+                other_max.z,
+                tol,
+            );
+        }
     }
 
     /// Corpus-scale STEP loading test with BREP vs tessellation diagnosis.

@@ -535,29 +535,80 @@ impl Torus {
 }
 
 impl Surface {
-    /// Whether this surface uses angular parametrization that can have ±π discontinuities.
+    /// Returns the angular period per parametric direction, or `None` if not periodic.
     ///
-    /// For these surfaces, midpoint computation should be done in 3D to avoid
-    /// issues when the UV midpoint crosses the angular discontinuity.
-    pub fn is_angular(&self) -> bool {
+    /// For surfaces with angular parametrization that can have discontinuities,
+    /// this returns the period (e.g. `TAU` for `atan2`-based parametrization).
+    /// Used by the tessellator to unwrap UV coordinates and compute midpoints
+    /// correctly across angular boundaries.
+    pub fn angular_period(&self) -> (Option<f64>, Option<f64>) {
+        use std::f64::consts::TAU;
         match self {
-            Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) => {
-                true
+            Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) => (Some(TAU), None),
+            Surface::Torus(_) => (Some(TAU), Some(TAU)),
+            Surface::BSpline(b) => {
+                let (u_closed, v_closed) = b.closed_directions();
+                let ((u_min, u_max), (v_min, v_max)) = b.domain();
+                let u_period = if u_closed { Some(u_max - u_min) } else { None };
+                let v_period = if v_closed { Some(v_max - v_min) } else { None };
+                (u_period, v_period)
             }
-            Surface::Offset(o) => o.base.is_angular(),
-            _ => false,
+            Surface::Offset(o) => o.base.angular_period(),
+            Surface::Plane(_) => (None, None),
         }
     }
 
-    /// Whether both parametric coordinates are angular (can have ±π discontinuities).
+    /// Uniformly scale all positional and length fields by `s`.
     ///
-    /// Torus has (major_angle, minor_angle) — both are atan2 outputs in [-π, π].
-    /// Other angular surfaces only have one angular coordinate (u/theta).
-    pub fn is_doubly_angular(&self) -> bool {
+    /// Types with private precomputed fields (Plane, Cylinder, Cone, Torus) are
+    /// reconstructed via their `new()` constructors to recompute the orthonormal
+    /// basis.
+    pub fn scale_by(&mut self, s: f64) {
         match self {
-            Surface::Torus(_) => true,
-            Surface::Offset(o) => o.base.is_doubly_angular(),
-            _ => false,
+            Surface::Plane(p) => {
+                *self = Surface::Plane(SurfacePlane::new(
+                    Point3::from(p.origin.coords * s),
+                    p.normal,
+                ));
+            }
+            Surface::Cylinder(c) => {
+                *self = Surface::Cylinder(Cylinder::new(
+                    Point3::from(c.origin.coords * s),
+                    c.axis,
+                    c.radius * s,
+                ));
+            }
+            Surface::Cone(c) => {
+                *self = Surface::Cone(Cone::new(
+                    Point3::from(c.apex.coords * s),
+                    c.axis,
+                    c.half_angle,
+                ));
+            }
+            // Sphere has no precomputed basis fields — in-place mutation is sufficient.
+            Surface::Sphere(sp) => {
+                sp.center.coords *= s;
+                sp.radius *= s;
+            }
+            Surface::Torus(t) => {
+                *self = Surface::Torus(Torus::new(
+                    Point3::from(t.center.coords * s),
+                    t.axis,
+                    t.major_radius * s,
+                    t.minor_radius * s,
+                ));
+            }
+            Surface::BSpline(b) => {
+                for row in &mut b.control_points {
+                    for p in row {
+                        p.coords *= s;
+                    }
+                }
+            }
+            Surface::Offset(o) => {
+                o.base.scale_by(s);
+                o.distance *= s;
+            }
         }
     }
 

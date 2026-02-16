@@ -260,8 +260,14 @@ pub fn param_from_chunks<'a, T: Parse<'a>>(
 pub fn strip_flatten(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut i = 0;
+    let mut in_string = false;
     while i < data.len() {
         match data[i] {
+            b'\'' => {
+                in_string = !in_string;
+                out.push(b'\'');
+            }
+            _ if in_string => out.push(data[i]),
             b'/' if i + 1 < data.len() && data[i + 1] == b'*' => {
                 // Block comment
                 for j in memchr_iter(b'/', &data[i + 2..]) {
