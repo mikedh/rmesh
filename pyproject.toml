@@ -1,7 +1,7 @@
 [build-system]
 # make sure we build on the same numpy version range
 # as our install numpy version range
-requires = ["maturin[patchelf]>=1.8,<2.0",
+requires = ["maturin[patchelf]>=1.12",
             "numpy>=2.0"]
 build-backend = "maturin"
 
@@ -24,17 +24,6 @@ manifest-path = "crates/rmesh_python/Cargo.toml"
 features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 python-source = "python"
 editable-profile = "dev"
-
-[tool.uv]
-cache-keys = [
-    {file = "Cargo.toml"},
-    {file = "crates/**/Cargo.toml"},
-    {file = "crates/**/*.rs"},
-    {file = "crates/**/*.wgsl"},
-]
-
-[tool.uv.sources]
-trimesh = { path = "test/trimesh", editable = true }
 
 [dependency-groups]
 dev = [
