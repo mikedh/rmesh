@@ -315,6 +315,7 @@ impl CurveBSpline {
         } else {
             // error ∝ 1/n², so n_needed = n_probe * sqrt(error / tolerance)
             let ratio = (max_error / chord_tol).sqrt();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let n = (n_probe as f64 * ratio).ceil() as usize;
             n.clamp(n_probe, max_segments)
         }

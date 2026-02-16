@@ -424,6 +424,7 @@ pub fn render_to_image(scene: &crate::scene::Scene, options: &RenderOptions) -> 
         })
         .ok();
 
+    #[allow(clippy::disallowed_methods)]
     let data = slice.get_mapped_range();
     let mut rgba = Vec::with_capacity((w * h * bytes_per_pixel) as usize);
     for row in 0..h {

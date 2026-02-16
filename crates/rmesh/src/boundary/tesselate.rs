@@ -247,7 +247,7 @@ fn fill_interior_holes(
         return;
     }
     // Sort for deterministic iteration order
-    hole_edges.sort();
+    hole_edges.sort_unstable();
 
     // Build adjacency: vertex → set of connected vertices via hole edges
     let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -273,28 +273,21 @@ fn fill_interior_holes(
         visited_edges.insert(start_key);
         let mut current = start_b;
         let mut prev = start_a;
-        loop {
-            let neighbors = match adj.get(&current) {
-                Some(n) => n,
-                None => break,
+        while let Some(neighbors) = adj.get(&current) {
+            let Some(&n) = neighbors.iter().find(|&&n| n != prev) else {
+                break;
             };
-            let next = neighbors.iter().find(|&&n| n != prev);
-            match next {
-                Some(&n) => {
-                    let key = canonical_edge(current, n);
-                    if visited_edges.contains(&key) {
-                        break;
-                    }
-                    visited_edges.insert(key);
-                    if n == start_a {
-                        break; // closed the loop
-                    }
-                    loop_verts.push(n);
-                    prev = current;
-                    current = n;
-                }
-                None => break,
+            let key = canonical_edge(current, n);
+            if visited_edges.contains(&key) {
+                break;
             }
+            visited_edges.insert(key);
+            if n == start_a {
+                break; // closed the loop
+            }
+            loop_verts.push(n);
+            prev = current;
+            current = n;
         }
         // Fan-triangulate the hole from vertex 0 of the loop
         if loop_verts.len() >= 3 {
@@ -971,6 +964,7 @@ fn collect_loop_indices(
 /// Returns (triangles, strategy_code) where strategy codes are:
 /// 0=uv_cdt, 1=plane_cdt, 2=earcut_uv, 3=best_incomplete, 4=fan,
 /// 5=earcut_3d, 6=axis_cdt
+#[allow(clippy::too_many_arguments)]
 fn triangulate_face_robust_pts(
     pts: &[(f64, f64)],
     contours: &[Vec<usize>],

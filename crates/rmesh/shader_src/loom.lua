@@ -30,7 +30,7 @@ end
 local RENDER_OUT = join{SRC, "render/shaders"}
 
 local STRUCT_FILE_TEMPLATE = [[
-#![allow(dead_code, clippy::too_many_arguments)]
+#![allow(dead_code, clippy::too_many_arguments, clippy::pub_underscore_fields)]
 ]] .. header("///") .. [[
 
 use bytemuck::{Pod, Zeroable};
