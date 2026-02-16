@@ -810,28 +810,12 @@ impl BrepModel {
     /// Used as the characteristic length for relative tolerance computation.
     /// Returns 0.0 if the model has no vertices.
     pub fn characteristic_length(&self) -> f64 {
-        match self.bounds() {
-            Some((min, max)) => (max - min).norm(),
-            None => 0.0,
-        }
+        self.bounds().map_or(0.0, |b| b.diagonal())
     }
 
     /// Compute the axis-aligned bounding box of all vertices.
-    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
-        if self.vertices.is_empty() {
-            return None;
-        }
-        let mut min = self.vertices[0].point;
-        let mut max = self.vertices[0].point;
-        for v in &self.vertices[1..] {
-            min.x = min.x.min(v.point.x);
-            min.y = min.y.min(v.point.y);
-            min.z = min.z.min(v.point.z);
-            max.x = max.x.max(v.point.x);
-            max.y = max.y.max(v.point.y);
-            max.z = max.z.max(v.point.z);
-        }
-        Some((min, max))
+    pub fn bounds(&self) -> Option<crate::bounds::Bounds3> {
+        crate::bounds::Bounds3::from_iter(self.vertices.iter().map(|v| v.point))
     }
 }
 

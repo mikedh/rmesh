@@ -383,7 +383,7 @@ impl Sketch {
     }
 
     /// Compute the 2D axis-aligned bounding box of the sketch profile.
-    pub fn bounds(&self) -> Option<(Point2<f64>, Point2<f64>)> {
+    pub fn bounds(&self) -> Option<crate::bounds::Bounds2> {
         self.to_path2d().bounds()
     }
 

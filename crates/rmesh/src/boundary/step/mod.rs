@@ -1681,38 +1681,36 @@ mod tests {
         let tess_bounds = tess_mesh.bounds();
         let ref_bounds = reference.bounds();
 
-        if let Some((min, max)) = tess_bounds {
+        if let Some(b) = tess_bounds {
             println!("\nTessellated bounds (STEP units, likely inches):");
-            println!("  Min: ({:.4}, {:.4}, {:.4})", min.x, min.y, min.z);
-            println!("  Max: ({:.4}, {:.4}, {:.4})", max.x, max.y, max.z);
+            println!("  Min: ({:.4}, {:.4}, {:.4})", b.min.x, b.min.y, b.min.z);
+            println!("  Max: ({:.4}, {:.4}, {:.4})", b.max.x, b.max.y, b.max.z);
             println!(
                 "  Size: ({:.4}, {:.4}, {:.4})",
-                max.x - min.x,
-                max.y - min.y,
-                max.z - min.z
+                b.max.x - b.min.x,
+                b.max.y - b.min.y,
+                b.max.z - b.min.z
             );
         }
-        if let Some((min, max)) = ref_bounds {
+        if let Some(b) = ref_bounds {
             println!("\nReference bounds (GLB, meters):");
-            println!("  Min: ({:.4}, {:.4}, {:.4})", min.x, min.y, min.z);
-            println!("  Max: ({:.4}, {:.4}, {:.4})", max.x, max.y, max.z);
+            println!("  Min: ({:.4}, {:.4}, {:.4})", b.min.x, b.min.y, b.min.z);
+            println!("  Max: ({:.4}, {:.4}, {:.4})", b.max.x, b.max.y, b.max.z);
             println!(
                 "  Size: ({:.4}, {:.4}, {:.4})",
-                max.x - min.x,
-                max.y - min.y,
-                max.z - min.z
+                b.max.x - b.min.x,
+                b.max.y - b.min.y,
+                b.max.z - b.min.z
             );
         }
 
         // Compute scale factor from bounding box sizes
         // The STEP file is in inches, GLB in meters (1 inch = 0.0254 m)
-        let scale = if let (Some((tess_min, tess_max)), Some((ref_min, ref_max))) =
-            (tess_bounds, ref_bounds)
-        {
-            let tess_size = (tess_max.x - tess_min.x)
-                .max((tess_max.y - tess_min.y).max(tess_max.z - tess_min.z));
+        let scale = if let (Some(tb), Some(rb)) = (tess_bounds, ref_bounds) {
+            let tess_size =
+                (tb.max.x - tb.min.x).max((tb.max.y - tb.min.y).max(tb.max.z - tb.min.z));
             let ref_size =
-                (ref_max.x - ref_min.x).max((ref_max.y - ref_min.y).max(ref_max.z - ref_min.z));
+                (rb.max.x - rb.min.x).max((rb.max.y - rb.min.y).max(rb.max.z - rb.min.z));
             if tess_size > 1e-10 {
                 ref_size / tess_size
             } else {
@@ -1883,13 +1881,11 @@ mod tests {
             });
 
         // Compute scale factor from bounding boxes (STEP is inches, GLB is meters)
-        let (tess_min, tess_max) = tess_mesh.bounds().expect("tessellated mesh has no bounds");
-        let (ref_min, ref_max) = reference.bounds().expect("reference mesh has no bounds");
+        let tb = tess_mesh.bounds().expect("tessellated mesh has no bounds");
+        let rb = reference.bounds().expect("reference mesh has no bounds");
 
-        let tess_size =
-            (tess_max.x - tess_min.x).max((tess_max.y - tess_min.y).max(tess_max.z - tess_min.z));
-        let ref_size =
-            (ref_max.x - ref_min.x).max((ref_max.y - ref_min.y).max(ref_max.z - ref_min.z));
+        let tess_size = (tb.max.x - tb.min.x).max((tb.max.y - tb.min.y).max(tb.max.z - tb.min.z));
+        let ref_size = (rb.max.x - rb.min.x).max((rb.max.y - rb.min.y).max(rb.max.z - rb.min.z));
         let scale = ref_size / tess_size;
 
         // Volume error < 10%
@@ -1988,10 +1984,10 @@ mod tests {
 
         // Print per-geometry local bounds
         for (name, geom) in &scene.geometry {
-            if let Some((min, max)) = geom.bounds() {
+            if let Some(b) = geom.bounds() {
                 println!(
                     "  '{}': local bounds min=({:.6}, {:.6}, {:.6}) max=({:.6}, {:.6}, {:.6})",
-                    name, min.x, min.y, min.z, max.x, max.y, max.z
+                    name, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z
                 );
             }
         }
@@ -2024,13 +2020,11 @@ mod tests {
                 println!("    kind={:?} index={:?}", node.kind, node.index);
                 for &gi in &node.index {
                     if gi < geom_keys.len() {
-                        if let Some((min, max)) = scene.geometry[&geom_keys[gi]].bounds() {
+                        if let Some(b) = scene.geometry[&geom_keys[gi]].bounds() {
+                            let ext = b.extents();
                             println!(
                                 "    -> geom '{}': local extents=({:.6}, {:.6}, {:.6})",
-                                geom_keys[gi],
-                                max.x - min.x,
-                                max.y - min.y,
-                                max.z - min.z,
+                                geom_keys[gi], ext.x, ext.y, ext.z,
                             );
                         }
                     }

@@ -6,6 +6,8 @@
 use nalgebra::Point2;
 use smallvec::SmallVec;
 
+use crate::bounds::Bounds2;
+
 /// Minimum query count before slab build is amortized.
 /// Build cost is ~11ns × N; per-query savings ~0.2ns × N for N≥50.
 /// Break-even at M ≈ 55; we round up for safety.
@@ -33,16 +35,10 @@ pub(crate) fn point_in_polygon(
         let slab = SlabIndex::build(exterior);
         points.iter().map(|p| slab.contains(p.x, p.y)).collect()
     } else {
-        let (x_min, y_min, x_max, y_max) = aabb(exterior);
+        let bb = aabb(exterior);
         points
             .iter()
-            .map(|p| {
-                p.x >= x_min
-                    && p.x <= x_max
-                    && p.y >= y_min
-                    && p.y <= y_max
-                    && point_in_polygon_naive(p, exterior)
-            })
+            .map(|p| bb.contains_point(p) && point_in_polygon_naive(p, exterior))
             .collect()
     };
 
@@ -65,16 +61,11 @@ pub(crate) fn point_in_polygon(
                 }
             }
         } else {
-            let (hx_min, hy_min, hx_max, hy_max) = aabb(hole);
+            let hbb = aabb(hole);
             for (i, r) in result.iter_mut().enumerate() {
                 if *r {
                     let p = &points[i];
-                    if p.x >= hx_min
-                        && p.x <= hx_max
-                        && p.y >= hy_min
-                        && p.y <= hy_max
-                        && point_in_polygon_naive(p, hole)
-                    {
+                    if hbb.contains_point(p) && point_in_polygon_naive(p, hole) {
                         *r = false;
                     }
                 }
@@ -86,18 +77,8 @@ pub(crate) fn point_in_polygon(
 }
 
 /// Compute the axis-aligned bounding box of a polygon.
-fn aabb(polygon: &[Point2<f64>]) -> (f64, f64, f64, f64) {
-    let mut x_min = f64::MAX;
-    let mut y_min = f64::MAX;
-    let mut x_max = f64::MIN;
-    let mut y_max = f64::MIN;
-    for p in polygon {
-        x_min = x_min.min(p.x);
-        y_min = y_min.min(p.y);
-        x_max = x_max.max(p.x);
-        y_max = y_max.max(p.y);
-    }
-    (x_min, y_min, x_max, y_max)
+fn aabb(polygon: &[Point2<f64>]) -> Bounds2 {
+    Bounds2::from_points(polygon).unwrap_or_else(Bounds2::empty)
 }
 
 /// Ray-casting point-in-polygon for a single point.
@@ -145,7 +126,8 @@ impl SlabIndex {
     fn build(polygon: &[Point2<f64>]) -> Self {
         let n = polygon.len();
 
-        let (x_min, y_min, x_max, y_max) = aabb(polygon);
+        let bb = aabb(polygon);
+        let (x_min, y_min, x_max, y_max) = (bb.min.x, bb.min.y, bb.max.x, bb.max.y);
 
         let y_range = y_max - y_min;
         if y_range == 0.0 {

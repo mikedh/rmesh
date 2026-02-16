@@ -13,6 +13,7 @@ use nalgebra::{Matrix4, Point2, Point3};
 use serde::{Deserialize, Serialize};
 
 use super::{Line, Path2D, Path3D, Segment3D};
+use crate::bounds::Bounds2;
 
 pub(crate) use query::point_in_polygon;
 
@@ -69,32 +70,18 @@ impl Polygon2D {
     }
 
     /// Get the axis-aligned bounding box
-    pub fn bounds(&self) -> Option<(Point2<f64>, Point2<f64>)> {
-        if self.exterior.is_empty() {
-            return None;
-        }
-
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        for p in &self.exterior {
-            min_x = min_x.min(p.x);
-            min_y = min_y.min(p.y);
-            max_x = max_x.max(p.x);
-            max_y = max_y.max(p.y);
-        }
-
-        Some((Point2::new(min_x, min_y), Point2::new(max_x, max_y)))
+    pub fn bounds(&self) -> Option<Bounds2> {
+        Bounds2::from_points(&self.exterior)
     }
 
     /// Get the extents (width, height) of the bounding box.
     ///
     /// Returns None for empty polygons.
     pub fn extents(&self) -> Option<[f64; 2]> {
-        self.bounds()
-            .map(|(min, max)| [max.x - min.x, max.y - min.y])
+        self.bounds().map(|b| {
+            let e = b.extents();
+            [e.x, e.y]
+        })
     }
 
     /// Get the number of vertices in the exterior ring
@@ -399,11 +386,11 @@ mod tests {
             Point2::new(1.0, 8.0),
         ]);
 
-        let (min, max) = polygon.bounds().unwrap();
-        assert_relative_eq!(min.x, 1.0, epsilon = 1e-10);
-        assert_relative_eq!(min.y, 2.0, epsilon = 1e-10);
-        assert_relative_eq!(max.x, 5.0, epsilon = 1e-10);
-        assert_relative_eq!(max.y, 8.0, epsilon = 1e-10);
+        let b = polygon.bounds().unwrap();
+        assert_relative_eq!(b.min.x, 1.0, epsilon = 1e-10);
+        assert_relative_eq!(b.min.y, 2.0, epsilon = 1e-10);
+        assert_relative_eq!(b.max.x, 5.0, epsilon = 1e-10);
+        assert_relative_eq!(b.max.y, 8.0, epsilon = 1e-10);
     }
 
     #[test]

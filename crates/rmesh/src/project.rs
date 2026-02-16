@@ -1378,17 +1378,14 @@ mod tests {
         for (li, result) in results.iter().enumerate() {
             if let Some(paths) = result {
                 // Compute AABB area across all paths at this level.
-                let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
-                let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+                let mut bounds = crate::bounds::Bounds2::empty();
                 for path in paths {
-                    if let Some((lo, hi)) = path.bounds() {
-                        min_x = min_x.min(lo.x);
-                        min_y = min_y.min(lo.y);
-                        max_x = max_x.max(hi.x);
-                        max_y = max_y.max(hi.y);
+                    if let Some(b) = path.bounds() {
+                        bounds = bounds.union(&b);
                     }
                 }
-                let threshold = (max_x - min_x) * (max_y - min_y) * 0.01;
+                let e = bounds.extents();
+                let threshold = e.x * e.y * 0.01;
 
                 for path in paths {
                     for ring in &path.rings_discrete() {

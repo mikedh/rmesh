@@ -8,6 +8,8 @@
 
 use nalgebra::Point2;
 
+use crate::bounds::Bounds2;
+
 use super::Surface;
 use super::faces::{CURVATURE_TOL, GEOMETRY_TOL};
 use crate::path::polygons::point_in_polygon;
@@ -83,27 +85,14 @@ fn node_spacing_uv(surface: &Surface, u: f64, v: f64, tolerance: f64) -> f64 {
 
 /// Compute UV bounding box.
 fn uv_bounds(boundary: &[Point2<f64>], holes: &[&[Point2<f64>]]) -> (f64, f64, f64, f64) {
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
-    let mut v_min = f64::MAX;
-    let mut v_max = f64::MIN;
-
-    for p in boundary {
-        u_min = u_min.min(p.x);
-        u_max = u_max.max(p.x);
-        v_min = v_min.min(p.y);
-        v_max = v_max.max(p.y);
-    }
-    for &hole in holes {
-        for p in hole {
-            u_min = u_min.min(p.x);
-            u_max = u_max.max(p.x);
-            v_min = v_min.min(p.y);
-            v_max = v_max.max(p.y);
-        }
-    }
-
-    (u_min, u_max, v_min, v_max)
+    let b = Bounds2::from_iter(
+        boundary
+            .iter()
+            .chain(holes.iter().flat_map(|h| h.iter()))
+            .copied(),
+    )
+    .unwrap_or_else(Bounds2::empty);
+    (b.min.x, b.max.x, b.min.y, b.max.y)
 }
 
 /// Generate a hex grid of interior points, keeping only those inside the boundary.

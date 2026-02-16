@@ -99,7 +99,7 @@ impl Path2D {
         let bounds = self.bounds();
 
         let (min_x, min_y, max_x, max_y) = match bounds {
-            Some((min, max)) => (min.x, min.y, max.x, max.y),
+            Some(b) => (b.min.x, b.min.y, b.max.x, b.max.y),
             None => (0.0, 0.0, 100.0, 100.0),
         };
 

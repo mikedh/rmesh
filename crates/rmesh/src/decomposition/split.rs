@@ -11,6 +11,7 @@ use nalgebra::Point3;
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
+use crate::bounds::Bounds3;
 use crate::voxel::VoxelGrid;
 
 use super::ConvexHull;
@@ -518,23 +519,16 @@ fn build_hull_from_points(points: &[Point3<f64>], max_vertices: u32) -> Option<C
 
 /// Build an AABB box hull as fallback for degenerate inputs.
 fn aabb_fallback(points: &[Point3<f64>]) -> Option<ConvexHull> {
-    if points.is_empty() {
-        return None;
-    }
-
-    let mut min = points[0];
-    let mut max = points[0];
-    for p in points {
-        min = min.inf(p);
-        max = max.sup(p);
-    }
+    let b = Bounds3::from_points(points)?;
 
     // Ensure non-degenerate box
+    let e = b.extents();
     let eps = 1e-10;
-    if (max.x - min.x) < eps || (max.y - min.y) < eps || (max.z - min.z) < eps {
+    if e.x < eps || e.y < eps || e.z < eps {
         return None;
     }
 
+    let (min, max) = (b.min, b.max);
     let vertices = vec![
         Point3::new(min.x, min.y, min.z),
         Point3::new(max.x, min.y, min.z),
@@ -560,8 +554,8 @@ fn aabb_fallback(points: &[Point3<f64>]) -> Option<ConvexHull> {
         [1, 6, 5], // +X
     ];
 
-    let volume = (max.x - min.x) * (max.y - min.y) * (max.z - min.z);
-    let center = Point3::from((min.coords + max.coords) * 0.5);
+    let volume = b.volume();
+    let center = b.center();
 
     Some(ConvexHull {
         vertices,

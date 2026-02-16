@@ -157,6 +157,100 @@ pub fn create_icosahedron(radius: f64) -> Trimesh {
     Trimesh::new(vertices, faces, None, None).unwrap()
 }
 
+/// Create a cylinder mesh aligned along the Z axis, centered at the origin.
+///
+/// The cylinder has the specified radius and height, with `sections`
+/// circumferential facets. Cap faces are annotated with `Surface::Plane`
+/// and barrel faces with `Surface::Cylinder`, with a `GroupingKind::Surface`
+/// grouping so that `project()` can look up face → surface for arc detection.
+///
+/// # Arguments
+/// * `radius` - Cylinder radius
+/// * `height` - Cylinder height
+/// * `sections` - Number of circumferential facets (e.g. 32)
+pub fn create_cylinder(radius: f64, height: f64, sections: usize) -> Trimesh {
+    use crate::attributes::{Attributes, Grouping, GroupingKind};
+    use crate::boundary::faces::{Cylinder, Surface, SurfacePlane};
+
+    assert!(sections >= 3, "cylinder needs at least 3 sections");
+
+    let half = height / 2.0;
+
+    // Vertices: bottom ring, top ring, bottom center, top center
+    let mut vertices = Vec::with_capacity(2 * sections + 2);
+    for i in 0..sections {
+        let angle = 2.0 * std::f64::consts::PI * i as f64 / sections as f64;
+        let x = radius * angle.cos();
+        let y = radius * angle.sin();
+        vertices.push(Point3::new(x, y, -half)); // bottom ring
+    }
+    for i in 0..sections {
+        let angle = 2.0 * std::f64::consts::PI * i as f64 / sections as f64;
+        let x = radius * angle.cos();
+        let y = radius * angle.sin();
+        vertices.push(Point3::new(x, y, half)); // top ring
+    }
+    let bottom_center = vertices.len();
+    vertices.push(Point3::new(0.0, 0.0, -half));
+    let top_center = vertices.len();
+    vertices.push(Point3::new(0.0, 0.0, half));
+
+    // Surface definitions: 0=cylinder barrel, 1=bottom plane, 2=top plane
+    let face_surfaces = vec![
+        Surface::Cylinder(Cylinder::new(Point3::origin(), Vector3::z(), radius)),
+        Surface::Plane(SurfacePlane::new(
+            Point3::new(0.0, 0.0, -half),
+            -Vector3::z(),
+        )),
+        Surface::Plane(SurfacePlane::new(Point3::new(0.0, 0.0, half), Vector3::z())),
+    ];
+
+    let mut faces = Vec::new();
+    let mut surface_indices = Vec::new();
+
+    // Barrel faces (2 triangles per section)
+    for i in 0..sections {
+        let next = (i + 1) % sections;
+        let b0 = i;
+        let b1 = next;
+        let t0 = i + sections;
+        let t1 = next + sections;
+
+        // CCW winding for outward normals
+        faces.push([b0, b1, t1]);
+        surface_indices.push(0); // barrel
+        faces.push([b0, t1, t0]);
+        surface_indices.push(0); // barrel
+    }
+
+    // Bottom cap (CCW when viewed from below = CW from above)
+    for i in 0..sections {
+        let next = (i + 1) % sections;
+        faces.push([bottom_center, next, i]);
+        surface_indices.push(1); // bottom plane
+    }
+
+    // Top cap (CCW when viewed from above)
+    for i in 0..sections {
+        let next = (i + 1) % sections;
+        faces.push([top_center, i + sections, next + sections]);
+        surface_indices.push(2); // top plane
+    }
+
+    // Build face attributes with surface grouping
+    let grouping = Grouping {
+        kind: GroupingKind::Surface,
+        names: Vec::new(),
+        indices: surface_indices,
+    };
+    let mut attributes_face = Attributes::default();
+    attributes_face.groupings.push(grouping);
+
+    let mut mesh = Trimesh::new(vertices, faces, None, Some(attributes_face)).unwrap();
+    mesh.face_surfaces = face_surfaces;
+    mesh
+}
+
 /// Create an icosphere mesh centered at the origin.
 ///
 /// Subdivides a regular icosahedron and projects vertices onto the sphere.
@@ -665,8 +759,8 @@ mod tests {
         assert_eq!(box_mesh.faces.len(), 12);
 
         let bounds = box_mesh.bounds().unwrap();
-        assert_eq!(bounds.0, Point3::new(-0.5, -0.5, -0.5));
-        assert_eq!(bounds.1, Point3::new(0.5, 0.5, 0.5));
+        assert_eq!(bounds.min, Point3::new(-0.5, -0.5, -0.5));
+        assert_eq!(bounds.max, Point3::new(0.5, 0.5, 0.5));
     }
 
     #[test]
@@ -756,5 +850,57 @@ mod tests {
             "vol_3={vol_3}, vol_5={vol_5}, expected={expected}"
         );
         assert_relative_eq!(vol_5, expected, epsilon = 5e-3);
+    }
+
+    #[test]
+    fn test_cylinder_basic() {
+        let cyl = create_cylinder(5.0, 10.0, 32);
+        // 32 sections → 64 barrel + 32 bottom + 32 top = 128 faces
+        assert_eq!(cyl.faces.len(), 128);
+        // 32 bottom + 32 top + 2 centers = 66 vertices
+        assert_eq!(cyl.vertices.len(), 66);
+        assert!(cyl.is_watertight());
+        assert!(cyl.volume() > 0.0);
+
+        // Volume should approximate pi*r^2*h
+        let expected_vol = std::f64::consts::PI * 25.0 * 10.0;
+        assert_relative_eq!(cyl.volume(), expected_vol, epsilon = 10.0);
+    }
+
+    #[test]
+    fn test_cylinder_surfaces() {
+        use crate::attributes::GroupingKind;
+        use crate::boundary::faces::Surface;
+
+        let cyl = create_cylinder(5.0, 10.0, 16);
+
+        // Should have 3 surfaces: barrel, bottom cap, top cap
+        assert_eq!(cyl.face_surfaces.len(), 3);
+        assert!(matches!(cyl.face_surfaces[0], Surface::Cylinder(_)));
+        assert!(matches!(cyl.face_surfaces[1], Surface::Plane(_)));
+        assert!(matches!(cyl.face_surfaces[2], Surface::Plane(_)));
+
+        // Should have surface grouping
+        let grouping = cyl
+            .attributes_face
+            .groupings
+            .iter()
+            .find(|g| g.kind == GroupingKind::Surface);
+        assert!(grouping.is_some());
+        let grouping = grouping.unwrap();
+        assert_eq!(grouping.indices.len(), cyl.faces.len());
+
+        // Barrel faces (first 32) should map to surface 0
+        for &idx in &grouping.indices[..32] {
+            assert_eq!(idx, 0);
+        }
+        // Bottom cap faces should map to surface 1
+        for &idx in &grouping.indices[32..48] {
+            assert_eq!(idx, 1);
+        }
+        // Top cap faces should map to surface 2
+        for &idx in &grouping.indices[48..64] {
+            assert_eq!(idx, 2);
+        }
     }
 }

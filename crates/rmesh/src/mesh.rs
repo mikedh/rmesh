@@ -889,8 +889,10 @@ impl Trimesh {
     ///
     /// Returns None if the mesh is empty.
     pub fn extents(&self) -> Option<[f64; 3]> {
-        self.bounds()
-            .map(|(min, max)| [max.x - min.x, max.y - min.y, max.z - min.z])
+        self.bounds().map(|b| {
+            let e = b.extents();
+            [e.x, e.y, e.z]
+        })
     }
 
     /// Get the geometric center of the vertices (mean position).
@@ -1466,21 +1468,9 @@ impl Trimesh {
 
     /// Calculate an axis-aligned bounding box (AABB) for the mesh,
     /// or None if the mesh is empty or degenerate.
-    pub fn bounds(&self) -> Option<(Point3<f64>, Point3<f64>)> {
-        if self.vertices.is_empty() {
-            return None;
-        }
-
-        let (lower, upper) = self.vertices.par_iter().map(|v| (*v, *v)).reduce(
-            || (self.vertices[0], self.vertices[0]),
-            |(l1, u1), (l2, u2)| (l1.inf(&l2), u1.sup(&u2)),
-        );
-
-        if lower == upper {
-            return None;
-        }
-
-        Some((lower, upper))
+    pub fn bounds(&self) -> Option<crate::bounds::Bounds3> {
+        let b = crate::bounds::Bounds3::from_points_par(&self.vertices)?;
+        if b.min == b.max { None } else { Some(b) }
     }
 }
 
@@ -1555,7 +1545,7 @@ mod tests {
         let cube = create_box(&[1.0, 2.0, 3.0]);
         let bounds = cube.bounds().unwrap();
         assert!(relative_eq!(
-            bounds.0,
+            bounds.min,
             Point3::new(-0.5, -1.0, -1.5),
             epsilon = 1e-6
         ));
@@ -1568,8 +1558,8 @@ mod tests {
         assert_eq!(box_mesh.faces.len(), 12);
 
         let bounds = box_mesh.bounds().unwrap();
-        assert_eq!(bounds.0, Point3::new(-0.5, -0.5, -0.5));
-        assert_eq!(bounds.1, Point3::new(0.5, 0.5, 0.5));
+        assert_eq!(bounds.min, Point3::new(-0.5, -0.5, -0.5));
+        assert_eq!(bounds.max, Point3::new(0.5, 0.5, 0.5));
     }
 
     #[test]

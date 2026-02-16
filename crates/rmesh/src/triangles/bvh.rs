@@ -9,6 +9,7 @@
 use nalgebra::{Point3, Vector3};
 
 use super::closest::closest_point_on_triangle;
+use crate::bounds::Bounds3;
 
 /// Maximum triangles per leaf node before splitting.
 const MAX_LEAF_SIZE: usize = 4;
@@ -110,14 +111,18 @@ impl TriangleBvh {
         end: usize,
     ) -> usize {
         let count = end - start;
-        let aabb = Self::compute_aabb(vertices, faces, &tri_indices[start..end]);
+        let aabb = Bounds3::from_iter(tri_indices[start..end].iter().flat_map(|&idx| {
+            let [i0, i1, i2] = faces[idx as usize];
+            [vertices[i0], vertices[i1], vertices[i2]]
+        }))
+        .unwrap_or_else(Bounds3::empty);
 
         // Leaf node
         if count <= MAX_LEAF_SIZE {
             let node_idx = nodes.len();
             nodes.push(BvhNode {
-                aabb_min: aabb.0,
-                aabb_max: aabb.1,
+                aabb_min: aabb.min,
+                aabb_max: aabb.max,
                 data: NodeData::Leaf {
                     first_tri: start,
                     tri_count: count,
@@ -127,8 +132,13 @@ impl TriangleBvh {
         }
 
         // Find longest axis of centroid AABB
-        let (c_min, c_max) = Self::centroid_bounds(centroids, &tri_indices[start..end]);
-        let extent = c_max - c_min;
+        let cb = Bounds3::from_iter(
+            tri_indices[start..end]
+                .iter()
+                .map(|&idx| centroids[idx as usize]),
+        )
+        .unwrap_or_else(Bounds3::empty);
+        let extent = cb.extents();
         let axis = if extent.x >= extent.y && extent.x >= extent.z {
             0
         } else if extent.y >= extent.z {
@@ -148,8 +158,8 @@ impl TriangleBvh {
         // Reserve slot for this inner node
         let node_idx = nodes.len();
         nodes.push(BvhNode {
-            aabb_min: aabb.0,
-            aabb_max: aabb.1,
+            aabb_min: aabb.min,
+            aabb_max: aabb.max,
             data: NodeData::Inner { left: 0, right: 0 },
         });
 
@@ -159,37 +169,6 @@ impl TriangleBvh {
 
         nodes[node_idx].data = NodeData::Inner { left, right };
         node_idx
-    }
-
-    fn compute_aabb(
-        vertices: &[Point3<f64>],
-        faces: &[[usize; 3]],
-        indices: &[u32],
-    ) -> (Point3<f64>, Point3<f64>) {
-        let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-        let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
-
-        for &idx in indices {
-            let [i0, i1, i2] = faces[idx as usize];
-            for &vi in &[i0, i1, i2] {
-                let v = &vertices[vi];
-                min = min.inf(v);
-                max = max.sup(v);
-            }
-        }
-        (min, max)
-    }
-
-    fn centroid_bounds(centroids: &[Point3<f64>], indices: &[u32]) -> (Point3<f64>, Point3<f64>) {
-        let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-        let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
-
-        for &idx in indices {
-            let c = &centroids[idx as usize];
-            min = min.inf(c);
-            max = max.sup(c);
-        }
-        (min, max)
     }
 
     /// Cast a ray and find the nearest triangle intersection.

@@ -497,7 +497,7 @@ impl PySketch {
     fn bounds(&self) -> Option<((f64, f64), (f64, f64))> {
         self.inner
             .bounds()
-            .map(|(min, max)| ((min.x, min.y), (max.x, max.y)))
+            .map(|b| ((b.min.x, b.min.y), (b.max.x, b.max.y)))
     }
 
     /// Tessellate the sketch into polygon point arrays.

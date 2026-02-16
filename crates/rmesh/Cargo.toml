@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }
-nalgebra-sparse = "0.10"
+nalgebra-sparse = "0.11"
 serde = { workspace = true }
 starlark = { workspace = true }
 
@@ -39,9 +39,6 @@ xsd-parser-types = { version = "0.1", features = ["quick-xml", "serde"] }
 
 # Fidget SDF backend for feature meshing (mesh + jit for fast evaluation)
 fidget = { version = "0.4", default-features = false, features = ["mesh", "jit"] }
-# TODO: remove when fidget re-exports nalgebra or accepts raw arrays for transforms
-# Fidget uses nalgebra 0.34, we use 0.33, need this to build Matrix4 for OctreeSettings
-nalgebra_034 = { package = "nalgebra", version = "0.34" }
 
 [features]
 default = []
