@@ -9,7 +9,9 @@
 pub mod feature;
 
 use anyhow::Result;
-use nalgebra::{Isometry3, Matrix3, Matrix4, Point2, Point3, Rotation3, UnitQuaternion, Unit, Vector3};
+use nalgebra::{
+    Isometry3, Matrix3, Matrix4, Point2, Point3, Rotation3, Unit, UnitQuaternion, Vector3,
+};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::mesh::Trimesh;

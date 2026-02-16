@@ -335,7 +335,7 @@ pub fn project_polygons(
 
     let solver = Solver::with_precision(Precision::MEDIUM_HIGH);
     let options = OverlayOptions {
-        min_output_area: 1e-20,
+        min_output_area: EPSILON_MERGE_SQ,
         ..Default::default()
     };
 
@@ -415,9 +415,8 @@ pub fn project_polygons(
         //    Compose to_3d with a local-frame Z translation so that
         //    (x, y, 0) maps to the plane at this level.
         if !accumulated.is_empty() {
-            let level_to_3d = to_3d.map(|base| {
-                base * Matrix4::new_translation(&Vector3::new(0.0, 0.0, level))
-            });
+            let level_to_3d =
+                to_3d.map(|base| base * Matrix4::new_translation(&Vector3::new(0.0, 0.0, level)));
             let polygons = shapes_to_polygons(&accumulated, level_to_3d);
             if !polygons.is_empty() {
                 results[orig_idx] = Some(polygons);
@@ -432,14 +431,20 @@ pub fn project_polygons(
 fn face_contour(face: [usize; 3], vertices: &[Point2<f64>]) -> Option<Contour> {
     let (a, b, c) = (vertices[face[0]], vertices[face[1]], vertices[face[2]]);
     let cross = cross_2d(&a, &b, &c);
-    if cross.abs() < 1e-30 {
+    if cross.abs() < EPSILON_MERGE_SQ {
         return None;
     }
-    let mut tri = vec![[a.x, a.y], [b.x, b.y], [c.x, c.y]];
-    if cross < 0.0 {
-        tri.reverse();
+    if (b - a).norm_squared() < EPSILON_MERGE_SQ
+        || (c - b).norm_squared() < EPSILON_MERGE_SQ
+        || (a - c).norm_squared() < EPSILON_MERGE_SQ
+    {
+        return None;
     }
-    Some(tri)
+    Some(if cross > 0.0 {
+        vec![[a.x, a.y], [b.x, b.y], [c.x, c.y]]
+    } else {
+        vec![[c.x, c.y], [b.x, b.y], [a.x, a.y]]
+    })
 }
 
 /// Clip a triangle to the half-space above `level`, returned as a CCW contour.
@@ -477,30 +482,33 @@ fn clip_face(
     ];
     let d = [d[r], d[(r + 1) % 3], d[(r + 2) % 3]];
     let cross = cross_2d(&p[0], &p[1], &p[2]);
-    if cross.abs() < 1e-30 {
+    if cross.abs() < EPSILON_MERGE_SQ {
         return None;
     }
 
-    let lerp = |a: usize, b: usize| -> [f64; 2] {
+    let lerp = |a: usize, b: usize| -> Point2<f64> {
         let t = -d[a] / (d[b] - d[a]);
-        [
-            p[a].x + t * (p[b].x - p[a].x),
-            p[a].y + t * (p[b].y - p[a].y),
-        ]
+        p[a] + t * (p[b] - p[a])
     };
-    let pt = |i: usize| -> [f64; 2] { [p[i].x, p[i].y] };
 
-    // count==1: vertex 0 inside, 1+2 outside → clipped triangle
-    // count==2: vertex 0 outside, 1+2 inside → clipped quad
-    let mut pts = if count == 1 {
-        vec![pt(0), lerp(0, 1), lerp(0, 2)]
+    // count==1: vertex 0 inside, 1+2 outside → clipped triangle (3 pts)
+    // count==2: vertex 0 outside, 1+2 inside → clipped quad (4 pts)
+    let (pts, n) = if count == 1 {
+        ([p[0], lerp(0, 1), lerp(0, 2), Point2::origin()], 3)
     } else {
-        vec![lerp(0, 1), pt(1), pt(2), lerp(0, 2)]
+        ([lerp(0, 1), p[1], p[2], lerp(0, 2)], 4)
     };
-    if cross < 0.0 {
-        pts.reverse();
+
+    // Reject polygons with any near-zero-length edge (grazing clips, slivers).
+    if (0..n).any(|i| (pts[(i + 1) % n] - pts[i]).norm_squared() < EPSILON_MERGE_SQ) {
+        return None;
     }
-    Some(pts)
+
+    Some(if cross > 0.0 {
+        (0..n).map(|i| [pts[i].x, pts[i].y]).collect()
+    } else {
+        (0..n).rev().map(|i| [pts[i].x, pts[i].y]).collect()
+    })
 }
 
 /// Convert a discrete ring of points into a sequence of `Segment2D`,
@@ -1319,5 +1327,83 @@ mod tests {
         assert_eq!(result[1], Some(0));
         // Outer is not contained
         assert_eq!(result[0], None);
+    }
+
+    /// Projection of a real part should not produce tiny "speckle" rings.
+    ///
+    /// These are degenerate zero-area rings from triangle slivers at the
+    /// cut plane surviving through the polygon boolean union.
+    #[test]
+    fn test_project_no_speckles() {
+        use crate::exchange::{FileType, load};
+        use crate::geometry::Geometry;
+
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test/project/project");
+        let data = std::fs::read(base.with_extension("glb")).unwrap();
+        let scene = load(&data, Some(FileType::GLB), None).unwrap();
+        let mesh = scene
+            .geometry
+            .values()
+            .find_map(|g| match g {
+                Geometry::Mesh(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(base.with_extension("json")).unwrap())
+                .unwrap();
+        let arr = |key: &str| -> Vec<f64> {
+            json[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap())
+                .collect()
+        };
+        let o = arr("origin");
+        let n = arr("normal");
+        let levels = arr("levels");
+        let origin = Point3::new(o[0], o[1], o[2]);
+        let normal = Vector3::new(n[0], n[1], n[2]);
+
+        let results = mesh.project(&normal, &origin, &levels);
+
+        let mut speckle_count = 0usize;
+        for (li, result) in results.iter().enumerate() {
+            if let Some(paths) = result {
+                // Compute AABB area across all paths at this level.
+                let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+                let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+                for path in paths {
+                    if let Some((lo, hi)) = path.bounds() {
+                        min_x = min_x.min(lo.x);
+                        min_y = min_y.min(lo.y);
+                        max_x = max_x.max(hi.x);
+                        max_y = max_y.max(hi.y);
+                    }
+                }
+                let threshold = (max_x - min_x) * (max_y - min_y) * 0.01;
+
+                for path in paths {
+                    for ring in &path.rings_discrete() {
+                        let area = crate::path::polygons::signed_area(ring).abs();
+                        if area < threshold {
+                            speckle_count += 1;
+                        }
+                    }
+                }
+                if speckle_count > 0 {
+                    eprintln!("level[{li}]={:.6}: {speckle_count} speckle(s)", levels[li],);
+                }
+            }
+        }
+
+        assert_eq!(speckle_count, 0, "found {speckle_count} speckle ring(s)");
     }
 }
