@@ -2414,7 +2414,7 @@ mod tests {
             let wt_total = tess_meshes.len();
 
             // Build name -> AABB map for STEP tessellations
-            let mut step_aabbs: HashMap<String, (Point3<f64>, Point3<f64>)> = HashMap::new();
+            let mut step_aabbs: HashMap<String, crate::bounds::Bounds3> = HashMap::new();
 
             for (i, (geom_name, mesh)) in tess_meshes.iter().enumerate() {
                 total_faces += geom_entries[i].1.faces.len();
@@ -2462,8 +2462,10 @@ mod tests {
                         let Some(step_bounds) = step_aabbs.get(ref_name) else {
                             continue;
                         };
-                        let (ref_min, ref_max) = ref_bounds;
-                        let (step_min, step_max) = *step_bounds;
+                        let ref_min = ref_bounds.min;
+                        let ref_max = ref_bounds.max;
+                        let step_min = step_bounds.min;
+                        let step_max = step_bounds.max;
                         let diag = (ref_max - ref_min).norm();
                         let tol = diag * 0.01;
 
@@ -2730,6 +2732,14 @@ mod tests {
         struct DefectFaceInfo {
             surface_kind: &'static str,
             has_holes: bool,
+            strategy: u8,
+            cdt_err: u8,
+            earcut_empty: bool,
+            self_loops: u32,
+            degenerate_dropped: u32,
+            inner_outside: u32,
+            is_sympathy_defect: bool,
+            degenerate_pool_tris_dropped: u32,
         }
 
         struct BodyResult {
@@ -2742,6 +2752,8 @@ mod tests {
             mesh_watertight: bool,
             mesh_defect_faces: usize,
             defect_details: Vec<DefectFaceInfo>,
+            faces_with_uv_crossings: usize,
+            faces_with_unresolved_crossings: usize,
         }
 
         // Debug mode guard: timings are meaningless and corpus is too large
@@ -2824,9 +2836,25 @@ mod tests {
         let mut total_brep_bad = 0usize;
         let mut total_brep_bad_mesh_ok = 0usize;
         let mut total_defect_faces = 0usize;
-        // Defect face aggregation by surface type: (total, with_holes)
-        let mut defect_by_surface: std::collections::HashMap<&'static str, (usize, usize)> =
+        // Defect face aggregation by surface type: (total, with_holes, primary, secondary)
+        let mut defect_by_surface: std::collections::HashMap<
+            &'static str,
+            (usize, usize, usize, usize),
+        > = std::collections::HashMap::new();
+        // Strategy distribution for defect faces
+        let mut strategy_counts: std::collections::HashMap<u8, usize> =
             std::collections::HashMap::new();
+        // CDT error distribution for defect faces
+        let mut cdt_err_counts: std::collections::HashMap<u8, usize> =
+            std::collections::HashMap::new();
+        let mut total_earcut_empty: usize = 0;
+        let mut total_sympathy_defects: usize = 0;
+        let mut total_degenerate_pool_tris: usize = 0;
+        let mut total_faces_with_uv_crossings: usize = 0;
+        let mut total_faces_with_unresolved_crossings: usize = 0;
+        let mut debug_self_loops: usize = 0;
+        let mut debug_degenerate: usize = 0;
+        let mut debug_inner_outside: usize = 0;
         let mut total_parse_ms = 0.0f64;
         let mut total_convert_ms = 0.0f64;
         let mut total_tess_ms = 0.0f64;
@@ -2896,28 +2924,40 @@ mod tests {
                             let brep_watertight = edge_errors.is_empty();
                             let unmatched_edges = edge_errors.len();
 
-                            let mesh = brep.tesselate(&params);
+                            let (mesh, face_diags, shell_diag) =
+                                brep.tesselate_with_diagnostics(&params);
                             let mesh_triangles = mesh.faces.len();
                             let mesh_watertight = mesh.is_watertight();
 
-                            let (mesh_defect_faces, defect_details) =
-                                if brep_watertight && !mesh_watertight {
-                                    let bad = mesh.non_watertight_face_indices();
-                                    let details: Vec<DefectFaceInfo> = bad
-                                        .iter()
-                                        .map(|&fi| {
-                                            let face = &brep.faces[fi];
-                                            DefectFaceInfo {
-                                                surface_kind: brep.face_surfaces[face.surface]
-                                                    .kind_name(),
-                                                has_holes: !face.inner_loops.is_empty(),
-                                            }
-                                        })
-                                        .collect();
-                                    (bad.len(), details)
-                                } else {
-                                    (0, Vec::new())
-                                };
+                            let (mesh_defect_faces, defect_details) = if brep_watertight
+                                && !mesh_watertight
+                            {
+                                let bad = mesh.non_watertight_face_indices();
+                                let details: Vec<DefectFaceInfo> = bad
+                                    .iter()
+                                    .map(|&fi| {
+                                        let face = &brep.faces[fi];
+                                        let diag = face_diags.get(fi).copied().unwrap_or_default();
+                                        DefectFaceInfo {
+                                            surface_kind: brep.face_surfaces[face.surface]
+                                                .kind_name(),
+                                            has_holes: !face.inner_loops.is_empty(),
+                                            strategy: diag.strategy,
+                                            cdt_err: diag.cdt_err,
+                                            earcut_empty: diag.earcut_empty,
+                                            self_loops: diag.self_loop_count,
+                                            degenerate_dropped: diag.degenerate_contours_dropped,
+                                            inner_outside: diag.inner_outside_outer,
+                                            is_sympathy_defect: diag.is_sympathy_defect,
+                                            degenerate_pool_tris_dropped: diag
+                                                .degenerate_pool_tris_dropped,
+                                        }
+                                    })
+                                    .collect();
+                                (bad.len(), details)
+                            } else {
+                                (0, Vec::new())
+                            };
 
                             Some(BodyResult {
                                 step_faces,
@@ -2929,6 +2969,9 @@ mod tests {
                                 mesh_watertight,
                                 mesh_defect_faces,
                                 defect_details,
+                                faces_with_uv_crossings: shell_diag.faces_with_uv_crossings,
+                                faces_with_unresolved_crossings: shell_diag
+                                    .faces_with_unresolved_crossings,
                             })
                         })
                         .collect();
@@ -3052,12 +3095,39 @@ mod tests {
             total_brep_bad_mesh_ok += file_brep_bad_mesh_ok;
             total_defect_faces += file_defect_faces;
             for br in &body_results {
+                total_faces_with_uv_crossings += br.faces_with_uv_crossings;
+                total_faces_with_unresolved_crossings += br.faces_with_unresolved_crossings;
                 for d in &br.defect_details {
-                    let entry = defect_by_surface.entry(d.surface_kind).or_insert((0, 0));
+                    let entry = defect_by_surface
+                        .entry(d.surface_kind)
+                        .or_insert((0, 0, 0, 0));
                     entry.0 += 1;
                     if d.has_holes {
                         entry.1 += 1;
                     }
+                    // Primary = strategy 3 (best_incomplete) or 4 (fan)
+                    if d.strategy >= 3 {
+                        entry.2 += 1;
+                    } else {
+                        entry.3 += 1;
+                    }
+                    // Track strategy distribution
+                    *strategy_counts.entry(d.strategy).or_insert(0) += 1;
+                    // Track CDT error distribution
+                    if d.cdt_err > 0 {
+                        *cdt_err_counts.entry(d.cdt_err).or_insert(0) += 1;
+                    }
+                    if d.earcut_empty {
+                        total_earcut_empty += 1;
+                    }
+                    if d.is_sympathy_defect {
+                        total_sympathy_defects += 1;
+                    }
+                    total_degenerate_pool_tris += d.degenerate_pool_tris_dropped as usize;
+                    // Debug diagnostics accumulation
+                    debug_self_loops += d.self_loops as usize;
+                    debug_degenerate += d.degenerate_dropped as usize;
+                    debug_inner_outside += d.inner_outside as usize;
                 }
             }
             total_parse_ms += parse_ms;
@@ -3290,26 +3360,107 @@ mod tests {
             "  Defect faces:     {} (from tess_bug bodies)",
             total_defect_faces
         );
+        println!(
+            "  Sympathy defects: {} ({:.1}% of defect faces)",
+            total_sympathy_defects,
+            if total_defect_faces > 0 {
+                total_sympathy_defects as f64 / total_defect_faces as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!(
+            "  Degenerate tris:  {} (pool-level collapsed triangles dropped)",
+            total_degenerate_pool_tris
+        );
+        println!(
+            "  UV crossings:     {} faces had contour crossings detected, {} unresolved",
+            total_faces_with_uv_crossings, total_faces_with_unresolved_crossings
+        );
         println!();
         if !defect_by_surface.is_empty() {
             println!("  === Defect Face Summary ===");
             println!(
-                "  {:12} {:>8} {:>10} {:>10}",
-                "Surface", "Defects", "w/ holes", "w/o holes"
+                "  {:12} {:>8} {:>10} {:>10} {:>10} {:>10}",
+                "Surface", "Defects", "w/ holes", "w/o holes", "PRIMARY", "SECONDARY"
             );
-            println!("  {}", "-".repeat(44));
+            println!("  {}", "-".repeat(64));
             let mut surface_entries: Vec<_> = defect_by_surface.iter().collect();
             surface_entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
-            for &(&kind, &(total, with_holes)) in &surface_entries {
+            for &(&kind, &(total, with_holes, primary, secondary)) in &surface_entries {
                 println!(
-                    "  {:12} {:>8} {:>10} {:>10}",
+                    "  {:12} {:>8} {:>10} {:>10} {:>10} {:>10}",
                     kind,
                     total,
                     with_holes,
-                    total - with_holes
+                    total - with_holes,
+                    primary,
+                    secondary,
                 );
             }
             println!();
+
+            let strategy_total: usize = strategy_counts.values().sum();
+            println!("  === Defect Strategy Distribution ===");
+            println!("  {:20} {:>8} {:>8}", "Strategy", "Count", "Pct");
+            println!("  {}", "-".repeat(38));
+            let strategy_names = [
+                (0, "0 uv_cdt", "secondary"),
+                (1, "1 plane_cdt", "secondary"),
+                (2, "2 earcut", "secondary"),
+                (3, "3 best_incomplete", "PRIMARY"),
+                (4, "4 fan", "PRIMARY"),
+                (5, "5 earcut_3d", "secondary"),
+                (6, "6 axis_cdt", "secondary"),
+            ];
+            for (id, name, label) in strategy_names {
+                let count = strategy_counts.get(&id).copied().unwrap_or(0);
+                if count > 0 {
+                    let pct = if strategy_total > 0 {
+                        count as f64 / strategy_total as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    println!("  {:20} {:>8} {:>7.1}%  ({})", name, count, pct, label);
+                }
+            }
+            println!();
+
+            // CDT error distribution
+            let cdt_err_total: usize = cdt_err_counts.values().sum();
+            if cdt_err_total > 0 {
+                println!("  === CDT Error Distribution (defect faces) ===");
+                println!("  {:24} {:>8} {:>8}", "Error", "Count", "Pct");
+                println!("  {}", "-".repeat(42));
+                let cdt_err_names = [
+                    (1, "CrossingFixedEdge"),
+                    (2, "Diverged"),
+                    (3, "TimeBudgetExceeded"),
+                    (4, "Other"),
+                ];
+                for (id, name) in cdt_err_names {
+                    let count = cdt_err_counts.get(&id).copied().unwrap_or(0);
+                    if count > 0 {
+                        let pct = count as f64 / cdt_err_total as f64 * 100.0;
+                        println!("  {:24} {:>8} {:>7.1}%", name, count, pct);
+                    }
+                }
+                println!();
+            }
+
+            if total_earcut_empty > 0 {
+                println!("  Earcut empty:     {}", total_earcut_empty);
+                println!();
+            }
+
+            // Debug diagnostics summary
+            if debug_self_loops > 0 || debug_degenerate > 0 || debug_inner_outside > 0 {
+                println!("  === Debug Diagnostics (defect faces) ===");
+                println!("  Self-loop edges:        {:>8}", debug_self_loops);
+                println!("  Degenerate contours:    {:>8}", debug_degenerate);
+                println!("  Inner outside outer:    {:>8}", debug_inner_outside);
+                println!();
+            }
         }
         println!(
             "  Time:           {:.1}s ({:.0} files/sec)",

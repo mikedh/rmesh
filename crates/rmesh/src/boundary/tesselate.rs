@@ -40,6 +40,45 @@ fn validation_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("RMESH_VALIDATE").is_ok())
 }
 
+/// Check if RMESH_DEBUG environment variable is set (works in release builds).
+fn debug_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RMESH_DEBUG").is_ok())
+}
+
+/// Per-face tessellation diagnostics.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FaceDiagnostics {
+    /// Which triangulation strategy produced the result.
+    /// 0=uv_cdt, 1=plane_cdt, 2=earcut, 3=best_incomplete, 4=fan, 5=earcut_3d, 6=axis_cdt
+    pub strategy: u8,
+    /// CDT error type: 0=no error, 1=CrossingFixedEdge, 2=Diverged,
+    /// 3=TimeBudgetExceeded, 4=other
+    pub cdt_err: u8,
+    /// Whether earcut returned empty triangles
+    pub earcut_empty: bool,
+    /// (debug only) Number of self-loop edges in expected boundary set
+    pub self_loop_count: u32,
+    /// (debug only) Number of degenerate contours dropped
+    pub degenerate_contours_dropped: u32,
+    /// (debug only) Number of inner vertices outside outer polygon
+    pub inner_outside_outer: u32,
+    /// True if this face's own triangulation is correct but it borders a broken neighbor
+    pub is_sympathy_defect: bool,
+    /// Number of degenerate triangles (where 2+ pool vertices coincide) dropped in assembly
+    pub degenerate_pool_tris_dropped: u32,
+}
+
+/// Shell-level tessellation diagnostics (aggregated across all faces).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShellDiagnostics {
+    /// Number of faces where contour refinement detected UV crossings
+    pub faces_with_uv_crossings: usize,
+    /// Number of faces where crossings remained unresolved after refinement
+    pub faces_with_unresolved_crossings: usize,
+}
+
 /// Parameters controlling tessellation quality.
 ///
 /// Tolerance is purely relative: the effective chord-height threshold is
@@ -157,7 +196,10 @@ fn contour_edge_set(contours: &[Vec<usize>]) -> HashSet<(usize, usize)> {
     let mut expected = HashSet::with_capacity(cap);
     for contour in contours {
         for w in contour.windows(2) {
-            expected.insert(canonical_edge(w[0], w[1]));
+            // Skip self-loop edges from dedup merging consecutive vertices
+            if w[0] != w[1] {
+                expected.insert(canonical_edge(w[0], w[1]));
+            }
         }
     }
     expected
@@ -207,41 +249,43 @@ fn snap_to_period(outer_mean: f64, inner_mean: f64, period: f64) -> f64 {
     }
 }
 
-/// Shift `inner_uvs` by the nearest multiple of the angular period so its mean
-/// aligns with `outer_uvs` in each periodic coordinate.
-fn align_angular_uvs(
-    outer_uvs: &[Point2<f64>],
-    inner_uvs: &mut [Point2<f64>],
-    u_period: Option<f64>,
-    v_period: Option<f64>,
-) {
-    if inner_uvs.is_empty() || outer_uvs.is_empty() {
-        return;
+/// Find the base angle and span of the minimum enclosing arc for a set of
+/// angles on a circle of given period. All angles remapped to `[base, base+period)`
+/// will have total span equal to the returned span.
+///
+/// This is the exact optimal solution: the largest angular gap contains no
+/// points, so placing the window boundary in that gap minimizes the span.
+fn minimum_enclosing_arc(angles: &[f64], period: f64) -> (f64, f64) {
+    if angles.len() <= 1 {
+        return (angles.first().copied().unwrap_or(0.0), 0.0);
     }
-    if let Some(period) = u_period {
-        let shift = snap_to_period(
-            outer_uvs.iter().map(|p| p.x).sum::<f64>() / outer_uvs.len() as f64,
-            inner_uvs.iter().map(|p| p.x).sum::<f64>() / inner_uvs.len() as f64,
-            period,
-        );
-        if shift.abs() > 1e-10 {
-            for uv in inner_uvs.iter_mut() {
-                uv.x += shift;
-            }
+    let mut sorted: Vec<f64> = angles.iter().map(|&a| a.rem_euclid(period)).collect();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let mut max_gap = 0.0f64;
+    let mut max_gap_idx = 0usize;
+    for i in 0..sorted.len() - 1 {
+        let gap = sorted[i + 1] - sorted[i];
+        if gap > max_gap {
+            max_gap = gap;
+            max_gap_idx = i + 1;
         }
     }
-    if let Some(period) = v_period {
-        let shift = snap_to_period(
-            outer_uvs.iter().map(|p| p.y).sum::<f64>() / outer_uvs.len() as f64,
-            inner_uvs.iter().map(|p| p.y).sum::<f64>() / inner_uvs.len() as f64,
-            period,
-        );
-        if shift.abs() > 1e-10 {
-            for uv in inner_uvs.iter_mut() {
-                uv.y += shift;
-            }
-        }
+    // Wrap-around gap
+    let wrap_gap = (sorted[0] + period) - sorted[sorted.len() - 1];
+    if wrap_gap > max_gap {
+        max_gap = wrap_gap;
+        max_gap_idx = 0;
     }
+
+    let base = sorted[max_gap_idx % sorted.len()];
+    let span = period - max_gap;
+    (base, span)
+}
+
+/// Remap an angle into the window `[base, base + period)`.
+fn window_angle(angle: f64, base: f64, period: f64) -> f64 {
+    (angle - base).rem_euclid(period) + base
 }
 
 /// Repair interior holes in a triangulation by fan-filling them.
@@ -361,7 +405,7 @@ fn fan_triangulate(contours: &[Vec<usize>]) -> Vec<[usize; 3]> {
 fn dedup_by_pool(
     state: &FaceTriangulation,
     contours: &[Vec<usize>],
-) -> (Vec<(f64, f64)>, Vec<Vec<usize>>, Vec<usize>) {
+) -> (Vec<(f64, f64)>, Vec<Vec<usize>>, Vec<usize>, u32) {
     let n = state.local_to_pool.len();
 
     // Map each pool index to the dedup indices that use it (may be multiple if UVs differ)
@@ -404,21 +448,51 @@ fn dedup_by_pool(
     }
 
     // Remap contours and remove consecutive duplicates
+    let mut dropped_count: u32 = 0;
     let dedup_contours: Vec<Vec<usize>> = contours
         .iter()
-        .map(|contour| {
+        .enumerate()
+        .filter_map(|(contour_i, contour)| {
             let mut remapped: Vec<usize> = contour.iter().map(|&idx| local_to_dedup[idx]).collect();
             // Remove consecutive duplicates
             remapped.dedup();
+            // Also handle wrap-around: if first == second-to-last after dedup
+            // (closed contour where start/end merged with neighbor)
+            while remapped.len() > 2 && remapped[0] == remapped[remapped.len() - 2] {
+                remapped.remove(remapped.len() - 2);
+            }
+            // Count unique vertices (excluding the closing vertex)
+            let open = if remapped.len() > 1 && remapped.first() == remapped.last() {
+                &remapped[..remapped.len() - 1]
+            } else {
+                &remapped[..]
+            };
+            let mut unique: Vec<usize> = open.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            if unique.len() < 3 {
+                dropped_count += 1;
+                // Outer contour (index 0) is degenerate — can't triangulate
+                if contour_i == 0 {
+                    return None;
+                }
+                // Inner contour is degenerate — skip it
+                return None;
+            }
             // Ensure closure
             if remapped.len() > 1 && remapped.first() != remapped.last() {
                 remapped.push(remapped[0]);
             }
-            remapped
+            Some(remapped)
         })
         .collect();
 
-    (dedup_pts, dedup_contours, dedup_to_local)
+    // If outer contour was filtered (degenerate), return empty contours
+    if dedup_contours.is_empty() {
+        return (dedup_pts, dedup_contours, dedup_to_local, dropped_count);
+    }
+
+    (dedup_pts, dedup_contours, dedup_to_local, dropped_count)
 }
 
 /// State for a face during the global refinement process.
@@ -441,8 +515,18 @@ struct FaceTriangulation {
     edge_tris: HashMap<(usize, usize), Vec<usize>>,
     /// Which triangulation strategy produced the result.
     /// 0=uv_cdt, 1=plane_cdt, 2=earcut, 3=best_incomplete, 4=fan
-    #[cfg(test)]
     diag_strategy: u8,
+    /// CDT error type: 0=no error, 1=FixedEdgesCross, 2=Diverged,
+    /// 3=TimeBudgetExceeded, 4=other
+    diag_cdt_err: u8,
+    /// Whether earcut returned empty triangles
+    diag_earcut_empty: bool,
+    /// (debug) Self-loop edges counted in contour edge set
+    diag_self_loops: u32,
+    /// (debug) Degenerate contours dropped
+    diag_degenerate_dropped: u32,
+    /// (debug) Inner vertices outside outer polygon
+    diag_inner_outside: u32,
 }
 
 impl FaceTriangulation {
@@ -789,6 +873,17 @@ impl Surface {
         }
     }
 
+    /// Map 3D point to parametric (u, v) coordinates, using a hint as the
+    /// initial guess for Newton-Raphson. For BSpline surfaces this skips
+    /// the O(n_u × n_v) Greville scan; for analytical surfaces the hint
+    /// is ignored (closed-form solutions are already fast).
+    pub fn to_parametric_with_hint(&self, point: &Point3<f64>, hint: Point2<f64>) -> Point2<f64> {
+        match self {
+            Surface::BSpline(b) => b.parameter_at_with_hint(point, hint),
+            _ => self.to_parametric(point),
+        }
+    }
+
     /// Evaluate parametric (u, v) to 3D point.
     pub fn evaluate(&self, u: f64, v: f64) -> Point3<f64> {
         match self {
@@ -819,6 +914,299 @@ impl Surface {
 // ============================================================================
 // 2D geometry utilities
 // ============================================================================
+
+/// Test if segments (p1→p2) and (p3→p4) properly cross (not just touch).
+/// Returns `true` if the segments cross with both parameters strictly in (eps, 1-eps).
+fn segments_cross(p1: &Point2<f64>, p2: &Point2<f64>, p3: &Point2<f64>, p4: &Point2<f64>) -> bool {
+    const EPS: f64 = 1e-10;
+    let d1 = p2 - p1;
+    let d2 = p4 - p3;
+    let denom = d1.x * d2.y - d1.y * d2.x;
+    if denom.abs() < EPS {
+        return false; // parallel or degenerate
+    }
+    let d13 = p3 - p1;
+    let t = (d13.x * d2.y - d13.y * d2.x) / denom;
+    let u = (d13.x * d1.y - d13.y * d1.x) / denom;
+    t > EPS && t < 1.0 - EPS && u > EPS && u < 1.0 - EPS
+}
+
+/// Detect crossing edges in UV contours for a single face.
+///
+/// Checks three types of crossings:
+/// 1. Outer contour self-crossings (non-adjacent edges)
+/// 2. Outer-inner crossings
+/// 3. Inner-inner crossings (between different inner contours)
+///
+/// Returns a set of pool-edge pairs `(min, max)` that should be refined.
+fn detect_uv_crossings(
+    outer_uvs: &[Point2<f64>],
+    outer_pool: &[usize],
+    inner_uvs_list: &[(Vec<Point2<f64>>, Vec<usize>)],
+) -> BTreeSet<(usize, usize)> {
+    let mut edges_to_refine = BTreeSet::new();
+    let n_outer = outer_uvs.len();
+
+    // Helper: add both crossing edges to the refine set
+    let mut mark = |pool_a: &[usize], i: usize, pool_b: &[usize], j: usize| {
+        let na = pool_a.len();
+        let nb = pool_b.len();
+        edges_to_refine.insert(canonical_edge(pool_a[i], pool_a[(i + 1) % na]));
+        edges_to_refine.insert(canonical_edge(pool_b[j], pool_b[(j + 1) % nb]));
+    };
+
+    // 1. Outer self-crossings: check all non-adjacent edge pairs
+    for i in 0..n_outer {
+        let ni = (i + 1) % n_outer;
+        for j in (i + 2)..n_outer {
+            // Skip adjacent edges (they share a vertex)
+            let nj = (j + 1) % n_outer;
+            if nj == i {
+                continue;
+            }
+            if segments_cross(&outer_uvs[i], &outer_uvs[ni], &outer_uvs[j], &outer_uvs[nj]) {
+                mark(outer_pool, i, outer_pool, j);
+            }
+        }
+    }
+
+    // 2. Outer-inner crossings
+    for (inner_uvs, inner_pool) in inner_uvs_list {
+        let n_inner = inner_uvs.len();
+        for i in 0..n_outer {
+            let ni = (i + 1) % n_outer;
+            for j in 0..n_inner {
+                let nj = (j + 1) % n_inner;
+                if segments_cross(&outer_uvs[i], &outer_uvs[ni], &inner_uvs[j], &inner_uvs[nj]) {
+                    mark(outer_pool, i, inner_pool, j);
+                }
+            }
+        }
+    }
+
+    // 3. Inner-inner crossings (between different inner contours)
+    for a in 0..inner_uvs_list.len() {
+        let (uvs_a, pool_a) = &inner_uvs_list[a];
+        let na = uvs_a.len();
+        for b in (a + 1)..inner_uvs_list.len() {
+            let (uvs_b, pool_b) = &inner_uvs_list[b];
+            let nb = uvs_b.len();
+            for i in 0..na {
+                let ni = (i + 1) % na;
+                for j in 0..nb {
+                    let nj = (j + 1) % nb;
+                    if segments_cross(&uvs_a[i], &uvs_a[ni], &uvs_b[j], &uvs_b[nj]) {
+                        mark(pool_a, i, pool_b, j);
+                    }
+                }
+            }
+        }
+    }
+
+    edges_to_refine
+}
+
+/// UV contour data for a single face, computed consistently for both
+/// refinement (Phase 1.5/1.6) and tessellation (Phase 2).
+#[derive(Clone)]
+struct FaceUvContours {
+    /// UV coordinates of the outer contour vertices (unwrapped).
+    outer_uvs: Vec<Point2<f64>>,
+    /// Pool indices for the outer contour vertices.
+    outer_pool: Vec<usize>,
+    /// Inner loop data: (uvs, pool_indices) per hole.
+    inner_list: Vec<(Vec<Point2<f64>>, Vec<usize>)>,
+    /// If the outer loop was a vertex loop, this is the pole vertex BREP index.
+    vertex_loop_vertex: Option<usize>,
+    /// Index of the loop used as effective outer (may differ from face.outer_loop
+    /// when the true outer loop is a vertex loop).
+    effective_outer_idx: usize,
+}
+
+/// Compute UV contours for a face, handling vertex loop swapping,
+/// angular windowing, and per-contour unwrapping.
+///
+/// Returns `None` if the face is degenerate (no valid outer contour).
+///
+/// This function consolidates the UV logic previously duplicated across
+/// Phase 1.5, Phase 1.6, and `tessellate_face`, ensuring all three see
+/// the exact same UV layout.
+fn compute_face_uv_contours(
+    face: &super::topology::BrepFace,
+    model: &super::topology::BrepModel,
+    vertices: &[Point3<f64>],
+    edge_discretization: &HashMap<usize, EdgeDiscretization>,
+) -> Option<FaceUvContours> {
+    let surface = &model.face_surfaces[face.surface];
+    let outer_loop_data = &model.loops[face.outer_loop];
+    let outer_is_vertex_loop = outer_loop_data.vertex.is_some();
+
+    // If the outer loop is a vertex loop, find the first inner edge loop to use as outer contour
+    let (effective_outer_idx, vertex_loop_vertex) = if outer_is_vertex_loop {
+        let pole_vertex = outer_loop_data.vertex.unwrap();
+        let mut found_inner = None;
+        for &il_idx in &face.inner_loops {
+            if model.loops[il_idx].vertex.is_none() && !model.loops[il_idx].edges.is_empty() {
+                found_inner = Some(il_idx);
+                break;
+            }
+        }
+        if let Some(il_idx) = found_inner {
+            (il_idx, Some(pole_vertex))
+        } else {
+            return None; // No edge loops at all — degenerate face
+        }
+    } else {
+        (face.outer_loop, None)
+    };
+
+    let effective_outer_loop = &model.loops[effective_outer_idx];
+    let outer_pool_indices = collect_loop_indices(edge_discretization, effective_outer_loop);
+    if outer_pool_indices.len() < 3 {
+        return None;
+    }
+
+    // Collect inner loop pool indices — skip vertex loops and the swapped-in outer
+    let mut inner_loops_pool: Vec<Vec<usize>> = Vec::new();
+    for &inner_loop_idx in &face.inner_loops {
+        if inner_loop_idx == effective_outer_idx {
+            continue;
+        }
+        let inner_loop = &model.loops[inner_loop_idx];
+        if inner_loop.vertex.is_some() {
+            continue;
+        }
+        inner_loops_pool.push(collect_loop_indices(edge_discretization, inner_loop));
+    }
+
+    // Compute ALL raw UVs (outer + inner loops) via to_parametric,
+    // using point-walking hints for BSpline surfaces: each vertex uses the
+    // previous vertex's UV as the Newton initial guess (contour neighbors
+    // have similar UV, so convergence is typically 1-2 iterations).
+    let mut all_raw_uvs: Vec<Point2<f64>> = Vec::with_capacity(
+        outer_pool_indices.len() + inner_loops_pool.iter().map(|v| v.len()).sum::<usize>(),
+    );
+    {
+        let mut hint: Option<Point2<f64>> = None;
+        for &pi in &outer_pool_indices {
+            let uv = if let Some(h) = hint {
+                surface.to_parametric_with_hint(&vertices[pi], h)
+            } else {
+                surface.to_parametric(&vertices[pi])
+            };
+            hint = Some(uv);
+            all_raw_uvs.push(uv);
+        }
+    }
+    let mut inner_raw_ranges: Vec<(usize, usize)> = Vec::new();
+    for inner_indices in &inner_loops_pool {
+        let start = all_raw_uvs.len();
+        let mut hint: Option<Point2<f64>> = None;
+        for &pi in inner_indices {
+            let uv = if let Some(h) = hint {
+                surface.to_parametric_with_hint(&vertices[pi], h)
+            } else {
+                surface.to_parametric(&vertices[pi])
+            };
+            hint = Some(uv);
+            all_raw_uvs.push(uv);
+        }
+        inner_raw_ranges.push((start, inner_indices.len()));
+    }
+
+    // Find optimal angular window across ALL vertices and snap to it
+    let (u_period, v_period) = surface.angular_period();
+    if u_period.is_some() || v_period.is_some() {
+        if let Some(period) = u_period {
+            let all_u: Vec<f64> = all_raw_uvs.iter().map(|uv| uv.x).collect();
+            let (base, _span) = minimum_enclosing_arc(&all_u, period);
+            for uv in &mut all_raw_uvs {
+                uv.x = window_angle(uv.x, base, period);
+            }
+        }
+        if let Some(period) = v_period {
+            let all_v: Vec<f64> = all_raw_uvs.iter().map(|uv| uv.y).collect();
+            let (base, _span) = minimum_enclosing_arc(&all_v, period);
+            for uv in &mut all_raw_uvs {
+                uv.y = window_angle(uv.y, base, period);
+            }
+        }
+    }
+
+    // Split back into outer + inner slices, unwrap each for internal continuity
+    let outer_len = outer_pool_indices.len();
+    let mut outer_uvs = all_raw_uvs[..outer_len].to_vec();
+    surface.unwrap_uvs_windowed(&mut outer_uvs);
+
+    let mut inner_list: Vec<(Vec<Point2<f64>>, Vec<usize>)> = Vec::new();
+    for (loop_i, inner_indices) in inner_loops_pool.iter().enumerate() {
+        let &(start, len) = &inner_raw_ranges[loop_i];
+        let mut inner_uvs = all_raw_uvs[start..start + len].to_vec();
+        surface.unwrap_uvs_windowed(&mut inner_uvs);
+        inner_list.push((inner_uvs, inner_indices.clone()));
+    }
+
+    // Align inner loops to outer loop's angular window.
+    // Only shift by an integer period when doing so increases the number
+    // of inner vertices that lie inside the outer polygon.
+    if u_period.is_some() || v_period.is_some() {
+        let periods: [Option<f64>; 2] = [u_period, v_period];
+        for (inner_uvs, _) in &mut inner_list {
+            if inner_uvs.is_empty() {
+                continue;
+            }
+            for (axis, period_opt) in periods.iter().enumerate() {
+                let Some(period) = *period_opt else {
+                    continue;
+                };
+                let inside_now =
+                    crate::path::polygons::point_in_polygon(&outer_uvs, &[], inner_uvs);
+                let count_now = inside_now.iter().filter(|&&b| b).count();
+                if count_now == inner_uvs.len() {
+                    continue; // all inside already
+                }
+                let mut best_shift = 0.0f64;
+                let mut best_count = count_now;
+                for sign in [-1.0, 1.0] {
+                    let shift = sign * period;
+                    let shifted: Vec<Point2<f64>> = inner_uvs
+                        .iter()
+                        .map(|uv| {
+                            if axis == 0 {
+                                Point2::new(uv.x + shift, uv.y)
+                            } else {
+                                Point2::new(uv.x, uv.y + shift)
+                            }
+                        })
+                        .collect();
+                    let inside = crate::path::polygons::point_in_polygon(&outer_uvs, &[], &shifted);
+                    let count = inside.iter().filter(|&&b| b).count();
+                    if count > best_count {
+                        best_count = count;
+                        best_shift = shift;
+                    }
+                }
+                if best_shift.abs() > 1e-10 {
+                    for uv in inner_uvs.iter_mut() {
+                        if axis == 0 {
+                            uv.x += best_shift;
+                        } else {
+                            uv.y += best_shift;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(FaceUvContours {
+        outer_uvs,
+        outer_pool: outer_pool_indices,
+        inner_list,
+        vertex_loop_vertex,
+        effective_outer_idx,
+    })
+}
 
 /// Find the closest edge segment in a polygon to a query point.
 /// Returns (edge_index, squared_distance) where edge_index is the starting vertex index.
@@ -884,6 +1272,37 @@ fn unwrap_angular_sequence(values: impl Iterator<Item = f64>, out: &mut [f64], p
     }
 }
 
+/// Unwrap angular sequence using a larger threshold (`0.8 * period`).
+///
+/// After `minimum_enclosing_arc` + `window_angle` places all UVs in
+/// `[base, base+period)`, the standard `period/2` threshold in
+/// [`unwrap_angular_sequence`] incorrectly "corrects" legitimate angular
+/// steps >180° (common for cylinders/cones spanning >half the circle).
+///
+/// This variant only triggers on jumps >0.8*period (~288° for TAU),
+/// which are almost certainly real wrap-arounds rather than legitimate
+/// angular steps within a windowed face.
+fn unwrap_windowed_sequence(values: impl Iterator<Item = f64>, out: &mut [f64], period: f64) {
+    let threshold = 0.8 * period;
+
+    let mut offset = 0.0;
+    let mut prev = None;
+
+    for (i, val) in values.enumerate() {
+        let curr = val + offset;
+        if let Some(p) = prev {
+            let diff = curr - p;
+            if diff > threshold {
+                offset -= period;
+            } else if diff < -threshold {
+                offset += period;
+            }
+        }
+        out[i] = val + offset;
+        prev = Some(out[i]);
+    }
+}
+
 impl Surface {
     /// Unwrap UV coordinates to remove angular discontinuities.
     /// Dispatches to the appropriate unwrapping function based on surface type.
@@ -891,6 +1310,18 @@ impl Surface {
         let (u_period, v_period) = self.angular_period();
         if u_period.is_some() || v_period.is_some() {
             unwrap_angular_coords(uvs, u_period, v_period);
+        }
+    }
+
+    /// Unwrap UV coordinates with a wider threshold (0.8 * period).
+    ///
+    /// Use this after `minimum_enclosing_arc` + `window_angle` has already
+    /// placed all UVs in a consistent window. The wider threshold avoids
+    /// undoing the angular alignment for faces spanning >180°.
+    fn unwrap_uvs_windowed(&self, uvs: &mut [Point2<f64>]) {
+        let (u_period, v_period) = self.angular_period();
+        if u_period.is_some() || v_period.is_some() {
+            unwrap_angular_coords_windowed(uvs, u_period, v_period);
         }
     }
 
@@ -903,7 +1334,18 @@ impl Surface {
             let p_a = self.evaluate(uv_a.x, uv_a.y);
             let p_b = self.evaluate(uv_b.x, uv_b.y);
             let p_mid_3d = p_a.lerp(&p_b, 0.5);
-            let uv_mid = self.to_parametric(&p_mid_3d);
+            let mut uv_mid = self.to_parametric(&p_mid_3d);
+
+            // Snap to the input UVs' angular window. to_parametric returns
+            // angles in [-π, π] but the face's UVs may be unwrapped.
+            let uv_avg = uv_a.lerp(uv_b, 0.5);
+            if let Some(period) = u_period {
+                uv_mid.x += snap_to_period(uv_avg.x, uv_mid.x, period);
+            }
+            if let Some(period) = v_period {
+                uv_mid.y += snap_to_period(uv_avg.y, uv_mid.y, period);
+            }
+
             let p_on_surface = self.evaluate(uv_mid.x, uv_mid.y);
             (uv_mid, p_on_surface)
         } else {
@@ -928,6 +1370,31 @@ fn unwrap_angular_coords(uvs: &mut [Point2<f64>], u_period: Option<f64>, v_perio
     }
     if let Some(period) = v_period {
         unwrap_angular_sequence(uvs.iter().map(|p| p.y), &mut buf, period);
+        for (i, uv) in uvs.iter_mut().enumerate() {
+            uv.y = buf[i];
+        }
+    }
+}
+
+/// Windowed variant of [`unwrap_angular_coords`] using `0.8 * period` threshold.
+fn unwrap_angular_coords_windowed(
+    uvs: &mut [Point2<f64>],
+    u_period: Option<f64>,
+    v_period: Option<f64>,
+) {
+    if uvs.len() < 2 {
+        return;
+    }
+
+    let mut buf: Vec<f64> = vec![0.0; uvs.len()];
+    if let Some(period) = u_period {
+        unwrap_windowed_sequence(uvs.iter().map(|p| p.x), &mut buf, period);
+        for (i, uv) in uvs.iter_mut().enumerate() {
+            uv.x = buf[i];
+        }
+    }
+    if let Some(period) = v_period {
+        unwrap_windowed_sequence(uvs.iter().map(|p| p.y), &mut buf, period);
         for (i, uv) in uvs.iter_mut().enumerate() {
             uv.y = buf[i];
         }
@@ -1018,7 +1485,10 @@ fn triangulate_face_robust_pts(
     surface_normal_hint: Option<Vector3<f64>>,
     initial_cdt_diverged: bool,
     dedup_to_local: &[usize],
-) -> (Vec<[usize; 3]>, u8, bool) {
+) -> (Vec<[usize; 3]>, u8, bool, u8, bool) {
+    // Returns: (triangles, strategy, cdt_diverged, cdt_err_code, earcut_empty)
+    // cdt_err_code: 0=no error, 1=FixedEdgesCross, 2=Diverged, 3=TimeBudgetExceeded, 4=other
+
     // Build contour edge set once — invariant across all CDT attempts
     let expected = contour_edge_set(contours);
 
@@ -1042,9 +1512,23 @@ fn triangulate_face_robust_pts(
     // O(n²) behavior (same constraint topology), so skip remaining CDT attempts.
     let mut cdt_diverged = initial_cdt_diverged;
 
+    // Diagnostic: track last CDT error and whether earcut returned empty
+    let mut last_cdt_err: u8 = 0;
+    let mut earcut_empty = false;
+
     /// Check if a CDT error is a divergence error (Diverged or TimeBudgetExceeded).
     fn is_diverged(e: &cdt::Error) -> bool {
         matches!(e, cdt::Error::Diverged | cdt::Error::TimeBudgetExceeded)
+    }
+
+    /// Map a CDT error to a diagnostic code.
+    fn cdt_err_code(e: &cdt::Error) -> u8 {
+        match e {
+            cdt::Error::CrossingFixedEdge => 1,
+            cdt::Error::Diverged => 2,
+            cdt::Error::TimeBudgetExceeded => 3,
+            _ => 4,
+        }
     }
 
     // Try 1: CDT in UV space
@@ -1052,14 +1536,16 @@ fn triangulate_face_robust_pts(
         Ok(tris) => {
             let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
             if contours_complete_with(&result, &expected) {
-                return (result, 0, false);
+                return (result, 0, false, 0, false);
             }
             track_best(&result, 0, &expected);
         }
-        Err(e) if is_diverged(&e) => {
-            cdt_diverged = true;
+        Err(e) => {
+            last_cdt_err = cdt_err_code(&e);
+            if is_diverged(&e) {
+                cdt_diverged = true;
+            }
         }
-        Err(_) => {}
     }
 
     // Build 3D positions in dedup index space for plane-based fallbacks.
@@ -1097,14 +1583,16 @@ fn triangulate_face_robust_pts(
             Ok(tris) => {
                 let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
                 if contours_complete_with(&result, &expected) {
-                    return (result, 1, false);
+                    return (result, 1, false, 0, false);
                 }
                 track_best(&result, 1, &expected);
             }
-            Err(e) if is_diverged(&e) => {
-                cdt_diverged = true;
+            Err(e) => {
+                last_cdt_err = cdt_err_code(&e);
+                if is_diverged(&e) {
+                    cdt_diverged = true;
+                }
             }
-            Err(_) => {}
         }
     }
 
@@ -1132,14 +1620,16 @@ fn triangulate_face_robust_pts(
                 Ok(tris) => {
                     let result: Vec<[usize; 3]> = tris.iter().map(|&(a, b, c)| [a, b, c]).collect();
                     if contours_complete_with(&result, &expected) {
-                        return (result, 6, cdt_diverged);
+                        return (result, 6, cdt_diverged, 0, false);
                     }
                     track_best(&result, 6, &expected);
                 }
-                Err(e) if is_diverged(&e) => {
-                    cdt_diverged = true;
+                Err(e) => {
+                    last_cdt_err = cdt_err_code(&e);
+                    if is_diverged(&e) {
+                        cdt_diverged = true;
+                    }
                 }
-                Err(_) => {}
             }
         }
     }
@@ -1153,11 +1643,17 @@ fn triangulate_face_robust_pts(
             .collect();
         let vertices: Vec<Point2<f64>> = pts.iter().map(|&(x, y)| Point2::new(x, y)).collect();
         let mut tri = Triangulator::new();
-        let result = tri.triangulate_2d(&exterior, &interiors, &vertices, false);
+        let result = match tri.triangulate_2d(&exterior, &interiors, &vertices, false) {
+            Ok(r) => r,
+            Err(_) => {
+                earcut_empty = true;
+                vec![]
+            }
+        };
         if !result.is_empty() && contours_complete_with(&result, &expected) {
             let mut result = result;
             fill_interior_holes(&mut result, &expected);
-            return (result, 2, cdt_diverged);
+            return (result, 2, cdt_diverged, last_cdt_err, false);
         }
         track_best(&result, 2, &expected);
     }
@@ -1171,10 +1667,13 @@ fn triangulate_face_robust_pts(
             .collect();
         let mut tri = Triangulator::new();
         if let Ok(result) = tri.triangulate_3d(&exterior, &interiors, &positions, false, false) {
+            if result.is_empty() {
+                earcut_empty = true;
+            }
             if !result.is_empty() && contours_complete_with(&result, &expected) {
                 let mut result = result;
                 fill_interior_holes(&mut result, &expected);
-                return (result, 5, cdt_diverged);
+                return (result, 5, cdt_diverged, last_cdt_err, earcut_empty);
             }
             track_best(&result, 5, &expected);
         }
@@ -1189,10 +1688,10 @@ fn triangulate_face_robust_pts(
         && best_count > fan_count
     {
         fill_interior_holes(&mut best_tris, &expected);
-        return (best_tris, 3, cdt_diverged);
+        return (best_tris, 3, cdt_diverged, last_cdt_err, earcut_empty);
     }
 
-    (fan, 4, cdt_diverged)
+    (fan, 4, cdt_diverged, last_cdt_err, earcut_empty)
 }
 
 /// Tessellate a single face independently. New vertices are stored in a local
@@ -1206,6 +1705,7 @@ fn tessellate_face(
     brep_vertex_to_pool: &HashMap<usize, usize>,
     effective_tolerance: f64,
     sentinel_base: usize,
+    cached_contours: Option<FaceUvContours>,
 ) -> (FaceTriangulation, Vec<Point3<f64>>) {
     let face = &model.faces[face_idx];
     let surface = &model.face_surfaces[face.surface];
@@ -1213,89 +1713,33 @@ fn tessellate_face(
     let mut state = FaceTriangulation::default();
     let mut new_vertices: Vec<Point3<f64>> = Vec::new();
 
-    // Determine which loop is the real outer contour (may swap with inner if outer is a vertex loop)
-    let outer_loop_data = &model.loops[face.outer_loop];
-    let outer_is_vertex_loop = outer_loop_data.vertex.is_some();
-
-    // If the outer loop is a vertex loop, find the first inner edge loop to use as outer contour
-    let (effective_outer_idx, vertex_loop_vertex) = if outer_is_vertex_loop {
-        let pole_vertex = outer_loop_data.vertex.unwrap();
-        // Find first inner loop that has edges
-        let mut found_inner = None;
-        for (i, &il_idx) in face.inner_loops.iter().enumerate() {
-            if model.loops[il_idx].vertex.is_none() && !model.loops[il_idx].edges.is_empty() {
-                found_inner = Some((i, il_idx));
-                break;
-            }
-        }
-        if let Some((_, il_idx)) = found_inner {
-            (il_idx, Some(pole_vertex))
-        } else {
-            // No edge loops at all — degenerate face, return empty
-            return (state, new_vertices);
-        }
-    } else {
-        (face.outer_loop, None)
+    // 1. Use cached UV contours if available, otherwise compute
+    let Some(uv_contours) = cached_contours
+        .or_else(|| compute_face_uv_contours(face, model, pool_vertices, edge_discretization))
+    else {
+        // Degenerate face — return empty
+        return (state, new_vertices);
     };
 
-    let effective_outer_loop = &model.loops[effective_outer_idx];
+    let outer_len = uv_contours.outer_pool.len();
+    let vertex_loop_vertex = uv_contours.vertex_loop_vertex;
 
-    // 1. Collect boundary vertices
-    let outer_pool_indices = collect_loop_indices(edge_discretization, effective_outer_loop);
-
-    let mut outer_uvs: Vec<Point2<f64>> = outer_pool_indices
-        .iter()
-        .map(|&pool_idx| surface.to_parametric(&pool_vertices[pool_idx]))
-        .collect();
-    surface.unwrap_uvs(&mut outer_uvs);
-
-    for (i, &pool_idx) in outer_pool_indices.iter().enumerate() {
-        state.add_vertex(outer_uvs[i], pool_idx);
+    for (i, &pool_idx) in uv_contours.outer_pool.iter().enumerate() {
+        state.add_vertex(uv_contours.outer_uvs[i], pool_idx);
     }
-
-    let outer_len = outer_pool_indices.len();
     for i in 0..outer_len {
         state.mark_boundary_edge(i, (i + 1) % outer_len);
     }
 
-    // Collect inner loop (hole) vertices — skip vertex loops and the swapped-in outer
     let mut hole_info: Vec<(usize, usize)> = Vec::new();
-    for &inner_loop_idx in &face.inner_loops {
-        // Skip this loop if it was promoted to outer
-        if inner_loop_idx == effective_outer_idx {
-            continue;
-        }
-        let inner_loop = &model.loops[inner_loop_idx];
-        // Skip vertex loops (degenerate, zero-area — no geometric effect as holes)
-        if inner_loop.vertex.is_some() {
-            continue;
-        }
-        let loop_indices = collect_loop_indices(edge_discretization, inner_loop);
-
+    for (inner_uvs, inner_pool) in &uv_contours.inner_list {
         let hole_start = state.vertices_uv.len();
-        let hole_len = loop_indices.len();
+        let hole_len = inner_pool.len();
         hole_info.push((hole_start, hole_len));
 
-        let mut inner_uvs: Vec<Point2<f64>> = loop_indices
-            .iter()
-            .map(|&pool_idx| surface.to_parametric(&pool_vertices[pool_idx]))
-            .collect();
-        surface.unwrap_uvs(&mut inner_uvs);
-
-        // Align inner loop angular window to match the outer loop.
-        // Each loop is unwrapped independently and can land in a different period window,
-        // causing the inner hole to appear outside the outer polygon in UV space.
-        {
-            let (u_period, v_period) = surface.angular_period();
-            if u_period.is_some() || v_period.is_some() {
-                align_angular_uvs(&outer_uvs, &mut inner_uvs, u_period, v_period);
-            }
-        }
-
-        for (i, &pool_idx) in loop_indices.iter().enumerate() {
+        for (i, &pool_idx) in inner_pool.iter().enumerate() {
             state.add_vertex(inner_uvs[i], pool_idx);
         }
-
         for i in 0..hole_len {
             state.mark_boundary_edge(hole_start + i, hole_start + (i + 1) % hole_len);
         }
@@ -1325,8 +1769,8 @@ fn tessellate_face(
     let n_boundary = state.vertices_uv.len();
     let n_new_verts_before = new_vertices.len();
 
-    // 2. Bubble packing for non-planar faces
-    if !surface.is_planar() {
+    // 2. Bubble packing for non-planar, non-ruled faces
+    if !surface.is_planar() && !surface.is_ruled() {
         let hole_uv_slices: Vec<&[Point2<f64>]> = hole_info
             .iter()
             .map(|&(start, len)| &state.vertices_uv[start..start + len])
@@ -1372,10 +1816,16 @@ fn tessellate_face(
     };
 
     // 2.5. Deduplicate vertices that share the same pool index
-    let (dedup_pts, dedup_contours, dedup_map) = dedup_by_pool(&state, &contours);
+    let (dedup_pts, dedup_contours, dedup_map, dedup_dropped) = dedup_by_pool(&state, &contours);
+
+    // If outer contour was degenerate (< 3 unique vertices after dedup), return fan fallback
+    if dedup_contours.is_empty() {
+        state.diag_strategy = 4; // fan
+        return (state, new_vertices);
+    }
 
     // 3. CDT triangulation
-    let (dedup_tris, strategy, cdt_diverged) = triangulate_face_robust_pts(
+    let (dedup_tris, strategy, cdt_diverged, cdt_err, ec_empty) = triangulate_face_robust_pts(
         &dedup_pts,
         &dedup_contours,
         &state,
@@ -1399,6 +1849,8 @@ fn tessellate_face(
     // to avoid false failures when dedup merges vertices that share a pool index.
     let expected_edges = contour_edge_set(&contours);
     let mut final_strategy = strategy;
+    let mut final_cdt_err = cdt_err;
+    let mut final_earcut_empty = ec_empty;
     if !cdt_diverged
         && !contours_complete_with(&mapped_tris, &expected_edges)
         && n_boundary < state.vertices_uv.len()
@@ -1408,8 +1860,8 @@ fn tessellate_face(
         state.local_to_pool.truncate(n_boundary);
         new_vertices.truncate(n_new_verts_before);
 
-        let (dedup_pts2, dedup_contours2, dedup_map2) = dedup_by_pool(&state, &contours);
-        let (dedup_tris2, strategy2, _) = triangulate_face_robust_pts(
+        let (dedup_pts2, dedup_contours2, dedup_map2, _) = dedup_by_pool(&state, &contours);
+        let (dedup_tris2, strategy2, _, cdt_err2, ec_empty2) = triangulate_face_robust_pts(
             &dedup_pts2,
             &dedup_contours2,
             &state,
@@ -1425,13 +1877,27 @@ fn tessellate_face(
             .map(|[a, b, c]| [dedup_map2[a], dedup_map2[b], dedup_map2[c]])
             .collect();
         final_strategy = strategy2;
+        final_cdt_err = cdt_err2;
+        final_earcut_empty = ec_empty2;
     }
 
-    #[cfg(test)]
-    {
-        state.diag_strategy = final_strategy;
+    state.diag_strategy = final_strategy;
+    state.diag_cdt_err = final_cdt_err;
+    state.diag_earcut_empty = final_earcut_empty;
+    state.diag_degenerate_dropped = dedup_dropped;
+
+    // Debug: count self-loop edges and inner-outside-outer
+    if debug_enabled() {
+        let mut self_loops = 0u32;
+        for contour in &contours {
+            for w in contour.windows(2) {
+                if w[0] == w[1] {
+                    self_loops += 1;
+                }
+            }
+        }
+        state.diag_self_loops = self_loops;
     }
-    let _ = final_strategy;
 
     state.triangles = mapped_tris;
 
@@ -1506,6 +1972,8 @@ struct ShellTessellator<'a> {
     edge_adjacency: HashMap<usize, Vec<EdgeUse>>,
     /// Maps pool edge (min, max) → BREP edge index (for boundary edge lookup)
     pool_edge_to_brep: HashMap<(usize, usize), usize>,
+    /// Cached UV contours from Phase 1.5 refinement, reused in Phase 2
+    face_contours: Vec<Option<FaceUvContours>>,
 
     // Phase 2 results
     /// Per-face triangulation state
@@ -1538,6 +2006,7 @@ impl<'a> ShellTessellator<'a> {
             edge_discretization: HashMap::new(),
             edge_adjacency: HashMap::new(),
             pool_edge_to_brep: HashMap::new(),
+            face_contours: Vec::new(),
             face_states: Vec::new(),
             triangles: Vec::new(),
             normals: Vec::new(),
@@ -1662,6 +2131,37 @@ impl<'a> ShellTessellator<'a> {
         edge: &BrepEdge,
         edge_idx: usize,
     ) -> usize {
+        // Line edges on ruled surfaces along the generator direction have zero
+        // chord error — no subdivision needed. This also helps adjacent planar
+        // faces that share these edges, reducing their CDT constraint count.
+        if matches!(curve, Curve::Line(_)) {
+            if let Some(uses) = self.edge_adjacency.get(&edge_idx) {
+                let p_start = curve.evaluate(edge.t_start);
+                let p_end = curve.evaluate(edge.t_end);
+                let tangent = (p_end - p_start).normalize();
+
+                let all_zero = uses.iter().all(|eu| {
+                    let face = &self.model.faces[eu.face_idx];
+                    let surface = &self.model.face_surfaces[face.surface];
+                    match surface {
+                        Surface::Plane(_) => true,
+                        Surface::Cylinder(c) => tangent.dot(&c.axis_unit()).abs() > 0.99,
+                        Surface::Cone(c) => {
+                            let t_mid = (edge.t_start + edge.t_end) / 2.0;
+                            let p_mid = curve.evaluate(t_mid);
+                            let generator = (p_mid - c.apex).normalize();
+                            tangent.dot(&generator).abs() > 0.99
+                        }
+                        _ => false,
+                    }
+                });
+
+                if all_zero {
+                    return 1;
+                }
+            }
+        }
+
         let mut max_kappa = 0.0_f64;
 
         // Use edge_adjacency HashMap for O(1) lookup instead of scanning all faces.
@@ -1691,147 +2191,218 @@ impl<'a> ShellTessellator<'a> {
     }
 
     // =========================================================================
-    // Phase 1.5: Adaptive Outer Contour Refinement
+    // Phase 1.5/1.6: Unified Contour Refinement
     // =========================================================================
 
-    /// Refine outer contours of faces with holes so inner vertices don't escape
-    /// the coarsely-discretized outer polygon.
+    /// Unified contour refinement: fixes both inner-outside-outer violations
+    /// and UV contour self-intersections in a single iterative pass.
     ///
-    /// Problem: an outer circle of radius R discretized to N segments creates an
-    /// inscribed polygon whose edges are at distance R·cos(π/N) from center.
-    /// Inner loops discretized at higher resolution can have vertices at radius > R·cos(π/N),
-    /// placing them OUTSIDE the outer polygon. This causes CDT "Fixed edges cross" errors.
+    /// Uses `compute_face_uv_contours()` so the UV computation is identical
+    /// to what `tessellate_face` sees. Handles vertex-loop faces correctly.
     ///
-    /// Solution: for each face with inner loops, check if all inner UV vertices are
-    /// inside the outer UV polygon. If not, refine the nearest outer edge by inserting
-    /// a midpoint on the BREP curve. This is a global edge operation, so all faces
-    /// sharing that edge see the same new vertices.
-    fn phase1_5_refine_outer_contours(&mut self) {
-        const MAX_REFINEMENT_ITERATIONS: usize = 5;
+    /// Returns `(faces_with_crossings_repaired, faces_with_unresolved_crossings)`.
+    fn refine_contours(&mut self) -> (usize, HashSet<usize>) {
+        const MAX_ITERATIONS: usize = 5;
+        /// Number of midpoints to insert per edge (splits into N+1 sub-segments).
+        const MIDPOINTS_PER_EDGE: usize = 1;
 
-        let mut prev_refine_count = usize::MAX;
-        for _iteration in 0..MAX_REFINEMENT_ITERATIONS {
-            // Collect edges that need refinement across all faces.
-            // Key: (pool_a, pool_b) canonical pair, Value: BREP edge index
+        let num_faces = self.model.faces.len();
+        let mut total_faces_with_crossings = 0usize;
+        let mut prev_brep_edges: BTreeSet<usize> = BTreeSet::new();
+        // Track all faces that ever had crossings for the final verification pass
+        let mut faces_with_crossings_ever: HashSet<usize> = HashSet::new();
+
+        // Iteration 0: all faces are dirty (must discover initial problems)
+        let mut dirty_faces: HashSet<usize> = (0..num_faces).collect();
+
+        let mut timer = crate::timer::Timer::new("refine_contours");
+        timer.loop_start();
+        for iteration in 0..MAX_ITERATIONS {
             let mut edges_to_refine: BTreeSet<(usize, usize)> = BTreeSet::new();
+            let mut faces_with_crossings_this_iter = 0usize;
 
-            for face in self.model.faces.iter() {
-                if face.inner_loops.is_empty() {
+            for &face_idx in &dirty_faces {
+                let face = &self.model.faces[face_idx];
+                let Some(uv_contours) = compute_face_uv_contours(
+                    face,
+                    self.model,
+                    &self.vertices,
+                    &self.edge_discretization,
+                ) else {
                     continue;
-                }
+                };
 
-                let surface = &self.model.face_surfaces[face.surface];
-                let outer_loop = &self.model.loops[face.outer_loop];
-
-                let outer_pool_indices =
-                    collect_loop_indices(&self.edge_discretization, outer_loop);
-
-                if outer_pool_indices.len() < 3 {
-                    continue;
-                }
-
-                // Compute outer UV coordinates
-                let mut outer_uvs: Vec<Point2<f64>> = outer_pool_indices
-                    .iter()
-                    .map(|&pi| surface.to_parametric(&self.vertices[pi]))
-                    .collect();
-                surface.unwrap_uvs(&mut outer_uvs);
-
-                // Collect all inner loop UV coordinates
-                for &inner_loop_idx in &face.inner_loops {
-                    let inner_loop = &self.model.loops[inner_loop_idx];
-                    let inner_pool_indices =
-                        collect_loop_indices(&self.edge_discretization, inner_loop);
-
-                    let mut inner_uvs: Vec<Point2<f64>> = inner_pool_indices
-                        .iter()
-                        .map(|&pi| surface.to_parametric(&self.vertices[pi]))
-                        .collect();
-                    surface.unwrap_uvs(&mut inner_uvs);
-
-                    // Align inner loop angular window to match the outer loop.
-                    {
-                        let (u_period, v_period) = surface.angular_period();
-                        if u_period.is_some() || v_period.is_some() {
-                            align_angular_uvs(&outer_uvs, &mut inner_uvs, u_period, v_period);
-                        }
-                    }
-
-                    // Check each inner vertex against the outer polygon
-                    let inside =
-                        crate::path::polygons::point_in_polygon(&outer_uvs, &[], &inner_uvs);
-                    for (i, inner_uv) in inner_uvs.iter().enumerate() {
-                        if !inside[i] {
-                            // Find closest outer edge
-                            let (edge_local_idx, _dist_sq) =
-                                closest_polygon_edge(inner_uv, &outer_uvs);
-                            let next_idx = (edge_local_idx + 1) % outer_pool_indices.len();
-                            let pool_a = outer_pool_indices[edge_local_idx];
-                            let pool_b = outer_pool_indices[next_idx];
-                            let key = canonical_edge(pool_a, pool_b);
-                            edges_to_refine.insert(key);
+                // --- Inner-outside-outer detection ---
+                if !uv_contours.inner_list.is_empty() {
+                    for (inner_uvs, _inner_pool) in &uv_contours.inner_list {
+                        let inside = crate::path::polygons::point_in_polygon(
+                            &uv_contours.outer_uvs,
+                            &[],
+                            inner_uvs,
+                        );
+                        for (i, inner_uv) in inner_uvs.iter().enumerate() {
+                            if !inside[i] {
+                                let (edge_local_idx, _dist_sq) =
+                                    closest_polygon_edge(inner_uv, &uv_contours.outer_uvs);
+                                let next_idx = (edge_local_idx + 1) % uv_contours.outer_pool.len();
+                                let pool_a = uv_contours.outer_pool[edge_local_idx];
+                                let pool_b = uv_contours.outer_pool[next_idx];
+                                edges_to_refine.insert(canonical_edge(pool_a, pool_b));
+                            }
                         }
                     }
                 }
 
-                // (per-face message suppressed to reduce noise in corpus tests)
+                // --- UV crossing detection ---
+                let face_crossings = detect_uv_crossings(
+                    &uv_contours.outer_uvs,
+                    &uv_contours.outer_pool,
+                    &uv_contours.inner_list,
+                );
+                if !face_crossings.is_empty() {
+                    faces_with_crossings_this_iter += 1;
+                    faces_with_crossings_ever.insert(face_idx);
+                    edges_to_refine.extend(face_crossings);
+                }
+            }
+
+            if iteration == 0 {
+                total_faces_with_crossings = faces_with_crossings_this_iter;
             }
 
             if edges_to_refine.is_empty() {
                 break;
             }
 
-            // Stagnation detection: if the number of edges to refine did not
-            // decrease since the last iteration, further refinement won't help.
-            let refine_count = edges_to_refine.len();
-            if refine_count >= prev_refine_count {
+            // Stagnation: stop if the exact same set of BREP edges is being refined.
+            // We track BREP edge indices rather than pool edge pairs because
+            // refine_edge() replaces old pool pairs with new sub-edges, so pool
+            // pairs never repeat even when the same BREP edge is refined again.
+            let brep_edges: BTreeSet<usize> = edges_to_refine
+                .iter()
+                .filter_map(|(a, b)| self.pool_edge_to_brep.get(&canonical_edge(*a, *b)).copied())
+                .collect();
+            if brep_edges == prev_brep_edges {
                 break;
             }
-            prev_refine_count = refine_count;
+            prev_brep_edges = brep_edges;
 
-            // Refine each edge by inserting a midpoint on the BREP curve
+            // Refine each edge and build the next dirty set from affected faces
+            let mut next_dirty: HashSet<usize> = HashSet::new();
             for (pool_a, pool_b) in &edges_to_refine {
-                let Some(&brep_edge_idx) = self.pool_edge_to_brep.get(&(*pool_a, *pool_b)) else {
-                    continue;
-                };
-
-                let edge = &self.model.edges[brep_edge_idx];
-                let curve = &self.model.curves[edge.curve];
-                let disc = self.edge_discretization.get(&brep_edge_idx).unwrap();
-
-                // Find the positions of pool_a, pool_b within the edge's pool_indices
-                let pos_a = disc.pool_indices.iter().position(|&p| p == *pool_a);
-                let pos_b = disc.pool_indices.iter().position(|&p| p == *pool_b);
-                let (Some(pos_a), Some(pos_b)) = (pos_a, pos_b) else {
-                    continue;
-                };
-
-                // Compute the curve parameter at the midpoint between the two positions
-                let n = disc.pool_indices.len() - 1; // number of segments
-                if n == 0 {
-                    continue;
+                if let Some(brep_edge_idx) = self.refine_edge(*pool_a, *pool_b, MIDPOINTS_PER_EDGE)
+                {
+                    if let Some(uses) = self.edge_adjacency.get(&brep_edge_idx) {
+                        for eu in uses {
+                            next_dirty.insert(eu.face_idx);
+                        }
+                    }
                 }
-                let t_a = edge.t_start + (edge.t_end - edge.t_start) * (pos_a as f64 / n as f64);
-                let t_b = edge.t_start + (edge.t_end - edge.t_start) * (pos_b as f64 / n as f64);
-                let t_mid = (t_a + t_b) / 2.0;
+            }
+            dirty_faces = next_dirty;
+            timer.loop_iteration();
+        }
+        timer.loop_end("iterations");
+        timer.print_conditionally();
 
-                // Evaluate the curve at the midpoint
-                let p_mid = curve.evaluate(t_mid);
-                let pool_mid = self.add_vertex(p_mid);
+        // Final pass: compute and cache contours for ALL faces (reused in Phase 2).
+        // Also re-check faces that ever had crossings for unresolved status.
+        // Use par_iter to match the parallelism of Phase 2's tessellation.
+        self.face_contours = (0..num_faces)
+            .into_par_iter()
+            .map(|face_idx| {
+                let face = &self.model.faces[face_idx];
+                compute_face_uv_contours(
+                    face,
+                    self.model,
+                    &self.vertices,
+                    &self.edge_discretization,
+                )
+            })
+            .collect();
 
-                // Insert into pool_indices between pos_a and pos_b
-                let insert_pos = pos_a.max(pos_b); // insert before the later position
-                let disc = self.edge_discretization.get_mut(&brep_edge_idx).unwrap();
-                disc.pool_indices.insert(insert_pos, pool_mid);
-
-                // Update pool_edge_to_brep: remove old edge, add two new edges
-                self.pool_edge_to_brep.remove(&(*pool_a, *pool_b));
-                let key_a = canonical_edge(*pool_a, pool_mid);
-                let key_b = (pool_mid.min(*pool_b), pool_mid.max(*pool_b));
-                self.pool_edge_to_brep.insert(key_a, brep_edge_idx);
-                self.pool_edge_to_brep.insert(key_b, brep_edge_idx);
+        let mut unresolved: HashSet<usize> = HashSet::new();
+        for &face_idx in &faces_with_crossings_ever {
+            if let Some(uv_contours) = &self.face_contours[face_idx] {
+                let crossings = detect_uv_crossings(
+                    &uv_contours.outer_uvs,
+                    &uv_contours.outer_pool,
+                    &uv_contours.inner_list,
+                );
+                if !crossings.is_empty() {
+                    unresolved.insert(face_idx);
+                }
             }
         }
+
+        (total_faces_with_crossings, unresolved)
+    }
+
+    /// Insert `n_midpoints` evenly-spaced midpoints on the BREP edge segment
+    /// between `pool_a` and `pool_b`. This splits one edge into `n_midpoints + 1`
+    /// sub-segments, making UV contours follow the 3D curve more closely.
+    fn refine_edge(&mut self, pool_a: usize, pool_b: usize, n_midpoints: usize) -> Option<usize> {
+        let Some(&brep_edge_idx) = self
+            .pool_edge_to_brep
+            .get(&(pool_a.min(pool_b), pool_a.max(pool_b)))
+        else {
+            return None;
+        };
+
+        let edge = &self.model.edges[brep_edge_idx];
+        let curve = &self.model.curves[edge.curve];
+        let disc = self.edge_discretization.get(&brep_edge_idx).unwrap();
+
+        let pos_a = disc.pool_indices.iter().position(|&p| p == pool_a);
+        let pos_b = disc.pool_indices.iter().position(|&p| p == pool_b);
+        let (Some(pos_a), Some(pos_b)) = (pos_a, pos_b) else {
+            return None;
+        };
+
+        let n = disc.pool_indices.len() - 1; // current segment count
+        if n == 0 {
+            return None;
+        }
+
+        let t_a = edge.t_start + (edge.t_end - edge.t_start) * (pos_a as f64 / n as f64);
+        let t_b = edge.t_start + (edge.t_end - edge.t_start) * (pos_b as f64 / n as f64);
+
+        // Insert n_midpoints evenly between t_a and t_b
+        let insert_after = pos_a.min(pos_b);
+        let mut new_pool_indices = Vec::with_capacity(n_midpoints);
+        for k in 1..=n_midpoints {
+            let frac = k as f64 / (n_midpoints + 1) as f64;
+            let t_k = t_a + (t_b - t_a) * frac;
+            let p_k = curve.evaluate(t_k);
+            let pool_k = self.add_vertex(p_k);
+            new_pool_indices.push(pool_k);
+        }
+
+        // Update edge discretization: insert new indices between pos_a and pos_b
+        let disc = self.edge_discretization.get_mut(&brep_edge_idx).unwrap();
+        // If pos_a > pos_b, the new points should be inserted in reverse order
+        // so they appear in correct parameter order.
+        if pos_a > pos_b {
+            new_pool_indices.reverse();
+        }
+        for (offset, &pool_k) in new_pool_indices.iter().enumerate() {
+            disc.pool_indices.insert(insert_after + 1 + offset, pool_k);
+        }
+
+        // Update pool_edge_to_brep: remove old edge, add all new sub-edges
+        self.pool_edge_to_brep
+            .remove(&(pool_a.min(pool_b), pool_a.max(pool_b)));
+        let disc = self.edge_discretization.get(&brep_edge_idx).unwrap();
+        // Rebuild the sub-edge mappings for the affected region
+        let start = insert_after;
+        let end = insert_after + 1 + new_pool_indices.len();
+        for i in start..end {
+            let a = disc.pool_indices[i];
+            let b = disc.pool_indices[i + 1];
+            self.pool_edge_to_brep
+                .insert(canonical_edge(a, b), brep_edge_idx);
+        }
+        Some(brep_edge_idx)
     }
 
     // =========================================================================
@@ -1839,9 +2410,11 @@ impl<'a> ShellTessellator<'a> {
     // =========================================================================
 
     /// Phase 3: Convert face states to final triangles and compute normals.
-    fn phase3_final_assembly(&mut self) {
+    /// Returns per-face count of degenerate pool triangles dropped.
+    fn phase3_final_assembly(&mut self) -> Vec<u32> {
         // Initialize normals for all vertices
         self.normals = vec![Vector3::zeros(); self.vertices.len()];
+        let mut degenerate_counts = vec![0u32; self.face_states.len()];
 
         for (face_idx, state) in self.face_states.iter().enumerate() {
             let face = &self.model.faces[face_idx];
@@ -1877,6 +2450,7 @@ impl<'a> ShellTessellator<'a> {
                     || pool_tri[1] == pool_tri[2]
                     || pool_tri[0] == pool_tri[2]
                 {
+                    degenerate_counts[face_idx] += 1;
                     continue;
                 }
                 self.triangles.push(pool_tri);
@@ -1888,14 +2462,17 @@ impl<'a> ShellTessellator<'a> {
         for n in &mut self.normals {
             n.try_normalize_mut(NEAR_ZERO_NORMAL);
         }
+
+        degenerate_counts
     }
 
     /// Tessellate all faces and return a Trimesh.
-    fn tessellate(mut self) -> Trimesh {
-        let _t1 = std::time::Instant::now();
+    fn tessellate(mut self) -> (Trimesh, Vec<FaceDiagnostics>, ShellDiagnostics) {
+        let mut timer = crate::timer::Timer::new("tessellate");
 
         // Phase 1: Discretize all edges globally
         self.phase1_discretize_all_edges();
+        timer.record("phase1_discretize_edges");
 
         // Phase 1 validation (test-only)
         #[cfg(test)]
@@ -1957,17 +2534,22 @@ impl<'a> ShellTessellator<'a> {
             }
         }
 
-        // Phase 1.5: Refine outer contours where inner loops escape the outer polygon
-        self.phase1_5_refine_outer_contours();
-        let _t2 = std::time::Instant::now();
+        // Phase 1.5/1.6: Unified contour refinement (inner-outside-outer + crossing repair)
+        let (faces_with_crossings, unresolved_faces) = self.refine_contours();
+        timer.record("phase1.5_refine_contours");
 
         // Phase 2: Bubble pack + CDT triangulation for each face (parallel)
         // Sentinel well above any real pool index; leaves room for per-face new vertices
         // without risk of overlap or overflow during the `actual_base + (idx - sentinel_base)` rewrite.
         let sentinel_base = usize::MAX / 2;
-        let face_results: Vec<_> = (0..self.model.faces.len())
+        // Take cached contours out of self so each par_iter task can consume its own.
+        let mut cached_contours = std::mem::take(&mut self.face_contours);
+        // Pad if needed (shouldn't happen, but be safe)
+        cached_contours.resize_with(self.model.faces.len(), || None);
+        let face_results: Vec<_> = cached_contours
             .into_par_iter()
-            .map(|face_idx| {
+            .enumerate()
+            .map(|(face_idx, contours)| {
                 tessellate_face(
                     face_idx,
                     self.model,
@@ -1976,6 +2558,7 @@ impl<'a> ShellTessellator<'a> {
                     &self.brep_vertex_to_pool,
                     self.effective_tolerance,
                     sentinel_base,
+                    contours,
                 )
             })
             .collect();
@@ -2012,6 +2595,7 @@ impl<'a> ShellTessellator<'a> {
             self.vertices.extend(new_verts);
             self.face_states.push(state);
         }
+        timer.record("phase2_tessellate_faces");
         // Cross-face boundary edge validation (test-only)
         #[cfg(test)]
         if validation_enabled() {
@@ -2058,8 +2642,65 @@ impl<'a> ShellTessellator<'a> {
             }
         }
 
-        // Phase 3: Final assembly
-        self.phase3_final_assembly();
+        // Collect per-face diagnostics before phase3 consumes face_states
+        let mut face_diagnostics: Vec<FaceDiagnostics> = self
+            .face_states
+            .iter()
+            .map(|s| FaceDiagnostics {
+                strategy: s.diag_strategy,
+                cdt_err: s.diag_cdt_err,
+                earcut_empty: s.diag_earcut_empty,
+                self_loop_count: s.diag_self_loops,
+                degenerate_contours_dropped: s.diag_degenerate_dropped,
+                inner_outside_outer: s.diag_inner_outside,
+                is_sympathy_defect: false,
+                degenerate_pool_tris_dropped: 0,
+            })
+            .collect();
+
+        // Debug: print aggregate diagnostics summary
+        if debug_enabled() {
+            let mut total_self_loops = 0u32;
+            let mut total_degenerate = 0u32;
+            let mut total_inner_outside = 0u32;
+            for d in &face_diagnostics {
+                total_self_loops += d.self_loop_count;
+                total_degenerate += d.degenerate_contours_dropped;
+                total_inner_outside += d.inner_outside_outer;
+            }
+            eprintln!(
+                "[RMESH_DEBUG] faces={} self_loops={} degenerate_contours={} inner_outside={}",
+                face_diagnostics.len(),
+                total_self_loops,
+                total_degenerate,
+                total_inner_outside,
+            );
+        }
+
+        // Phase 3: Final assembly (returns per-face degenerate triangle counts)
+        let degenerate_counts = self.phase3_final_assembly();
+        for (face_idx, &count) in degenerate_counts.iter().enumerate() {
+            if let Some(d) = face_diagnostics.get_mut(face_idx) {
+                d.degenerate_pool_tris_dropped = count;
+            }
+        }
+
+        // Build face adjacency from edge_adjacency (before self fields are moved)
+        let mut face_neighbors: HashMap<usize, HashSet<usize>> = HashMap::new();
+        for uses in self.edge_adjacency.values() {
+            for i in 0..uses.len() {
+                for j in (i + 1)..uses.len() {
+                    face_neighbors
+                        .entry(uses[i].face_idx)
+                        .or_default()
+                        .insert(uses[j].face_idx);
+                    face_neighbors
+                        .entry(uses[j].face_idx)
+                        .or_default()
+                        .insert(uses[i].face_idx);
+                }
+            }
+        }
 
         // Build Trimesh with attributes
         let mut attrs_vertex = Attributes::default();
@@ -2082,7 +2723,7 @@ impl<'a> ShellTessellator<'a> {
 
         // Safety net: fill any remaining boundary holes from tessellation defects.
         // Only keep the filled result if it actually improves watertightness.
-        if !mesh.is_watertight() {
+        let mesh = if !mesh.is_watertight() {
             let filled = mesh.fill_holes();
             if filled.is_watertight() || filled.edges_boundary().len() < mesh.edges_boundary().len()
             {
@@ -2092,7 +2733,48 @@ impl<'a> ShellTessellator<'a> {
             }
         } else {
             mesh
+        };
+
+        // Sympathy defect detection: a face is a sympathy defect if it used a
+        // non-fallback strategy but is flagged as defective because a neighbor's
+        // broken triangulation doesn't cover their shared boundary edge.
+        let defect_faces = mesh.non_watertight_face_indices();
+        if !defect_faces.is_empty() {
+            // First pass: collect which faces are sympathy defects (read-only)
+            let sympathy_flags: Vec<(usize, bool)> = defect_faces
+                .iter()
+                .filter_map(|&fi| {
+                    let d = face_diagnostics.get(fi)?;
+                    let is_own_ok = d.strategy != 3 && d.strategy != 4;
+                    if !is_own_ok {
+                        return Some((fi, false));
+                    }
+                    let neighbors = face_neighbors.get(&fi)?;
+                    let has_broken_neighbor = neighbors.iter().any(|&ni| {
+                        defect_faces.contains(&ni)
+                            && face_diagnostics
+                                .get(ni)
+                                .is_some_and(|nd| nd.strategy == 3 || nd.strategy == 4)
+                    });
+                    Some((fi, has_broken_neighbor))
+                })
+                .collect();
+            // Second pass: apply flags (write)
+            for (fi, is_sympathy) in sympathy_flags {
+                if let Some(d) = face_diagnostics.get_mut(fi) {
+                    d.is_sympathy_defect = is_sympathy;
+                }
+            }
         }
+
+        timer.record("phase3_assembly_and_fill");
+        timer.print_conditionally();
+
+        let shell_diag = ShellDiagnostics {
+            faces_with_uv_crossings: faces_with_crossings,
+            faces_with_unresolved_crossings: unresolved_faces.len(),
+        };
+        (mesh, face_diagnostics, shell_diag)
     }
 }
 
@@ -2108,6 +2790,14 @@ impl BrepModel {
     /// - `attributes_vertex.normals[0]`: per-vertex normals
     /// - `attributes_face.groupings`: face-to-surface mapping with `GroupingKind::Surface`
     pub fn tesselate(&self, params: &TesselationParams) -> Trimesh {
+        ShellTessellator::new(self, params).tessellate().0
+    }
+
+    /// Tessellate and return per-face diagnostics alongside the mesh.
+    pub fn tesselate_with_diagnostics(
+        &self,
+        params: &TesselationParams,
+    ) -> (Trimesh, Vec<FaceDiagnostics>, ShellDiagnostics) {
         ShellTessellator::new(self, params).tessellate()
     }
 

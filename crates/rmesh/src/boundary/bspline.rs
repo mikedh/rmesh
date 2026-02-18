@@ -709,6 +709,42 @@ impl SurfaceBSpline {
         (Point3::from(s), du, dv)
     }
 
+    /// Newton-Raphson refinement of (u, v) to minimize distance to `point`.
+    fn newton_refine_uv(&self, point: &Point3<f64>, mut u: f64, mut v: f64) -> Point2<f64> {
+        let ((u_min, u_max), (v_min, v_max)) = self.domain();
+        const MAX_ITER: usize = 20;
+
+        for _ in 0..MAX_ITER {
+            let (s, su, sv) = self.evaluate_and_derivatives(u, v);
+            let delta = s - point;
+
+            if delta.norm_squared() < NEWTON_TOL * NEWTON_TOL {
+                break;
+            }
+
+            // Solve 2x2 system: [su·su  su·sv] [du]   [delta·su]
+            //                   [su·sv  sv·sv] [dv] = [delta·sv]
+            let a11 = su.dot(&su);
+            let a12 = su.dot(&sv);
+            let a22 = sv.dot(&sv);
+            let b1 = delta.dot(&su);
+            let b2 = delta.dot(&sv);
+
+            let det = a11 * a22 - a12 * a12;
+            if det.abs() < METRIC_TOL {
+                break;
+            }
+
+            u -= (a22 * b1 - a12 * b2) / det;
+            v -= (a11 * b2 - a12 * b1) / det;
+
+            u = u.clamp(u_min, u_max);
+            v = v.clamp(v_min, v_max);
+        }
+
+        Point2::new(u, v)
+    }
+
     /// Find the (u, v) parameters for a 3D point on the surface using Newton-Raphson.
     /// Returns the parameter pair that produces the closest point on the surface.
     pub fn parameter_at(&self, point: &Point3<f64>) -> Point2<f64> {
@@ -716,7 +752,6 @@ impl SurfaceBSpline {
 
         // Initial guess via closest control point mapped through Greville abscissae.
         // O(n_u × n_v) distance comparisons, no surface evaluations.
-        // Newton-Raphson below refines from this starting point.
         let p = self.u_degree;
         let q = self.v_degree;
 
@@ -748,44 +783,19 @@ impl SurfaceBSpline {
             }
         }
 
-        // Newton-Raphson iteration
-        const MAX_ITER: usize = 20;
+        self.newton_refine_uv(point, u, v)
+    }
 
-        for _ in 0..MAX_ITER {
-            let (s, su, sv) = self.evaluate_and_derivatives(u, v);
-
-            let delta = s - point;
-
-            // Check convergence
-            if delta.norm_squared() < NEWTON_TOL * NEWTON_TOL {
-                break;
-            }
-
-            // Solve 2x2 system: [su·su  su·sv] [du]   [delta·su]
-            //                   [su·sv  sv·sv] [dv] = [delta·sv]
-            let a11 = su.dot(&su);
-            let a12 = su.dot(&sv);
-            let a22 = sv.dot(&sv);
-            let b1 = delta.dot(&su);
-            let b2 = delta.dot(&sv);
-
-            let det = a11 * a22 - a12 * a12;
-            if det.abs() < METRIC_TOL {
-                break;
-            }
-
-            let du = (a22 * b1 - a12 * b2) / det;
-            let dv = (a11 * b2 - a12 * b1) / det;
-
-            u -= du;
-            v -= dv;
-
-            // Clamp to domain
-            u = u.clamp(u_min, u_max);
-            v = v.clamp(v_min, v_max);
-        }
-
-        Point2::new(u, v)
+    /// Find (u, v) parameters for a 3D point, using a hint as the initial guess
+    /// instead of the O(n_u × n_v) Greville abscissae scan.
+    ///
+    /// This is much faster when the hint is close to the true solution (e.g.
+    /// consecutive vertices along a contour).
+    pub fn parameter_at_with_hint(&self, point: &Point3<f64>, hint: Point2<f64>) -> Point2<f64> {
+        let ((u_min, u_max), (v_min, v_max)) = self.domain();
+        let u = hint.x.clamp(u_min, u_max);
+        let v = hint.y.clamp(v_min, v_max);
+        self.newton_refine_uv(point, u, v)
     }
 
     /// Compute the surface normal at (u, v).

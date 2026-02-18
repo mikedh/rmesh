@@ -350,9 +350,9 @@ fn earcut_linked<T: Float>(
                 earcut_linked(nodes, ear_i, triangles, min_x, min_y, inv_size, Pass::P2);
             } else if pass == Pass::P2 {
                 // Skip split_earcut for large remaining polygons to avoid O(n³).
-                // For ≤80 vertices split_earcut is harmless (80³ = 512K ops).
+                // For ≤500 vertices split_earcut is harmless (500³ = 125M ops).
                 let remaining = count_ring(nodes, ear_i);
-                if remaining <= 80 {
+                if remaining <= 500 {
                     split_earcut(nodes, ear_i, triangles, min_x, min_y, inv_size);
                 }
             }

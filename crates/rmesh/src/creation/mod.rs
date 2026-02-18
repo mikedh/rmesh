@@ -322,7 +322,7 @@ impl Triangulator {
         interiors: &[Vec<usize>],
         vertices: &[Point2<f64>],
         local_indices: bool,
-    ) -> Vec<[usize; 3]> {
+    ) -> Result<Vec<[usize; 3]>> {
         let earcut = self.earcut.get_or_insert_with(Earcut::new);
 
         // start with a flattening of the exterior
@@ -346,14 +346,34 @@ impl Triangulator {
 
         // run the triangulator
         let mut result: Vec<usize> = vec![];
+        let n_flat = flat.len();
+        let n_holes = holes.len();
         earcut.earcut(flat, &holes, &mut result);
+
+        // Validate output: earcut may return fewer triangles than the theoretical
+        // maximum (n - 2 + 2*holes) due to closing duplicate vertices or degenerate
+        // geometry. Only flag as error when the output is empty or grossly incomplete
+        // (< 1/3 of expected), which catches the real problem: silent failure when
+        // split_earcut is skipped for >500 remaining vertices.
+        let actual_tris = result.len() / 3;
+        if n_flat >= 3 && actual_tris == 0 {
+            return Err(anyhow::anyhow!(
+                "earcut produced no triangles from {n_flat} vertices"
+            ));
+        }
+        let expected_min = n_flat.saturating_sub(2);
+        if expected_min > 6 && actual_tris * 3 < expected_min {
+            return Err(anyhow::anyhow!(
+                "earcut incomplete: {actual_tris}/{expected_min} triangles ({n_holes} holes)"
+            ));
+        }
 
         if local_indices {
             // return indices into the polygon (exterior then interiors)
-            return result
+            return Ok(result
                 .chunks_exact(3)
                 .map(|chunk| [chunk[0], chunk[1], chunk[2]])
-                .collect();
+                .collect());
         }
 
         // Build index mapping: earcut returns indices into `flat`, we need original vertex indices
@@ -364,7 +384,7 @@ impl Triangulator {
         }
 
         // convert the flat result into triangles with original vertex indices
-        result
+        Ok(result
             .chunks_exact(3)
             .map(|chunk| {
                 [
@@ -373,7 +393,7 @@ impl Triangulator {
                     index_map[chunk[2]],
                 ]
             })
-            .collect()
+            .collect())
     }
 
     /// Triangulate a polygon in 3D space by fitting a plane to the exterior
@@ -408,14 +428,14 @@ impl Triangulator {
         // find a plane for the vertices in our exterior as not every vertex may be referenced
         let fittable: Vec<Point3<f64>> = exterior.iter().map(|i| vertices[*i]).collect();
         // use the cross product method to find a plane which works well for exactly planar points
-        let result = Plane::from_points(&fittable, true).map(|plane| {
+        let result = Plane::from_points(&fittable, true).and_then(|plane| {
             let on_plane = plane.to_2d(vertices);
             self.triangulate_2d(exterior, interiors, &on_plane, local_indices)
         });
 
         match result {
             Ok(tris) => Ok(tris),
-            Err(e) if fan_fallback => Ok(triangulate_fan(exterior, local_indices)),
+            Err(_) if fan_fallback => Ok(triangulate_fan(exterior, local_indices)),
             Err(e) => Err(e),
         }
     }

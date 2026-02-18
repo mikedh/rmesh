@@ -621,6 +621,15 @@ impl Surface {
         }
     }
 
+    /// Whether this is a ruled surface (zero curvature along generator direction).
+    pub fn is_ruled(&self) -> bool {
+        match self {
+            Surface::Cylinder(_) | Surface::Cone(_) => true,
+            Surface::Offset(o) => o.base.is_ruled(),
+            _ => false,
+        }
+    }
+
     /// Estimate maximum curvature over a UV region by sampling a 3×3 grid.
     ///
     /// This catches interior extrema that corner+center sampling would miss.
