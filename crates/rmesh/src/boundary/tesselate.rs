@@ -30,6 +30,7 @@ use super::cdt;
 use super::faces::{CURVATURE_TOL, Cone, Cylinder, GEOMETRY_TOL, Sphere, SurfacePlane, Torus};
 use super::topology::{BrepEdge, BrepModel, Curve, EdgeUse, OrientedEdge};
 use crate::attributes::{Attributes, Grouping, GroupingKind};
+use crate::bounds::Bounds2;
 use crate::creation::{Plane, Triangulator};
 use crate::mesh::Trimesh;
 
@@ -260,7 +261,7 @@ fn minimum_enclosing_arc(angles: &[f64], period: f64) -> (f64, f64) {
         return (angles.first().copied().unwrap_or(0.0), 0.0);
     }
     let mut sorted: Vec<f64> = angles.iter().map(|&a| a.rem_euclid(period)).collect();
-    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_unstable_by(f64::total_cmp);
 
     let mut max_gap = 0.0f64;
     let mut max_gap_idx = 0usize;
@@ -286,6 +287,89 @@ fn minimum_enclosing_arc(angles: &[f64], period: f64) -> (f64, f64) {
 /// Remap an angle into the window `[base, base + period)`.
 fn window_angle(angle: f64, base: f64, period: f64) -> f64 {
     (angle - base).rem_euclid(period) + base
+}
+
+/// Find a seam position (base angle) that avoids splitting any non-full-circle contour.
+///
+/// For each contour, computes the minimum enclosing arc. Contours spanning
+/// less than 95% of the period constrain where the seam can go (the seam must
+/// be in their gap). Full-circle contours are excluded since they must be
+/// unwrapped regardless of seam placement.
+///
+/// Returns the midpoint of the largest common gap, or falls back to the
+/// global [`minimum_enclosing_arc`] base if no common gap exists.
+fn find_contour_safe_base(contour_angles: &[&[f64]], period: f64) -> f64 {
+    let mut occupied_arcs: Vec<(f64, f64)> = Vec::new(); // (start_on_circle, span)
+    let mut all_angles: Vec<f64> = Vec::new();
+
+    for &angles in contour_angles {
+        all_angles.extend_from_slice(angles);
+        if angles.len() < 2 {
+            continue;
+        }
+        let (base, span) = minimum_enclosing_arc(angles, period);
+        // Skip near-full-circle contours — they must be unwrapped regardless
+        if span > 0.95 * period {
+            continue;
+        }
+        occupied_arcs.push((base.rem_euclid(period), span));
+    }
+
+    if occupied_arcs.is_empty() {
+        // All contours are full-circle or trivial — fall back to global
+        if all_angles.is_empty() {
+            return 0.0;
+        }
+        let (base, _) = minimum_enclosing_arc(&all_angles, period);
+        return base;
+    }
+
+    // Collect all boundary points of occupied arcs on [0, period)
+    let mut boundaries: Vec<f64> = Vec::new();
+    for &(start, span) in &occupied_arcs {
+        boundaries.push(start);
+        boundaries.push((start + span).rem_euclid(period));
+    }
+    boundaries.sort_unstable_by(f64::total_cmp);
+    boundaries.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+
+    // Test the midpoint of each gap between consecutive boundary points,
+    // picking the largest gap that is free from all occupied arcs.
+    let n = boundaries.len();
+    let mut best_base = None;
+    let mut best_gap = 0.0f64;
+
+    for i in 0..n {
+        let a = boundaries[i];
+        let b = if i + 1 < n {
+            boundaries[i + 1]
+        } else {
+            boundaries[0] + period
+        };
+        let gap = b - a;
+        if gap < 1e-6 {
+            continue;
+        }
+
+        let mid = a + gap / 2.0;
+        let mid_norm = mid.rem_euclid(period);
+
+        // Check that mid is NOT inside any occupied arc
+        let free = occupied_arcs
+            .iter()
+            .all(|&(start, span)| (mid_norm - start).rem_euclid(period) >= span - 1e-10);
+
+        if free && gap > best_gap {
+            best_gap = gap;
+            best_base = Some(mid_norm);
+        }
+    }
+
+    best_base.unwrap_or_else(|| {
+        // No common gap — fall back to global minimum_enclosing_arc
+        let (base, _) = minimum_enclosing_arc(&all_angles, period);
+        base
+    })
 }
 
 /// Repair interior holes in a triangulation by fan-filling them.
@@ -1023,6 +1107,103 @@ struct FaceUvContours {
     effective_outer_idx: usize,
 }
 
+/// Merge a degenerate outer circle with a matching inner circle to form a proper UV rectangle.
+///
+/// When the outer contour is a single full circle (zero-area line in UV),
+/// find the best inner contour (another full-circle at a different v) and
+/// merge them into a single closed polygon. Returns true if merge was performed.
+fn merge_degenerate_circles(
+    outer_uvs: &mut Vec<Point2<f64>>,
+    outer_pool: &mut Vec<usize>,
+    inner_list: &mut Vec<(Vec<Point2<f64>>, Vec<usize>)>,
+    period: f64,
+) -> bool {
+    if inner_list.is_empty() {
+        return false;
+    }
+
+    let outer_bounds = Bounds2::from_points(outer_uvs).unwrap();
+    let outer_u_min = outer_bounds.min.x;
+    let outer_u_max = outer_bounds.max.x;
+    let outer_v_min = outer_bounds.min.y;
+    let outer_v_max = outer_bounds.max.y;
+    let outer_u_span = outer_u_max - outer_u_min;
+    let outer_v_span = outer_v_max - outer_v_min;
+
+    // Degenerate: v extent near zero (absolute) AND u spans most of the period.
+    // A single full-circle has v_span ≈ 0 (all vertices at same height).
+    // A thin-but-valid rectangle has v_span = actual height (always >> 1e-6).
+    if outer_v_span >= 1e-6 || outer_u_span <= 0.5 * period {
+        return false;
+    }
+
+    // Find the best inner contour to merge: another full-circle at a different v.
+    let outer_v_mid = (outer_v_min + outer_v_max) / 2.0;
+    let mut best_idx = None;
+    let mut best_v_gap = 0.0f64;
+
+    for (i, (inner_uvs, _)) in inner_list.iter().enumerate() {
+        if inner_uvs.len() < 3 {
+            continue;
+        }
+        let inner_bounds = Bounds2::from_points(inner_uvs).unwrap();
+        let iv_span = inner_bounds.max.y - inner_bounds.min.y;
+        let iu_span = inner_bounds.max.x - inner_bounds.min.x;
+
+        // Candidate must also be a full circle: thin in v, spans most of u
+        if iu_span < 0.5 * period || iv_span > 1e-6 {
+            continue;
+        }
+        let v_gap = ((inner_bounds.min.y + inner_bounds.max.y) / 2.0 - outer_v_mid).abs();
+        if v_gap > best_v_gap {
+            best_v_gap = v_gap;
+            best_idx = Some(i);
+        }
+    }
+
+    let Some(merge_idx) = best_idx else {
+        return false;
+    };
+    let (mut merged_uvs, merged_pool) = inner_list.remove(merge_idx);
+
+    // After unwrapping, CW circles extend into negative u while CCW
+    // circles extend into positive u. Shift inner by ±period to align
+    // u ranges before merging.
+    let outer_u_mid = (outer_u_min + outer_u_max) / 2.0;
+    let merged_bounds = Bounds2::from_points(&merged_uvs).unwrap();
+    let inner_u_mid = (merged_bounds.min.x + merged_bounds.max.x) / 2.0;
+    let shift = ((outer_u_mid - inner_u_mid) / period).round() * period;
+    if shift.abs() > 1e-6 {
+        for uv in &mut merged_uvs {
+            uv.x += shift;
+        }
+    }
+
+    // Choose orientation: the connecting edges should be short.
+    // Safety: outer_uvs non-empty (outer_pool_indices.len() >= 3 precondition),
+    // merged_uvs non-empty (inner_uvs.len() >= 3 guard above).
+    debug_assert!(!outer_uvs.is_empty() && !merged_uvs.is_empty());
+    let outer_first_u = outer_uvs.first().unwrap().x;
+    let outer_last_u = outer_uvs.last().unwrap().x;
+    let inner_first_u = merged_uvs.first().unwrap().x;
+    let inner_last_u = merged_uvs.last().unwrap().x;
+
+    let cost_asis = (outer_last_u - inner_first_u).abs() + (inner_last_u - outer_first_u).abs();
+    let cost_rev = (outer_last_u - inner_last_u).abs() + (inner_first_u - outer_first_u).abs();
+
+    let reverse = cost_rev < cost_asis;
+
+    if reverse {
+        outer_uvs.extend(merged_uvs.iter().rev());
+        outer_pool.extend(merged_pool.iter().rev());
+    } else {
+        outer_uvs.extend(merged_uvs.iter());
+        outer_pool.extend(merged_pool.iter());
+    }
+
+    true
+}
+
 /// Compute UV contours for a face, handling vertex loop swapping,
 /// angular windowing, and per-contour unwrapping.
 ///
@@ -1061,7 +1242,7 @@ fn compute_face_uv_contours(
     };
 
     let effective_outer_loop = &model.loops[effective_outer_idx];
-    let outer_pool_indices = collect_loop_indices(edge_discretization, effective_outer_loop);
+    let mut outer_pool_indices = collect_loop_indices(edge_discretization, effective_outer_loop);
     if outer_pool_indices.len() < 3 {
         return None;
     }
@@ -1114,27 +1295,46 @@ fn compute_face_uv_contours(
         inner_raw_ranges.push((start, inner_indices.len()));
     }
 
-    // Find optimal angular window across ALL vertices and snap to it
+    // Find optimal angular window that avoids splitting any contour at the seam.
+    // Uses per-contour gap analysis instead of global minimum_enclosing_arc
+    // to prevent inner contours from straddling the angular discontinuity.
     let (u_period, v_period) = surface.angular_period();
+    let outer_len = outer_pool_indices.len();
     if u_period.is_some() || v_period.is_some() {
         if let Some(period) = u_period {
-            let all_u: Vec<f64> = all_raw_uvs.iter().map(|uv| uv.x).collect();
-            let (base, _span) = minimum_enclosing_arc(&all_u, period);
+            let outer_u: Vec<f64> = all_raw_uvs[..outer_len].iter().map(|uv| uv.x).collect();
+            let inner_u_lists: Vec<Vec<f64>> = inner_raw_ranges
+                .iter()
+                .map(|&(s, l)| all_raw_uvs[s..s + l].iter().map(|uv| uv.x).collect())
+                .collect();
+            let mut contour_refs: Vec<&[f64]> = vec![&outer_u];
+            for list in &inner_u_lists {
+                contour_refs.push(list);
+            }
+            let base = find_contour_safe_base(&contour_refs, period);
             for uv in &mut all_raw_uvs {
                 uv.x = window_angle(uv.x, base, period);
             }
         }
         if let Some(period) = v_period {
-            let all_v: Vec<f64> = all_raw_uvs.iter().map(|uv| uv.y).collect();
-            let (base, _span) = minimum_enclosing_arc(&all_v, period);
+            let outer_v: Vec<f64> = all_raw_uvs[..outer_len].iter().map(|uv| uv.y).collect();
+            let inner_v_lists: Vec<Vec<f64>> = inner_raw_ranges
+                .iter()
+                .map(|&(s, l)| all_raw_uvs[s..s + l].iter().map(|uv| uv.y).collect())
+                .collect();
+            let mut contour_refs: Vec<&[f64]> = vec![&outer_v];
+            for list in &inner_v_lists {
+                contour_refs.push(list);
+            }
+            let base = find_contour_safe_base(&contour_refs, period);
             for uv in &mut all_raw_uvs {
                 uv.y = window_angle(uv.y, base, period);
             }
         }
     }
 
-    // Split back into outer + inner slices, unwrap each for internal continuity
-    let outer_len = outer_pool_indices.len();
+    // Split back into outer + inner slices.
+    // Unwrap the outer contour for internal continuity (handles full-circle loops).
     let mut outer_uvs = all_raw_uvs[..outer_len].to_vec();
     surface.unwrap_uvs_windowed(&mut outer_uvs);
 
@@ -1142,8 +1342,62 @@ fn compute_face_uv_contours(
     for (loop_i, inner_indices) in inner_loops_pool.iter().enumerate() {
         let &(start, len) = &inner_raw_ranges[loop_i];
         let mut inner_uvs = all_raw_uvs[start..start + len].to_vec();
-        surface.unwrap_uvs_windowed(&mut inner_uvs);
+
+        // After find_contour_safe_base, most inner contours won't straddle.
+        // In the fallback case (no common gap), some may still straddle —
+        // detect and re-window them with their own optimal base.
+        for (period_opt, axis) in [(u_period, 0usize), (v_period, 1usize)] {
+            let Some(period) = period_opt else { continue };
+            let vals: Vec<f64> = inner_uvs
+                .iter()
+                .map(|p| if axis == 0 { p.x } else { p.y })
+                .collect();
+            let min_val = vals.iter().copied().reduce(f64::min).unwrap();
+            let max_val = vals.iter().copied().reduce(f64::max).unwrap();
+
+            if max_val - min_val > 0.9 * period {
+                // Contour straddles the seam — check if it's genuinely full-circle
+                let (_, span) = minimum_enclosing_arc(&vals, period);
+                if span > 0.9 * period {
+                    // Full-circle inner contour — unwrap for continuity
+                    let mut buf = vec![0.0; inner_uvs.len()];
+                    unwrap_windowed_sequence(vals.iter().copied(), &mut buf, period);
+                    for (i, uv) in inner_uvs.iter_mut().enumerate() {
+                        if axis == 0 {
+                            uv.x = buf[i];
+                        } else {
+                            uv.y = buf[i];
+                        }
+                    }
+                } else {
+                    // Small contour split by the seam — re-window with per-contour base
+                    let (inner_base, _) = minimum_enclosing_arc(&vals, period);
+                    for uv in &mut inner_uvs {
+                        if axis == 0 {
+                            uv.x = window_angle(uv.x, inner_base, period);
+                        } else {
+                            uv.y = window_angle(uv.y, inner_base, period);
+                        }
+                    }
+                }
+            }
+        }
+
         inner_list.push((inner_uvs, inner_indices.clone()));
+    }
+
+    // Fix degenerate outer contour (single circle → zero-area UV polygon).
+    // On cylinders/cones, faces bounded by two co-axial circles have no seam edges.
+    // The outer loop is one circle, mapping to a horizontal line in UV space (zero area).
+    // Point-in-polygon always returns false for inner vertices, and CDT fails.
+    // Fix: merge the outer circle with one inner circle to form a proper rectangle.
+    if let Some(period) = u_period {
+        merge_degenerate_circles(
+            &mut outer_uvs,
+            &mut outer_pool_indices,
+            &mut inner_list,
+            period,
+        );
     }
 
     // Align inner loops to outer loop's angular window.
@@ -2842,7 +3096,7 @@ impl BrepModel {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use std::f64::consts::{FRAC_PI_2, PI};
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
     use super::super::topology::{CurveCircle, CurveLine};
 
@@ -3210,7 +3464,6 @@ mod tests {
     fn test_watertight_cylinder_edges() {
         // Create two faces on a cylinder sharing a circular edge.
         // This tests that curved edge discretization is shared.
-        use std::f64::consts::FRAC_PI_2;
 
         let mut model = BrepModel::new();
 
@@ -3939,5 +4192,322 @@ mod tests {
         }
         eprintln!("  watertight regressions: {pass}/{total} (brep_wt: {brep_wt}/{total})");
         assert_eq!(pass, total, "watertight regressions: {pass}/{total}");
+    }
+
+    /// Build a cylinder face outer loop and surface on `model`.
+    /// For full circles (`theta_end - theta_start >= TAU`), creates seam edges
+    /// at `theta_start`. Returns `(outer_loop_idx, surface_idx)`.
+    fn make_cylinder_face(
+        model: &mut BrepModel,
+        radius: f64,
+        height: f64,
+        theta_start: f64,
+        theta_end: f64,
+        inner_loops: Vec<usize>,
+    ) {
+        let c_bottom = model.add_curve(Curve::Circle(CurveCircle {
+            center: Point3::new(0.0, 0.0, 0.0),
+            axis: Vector3::z(),
+            x_axis: Vector3::x(),
+            radius,
+        }));
+        let c_top = model.add_curve(Curve::Circle(CurveCircle {
+            center: Point3::new(0.0, 0.0, height),
+            axis: Vector3::z(),
+            x_axis: Vector3::x(),
+            radius,
+        }));
+
+        let full_circle = (theta_end - theta_start) >= TAU - 1e-10;
+        let outer_loop = if full_circle {
+            let seam_theta = theta_start;
+            let seam_x = radius * seam_theta.cos();
+            let seam_y = radius * seam_theta.sin();
+            let v_bot = model.add_vertex(Point3::new(seam_x, seam_y, 0.0));
+            let v_top = model.add_vertex(Point3::new(seam_x, seam_y, height));
+
+            let c_seam_up = model.add_curve(Curve::Line(CurveLine {
+                origin: Point3::new(seam_x, seam_y, 0.0),
+                direction: Vector3::new(0.0, 0.0, height),
+            }));
+            let c_seam_down = model.add_curve(Curve::Line(CurveLine {
+                origin: Point3::new(seam_x, seam_y, height),
+                direction: Vector3::new(0.0, 0.0, -height),
+            }));
+
+            let e_bottom = model.add_edge(c_bottom, v_bot, v_bot, seam_theta, seam_theta + TAU);
+            let e_top = model.add_edge(c_top, v_top, v_top, seam_theta, seam_theta + TAU);
+            let e_seam_up = model.add_edge(c_seam_up, v_bot, v_top, 0.0, 1.0);
+            let e_seam_down = model.add_edge(c_seam_down, v_top, v_bot, 0.0, 1.0);
+
+            model.add_loop(vec![
+                OrientedEdge {
+                    edge: e_bottom,
+                    same_sense: true,
+                },
+                OrientedEdge {
+                    edge: e_seam_up,
+                    same_sense: true,
+                },
+                OrientedEdge {
+                    edge: e_top,
+                    same_sense: false,
+                },
+                OrientedEdge {
+                    edge: e_seam_down,
+                    same_sense: true,
+                },
+            ])
+        } else {
+            let v0 = model.add_vertex(Point3::new(
+                radius * theta_start.cos(),
+                radius * theta_start.sin(),
+                0.0,
+            ));
+            let v1 = model.add_vertex(Point3::new(
+                radius * theta_end.cos(),
+                radius * theta_end.sin(),
+                0.0,
+            ));
+            let v2 = model.add_vertex(Point3::new(
+                radius * theta_end.cos(),
+                radius * theta_end.sin(),
+                height,
+            ));
+            let v3 = model.add_vertex(Point3::new(
+                radius * theta_start.cos(),
+                radius * theta_start.sin(),
+                height,
+            ));
+
+            let c_line_start = model.add_curve(Curve::Line(CurveLine {
+                origin: model.vertices[v0].point,
+                direction: Vector3::new(0.0, 0.0, height),
+            }));
+            let c_line_end = model.add_curve(Curve::Line(CurveLine {
+                origin: model.vertices[v1].point,
+                direction: Vector3::new(0.0, 0.0, height),
+            }));
+
+            let e_bottom = model.add_edge(c_bottom, v0, v1, theta_start, theta_end);
+            let e_right = model.add_edge(c_line_end, v1, v2, 0.0, 1.0);
+            let e_top = model.add_edge(c_top, v2, v3, theta_end, theta_start + TAU);
+            let e_left = model.add_edge(c_line_start, v3, v0, 0.0, 1.0);
+
+            model.add_loop(vec![
+                OrientedEdge {
+                    edge: e_bottom,
+                    same_sense: true,
+                },
+                OrientedEdge {
+                    edge: e_right,
+                    same_sense: true,
+                },
+                OrientedEdge {
+                    edge: e_top,
+                    same_sense: true,
+                },
+                OrientedEdge {
+                    edge: e_left,
+                    same_sense: true,
+                },
+            ])
+        };
+
+        let cyl_surf = model.add_surface(Surface::Cylinder(Cylinder::new(
+            Point3::origin(),
+            Vector3::z(),
+            radius,
+        )));
+
+        model.add_face(cyl_surf, outer_loop, inner_loops, true);
+    }
+
+    /// Build a rectangular hole loop on a cylinder using arc + line edges.
+    /// Returns the loop index.
+    fn make_cylinder_rect_hole(
+        model: &mut BrepModel,
+        radius: f64,
+        theta_start: f64,
+        theta_end: f64,
+        z_bot: f64,
+        z_top: f64,
+    ) -> usize {
+        let hv0 = model.add_vertex(Point3::new(
+            radius * theta_start.cos(),
+            radius * theta_start.sin(),
+            z_bot,
+        ));
+        let hv1 = model.add_vertex(Point3::new(
+            radius * theta_end.cos(),
+            radius * theta_end.sin(),
+            z_bot,
+        ));
+        let hv2 = model.add_vertex(Point3::new(
+            radius * theta_end.cos(),
+            radius * theta_end.sin(),
+            z_top,
+        ));
+        let hv3 = model.add_vertex(Point3::new(
+            radius * theta_start.cos(),
+            radius * theta_start.sin(),
+            z_top,
+        ));
+
+        let hc_bottom = model.add_curve(Curve::Circle(CurveCircle {
+            center: Point3::new(0.0, 0.0, z_bot),
+            axis: Vector3::z(),
+            x_axis: Vector3::x(),
+            radius,
+        }));
+        let hc_top = model.add_curve(Curve::Circle(CurveCircle {
+            center: Point3::new(0.0, 0.0, z_top),
+            axis: Vector3::z(),
+            x_axis: Vector3::x(),
+            radius,
+        }));
+        let hc_line_start = model.add_curve(Curve::Line(CurveLine {
+            origin: model.vertices[hv0].point,
+            direction: Vector3::new(0.0, 0.0, z_top - z_bot),
+        }));
+        let hc_line_end = model.add_curve(Curve::Line(CurveLine {
+            origin: model.vertices[hv1].point,
+            direction: Vector3::new(0.0, 0.0, z_top - z_bot),
+        }));
+
+        let he_bottom = model.add_edge(hc_bottom, hv0, hv1, theta_start, theta_end);
+        let he_right = model.add_edge(hc_line_end, hv1, hv2, 0.0, 1.0);
+        let he_top = model.add_edge(hc_top, hv2, hv3, theta_end, theta_start + TAU);
+        let he_left = model.add_edge(hc_line_start, hv3, hv0, 0.0, 1.0);
+
+        model.add_loop(vec![
+            OrientedEdge {
+                edge: he_bottom,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: he_right,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: he_top,
+                same_sense: true,
+            },
+            OrientedEdge {
+                edge: he_left,
+                same_sense: true,
+            },
+        ])
+    }
+
+    #[test]
+    fn test_cylinder_hole_straddles_seam() {
+        // Full-circle cylinder with a small circular hole positioned at the
+        // angular seam boundary (near theta=0 / theta=2π). Before the fix,
+        // the global minimum_enclosing_arc could place the seam through the
+        // hole, causing CrossingFixedEdge errors in CDT.
+        let mut model = BrepModel::new();
+        let radius = 1.0;
+        let height = 2.0;
+
+        // Inner hole: small circle at theta ≈ 0 (near the natural 0/2π boundary),
+        // on the opposite side from the seam at theta=PI.
+        let hole_center_theta = 0.0;
+        let hole_h = 1.0;
+        let hole_angular_radius = 0.5; // ~28°
+        let n_hole = 12;
+        let mut hole_vertices = Vec::new();
+        for i in 0..n_hole {
+            let t = TAU * (i as f64) / (n_hole as f64);
+            let theta = hole_center_theta + hole_angular_radius * t.cos();
+            let h = hole_h + hole_angular_radius * t.sin();
+            hole_vertices.push(model.add_vertex(Point3::new(
+                radius * theta.cos(),
+                radius * theta.sin(),
+                h,
+            )));
+        }
+        let mut hole_edges = Vec::new();
+        for i in 0..n_hole {
+            let v_start = hole_vertices[i];
+            let v_end = hole_vertices[(i + 1) % n_hole];
+            let dir = model.vertices[v_end].point - model.vertices[v_start].point;
+            let c = model.add_curve(Curve::Line(CurveLine {
+                origin: model.vertices[v_start].point,
+                direction: dir,
+            }));
+            hole_edges.push(model.add_edge(c, v_start, v_end, 0.0, 1.0));
+        }
+        let inner_loop = model.add_loop(
+            hole_edges
+                .iter()
+                .map(|&e| OrientedEdge {
+                    edge: e,
+                    same_sense: true,
+                })
+                .collect(),
+        );
+
+        // Full-circle outer with seam at PI
+        make_cylinder_face(&mut model, radius, height, PI, PI + TAU, vec![inner_loop]);
+
+        let params = TesselationParams {
+            min_segments: 8,
+            max_segments: 256,
+            ..Default::default()
+        };
+        let result = model.tesselate(&params);
+        assert!(
+            !result.faces.is_empty(),
+            "tessellation should produce triangles"
+        );
+
+        for v in &result.vertices {
+            let r = nalgebra::Vector2::new(v.x, v.y).norm();
+            assert_relative_eq!(r, radius, epsilon = 0.01);
+        }
+    }
+
+    #[test]
+    fn test_cylinder_large_hole() {
+        // Partial cylinder face (~300°) with a large rectangular hole spanning ~200°.
+        // Tests "large hole but no straddling" case: both outer and inner contours
+        // have substantial angular extent but neither should straddle after
+        // find_contour_safe_base places the seam in their shared gap.
+        let mut model = BrepModel::new();
+        let radius = 1.0;
+        let height = 2.0;
+
+        let theta_start = PI / 6.0; // 30°
+        let theta_end = 11.0 * PI / 6.0; // 330°
+
+        // Inner hole: rectangular region from 60° to 260°, height 0.5 to 1.5
+        let inner_loop =
+            make_cylinder_rect_hole(&mut model, radius, PI / 3.0, 13.0 * PI / 9.0, 0.5, 1.5);
+
+        make_cylinder_face(
+            &mut model,
+            radius,
+            height,
+            theta_start,
+            theta_end,
+            vec![inner_loop],
+        );
+
+        let params = TesselationParams {
+            min_segments: 8,
+            max_segments: 256,
+            ..Default::default()
+        };
+        let result = model.tesselate(&params);
+        assert!(
+            !result.faces.is_empty(),
+            "tessellation should produce triangles"
+        );
+
+        for v in &result.vertices {
+            let r = nalgebra::Vector2::new(v.x, v.y).norm();
+            assert_relative_eq!(r, radius, epsilon = 0.01);
+        }
     }
 }
