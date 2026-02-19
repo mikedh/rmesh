@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(result[0], None);
     }
 
-    #[cfg(feature = "bench")]
+    #[cfg(test)]
     #[test]
     #[ignore]
     fn bench_project_featuretype() {

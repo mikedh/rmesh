@@ -274,7 +274,7 @@ impl CurveBSpline {
         debug_assert!(
             weights
                 .as_ref()
-                .map_or(true, |w| w.len() == control_points.len()),
+                .is_none_or(|w| w.len() == control_points.len()),
             "weights length mismatch"
         );
         debug_assert!(
@@ -570,7 +570,7 @@ impl SurfaceBSpline {
         debug_assert!(
             weights
                 .as_ref()
-                .map_or(true, |w| w.len() == control_points.len()
+                .is_none_or(|w| w.len() == control_points.len()
                     && w.iter().all(|row| row.len() == control_points[0].len())),
             "weights dimensions mismatch"
         );

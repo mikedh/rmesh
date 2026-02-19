@@ -17,7 +17,7 @@ pub mod image;
 pub mod mesh;
 pub mod path;
 pub mod project;
-#[cfg(feature = "render")]
+#[cfg(feature = "wgpu")]
 pub mod render;
 pub mod resolvers;
 pub mod scene;

@@ -886,7 +886,7 @@ impl Trimesh {
             if grouping.indices.len() == orig_face_count {
                 grouping
                     .indices
-                    .extend(std::iter::repeat(UNSET).take(fill_count));
+                    .extend(std::iter::repeat_n(UNSET, fill_count));
             }
         }
 

@@ -192,15 +192,15 @@ impl std::fmt::Display for Timer {
     }
 }
 
-#[cfg(feature = "bench")]
-pub struct Profiler {
+#[cfg(test)]
+pub(crate) struct Profiler {
     guard: Option<pprof::ProfilerGuard<'static>>,
     report: Option<pprof::Report>,
 }
 
-#[cfg(feature = "bench")]
+#[cfg(test)]
 impl Profiler {
-    pub fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let guard = pprof::ProfilerGuardBuilder::default()
             .frequency(4000)
             .blocklist(&["libc", "libgcc", "pthread", "vdso"])
@@ -212,17 +212,17 @@ impl Profiler {
         }
     }
 
-    pub fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if let Some(guard) = self.guard.take() {
             self.report = guard.report().build().ok();
         }
     }
 }
 
-#[cfg(feature = "bench")]
+#[cfg(test)]
 impl Profiler {
     /// Write a flamegraph SVG to the given path.
-    pub fn flamegraph(&self, path: &std::path::Path) {
+    pub(crate) fn flamegraph(&self, path: &std::path::Path) {
         if let Some(report) = &self.report {
             let file = std::fs::File::create(path).unwrap();
             report.flamegraph(file).unwrap();
@@ -231,7 +231,7 @@ impl Profiler {
     }
 }
 
-#[cfg(feature = "bench")]
+#[cfg(test)]
 impl std::fmt::Display for Profiler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let report = match &self.report {
@@ -292,7 +292,7 @@ impl std::fmt::Display for Profiler {
     }
 }
 
-#[cfg(feature = "bench")]
+#[cfg(test)]
 impl std::fmt::Debug for Profiler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)

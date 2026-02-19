@@ -778,7 +778,7 @@ pub fn convex_hull_3d(points: &[Point3<f64>]) -> Result<Vec<[usize; 3]>> {
     hull.build_hull();
     let faces = hull.to_result();
 
-    #[cfg(all(test, not(feature = "bench")))]
+    #[cfg(test)]
     assert!(
         super::is_hull_valid_3d(points, &faces),
         "convex_hull_3d: internal validation failed"

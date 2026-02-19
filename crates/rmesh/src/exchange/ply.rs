@@ -44,19 +44,18 @@ impl PlyType {
     }
 
     /// Size in bytes for binary reading.
-    fn size(&self) -> usize {
+    fn size(self) -> usize {
         match self {
             PlyType::Char | PlyType::UChar => 1,
             PlyType::Short | PlyType::UShort => 2,
-            PlyType::Int | PlyType::UInt => 4,
-            PlyType::Float => 4,
+            PlyType::Int | PlyType::UInt | PlyType::Float => 4,
             PlyType::Double => 8,
         }
     }
 
     /// Read a single value from bytes at the given offset with the given endianness.
     /// Returns the value as f64 and the number of bytes consumed.
-    fn read_binary(&self, data: &[u8], offset: usize, big_endian: bool) -> Result<(f64, usize)> {
+    fn read_binary(self, data: &[u8], offset: usize, big_endian: bool) -> Result<(f64, usize)> {
         let size = self.size();
         if offset + size > data.len() {
             return Err(anyhow!("Unexpected end of binary PLY data"));
@@ -67,17 +66,21 @@ impl PlyType {
         macro_rules! read_endian {
             ($ty:ty, $bytes:expr, $big:expr) => {{
                 let arr = <[u8; std::mem::size_of::<$ty>()]>::try_from($bytes).unwrap();
-                (if $big {
+                f64::from(if $big {
                     <$ty>::from_be_bytes(arr)
                 } else {
                     <$ty>::from_le_bytes(arr)
-                }) as f64
+                })
             }};
         }
 
         let val = match self {
-            PlyType::Char => b[0] as i8 as f64,
-            PlyType::UChar => b[0] as f64,
+            PlyType::Char => {
+                #[allow(clippy::cast_possible_wrap)]
+                let v = b[0] as i8;
+                f64::from(v)
+            }
+            PlyType::UChar => f64::from(b[0]),
             PlyType::Short => read_endian!(i16, b, big_endian),
             PlyType::UShort => read_endian!(u16, b, big_endian),
             PlyType::Int => read_endian!(i32, b, big_endian),
@@ -89,19 +92,20 @@ impl PlyType {
     }
 
     /// Write a value for ASCII output, using integer format for integer types.
-    fn write_ascii(&self, val: f64, out: &mut String) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn write_ascii(self, val: f64, out: &mut String) {
         use std::fmt::Write;
         match self {
             PlyType::Char | PlyType::Short | PlyType::Int => write!(out, "{}", val as i64).unwrap(),
             PlyType::UChar | PlyType::UShort | PlyType::UInt => {
-                write!(out, "{}", val as u64).unwrap()
+                write!(out, "{}", val as u64).unwrap();
             }
             PlyType::Float | PlyType::Double => write!(out, "{}", val).unwrap(),
         }
     }
 
     /// PLY type name string.
-    fn name(&self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             PlyType::Char => "char",
             PlyType::UChar => "uchar",
@@ -132,8 +136,7 @@ enum PropertyDef {
 impl PropertyDef {
     fn name(&self) -> &str {
         match self {
-            PropertyDef::Scalar { name, .. } => name,
-            PropertyDef::List { name, .. } => name,
+            PropertyDef::Scalar { name, .. } | PropertyDef::List { name, .. } => name,
         }
     }
 }
@@ -176,7 +179,7 @@ impl Element {
         for row in &self.data {
             match &row[idx] {
                 PropertyData::Scalar(v) => col.push(*v),
-                _ => return None,
+                PropertyData::List(_) => return None,
             }
         }
         Some(col)
@@ -189,7 +192,7 @@ impl Element {
         for row in &self.data {
             match &row[idx] {
                 PropertyData::List(v) => col.push(v.clone()),
-                _ => return None,
+                PropertyData::Scalar(_) => return None,
             }
         }
         Some(col)
@@ -198,7 +201,7 @@ impl Element {
 
 /// The full PLY model in native representation.
 pub struct PlyModel {
-    format: PlyFormat,
+    _format: PlyFormat,
     comments: Vec<String>,
     elements: Vec<Element>,
 }
@@ -233,7 +236,7 @@ impl PlyModel {
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("");
-        if first_line.trim().to_ascii_lowercase() != "ply" {
+        if !first_line.trim().eq_ignore_ascii_case("ply") {
             return Err(anyhow!("PLY file does not start with 'ply' magic"));
         }
 
@@ -249,9 +252,6 @@ impl PlyModel {
 
             let parts: Vec<&str> = line.split_whitespace().collect();
             match parts.first().map(|s| s.to_ascii_lowercase()).as_deref() {
-                Some("ply") => {
-                    // magic line, already validated above
-                }
                 Some("format") => {
                     if parts.len() < 3 {
                         return Err(anyhow!("Invalid format line: `{}`", line));
@@ -294,7 +294,7 @@ impl PlyModel {
                         .last_mut()
                         .ok_or_else(|| anyhow!("Property before any element definition"))?;
 
-                    if parts.len() >= 5 && parts[1].to_ascii_lowercase() == "list" {
+                    if parts.len() >= 5 && parts[1].eq_ignore_ascii_case("list") {
                         // property list <count_type> <value_type> <name>
                         let count_type = PlyType::from_str(parts[2])?;
                         let value_type = PlyType::from_str(parts[3])?;
@@ -331,7 +331,7 @@ impl PlyModel {
         };
 
         Ok(PlyModel {
-            format,
+            _format: format,
             comments,
             elements,
         })
@@ -422,6 +422,7 @@ impl PlyModel {
                     .enumerate()
                     .map(|(i, ((&r, &g), &b))| {
                         let alpha = a.as_ref().map_or(255.0, |a| a[i]);
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         Vector4::new(r as u8, g as u8, b as u8, alpha as u8)
                     })
                     .collect::<Vec<_>>(),
@@ -481,13 +482,13 @@ impl PlyModel {
         )?;
 
         // Load texture from comment if resolver available
-        if let (Some(tex_file), Some(res)) = (self.texture_file(), resolver) {
-            if let Ok(bytes) = res.resolve(tex_file) {
-                mesh.materials.push(Material::Simple(SimpleMaterial {
-                    diffuse_texture: Some(LazyImage::new(bytes)),
-                    ..Default::default()
-                }));
-            }
+        if let (Some(tex_file), Some(res)) = (self.texture_file(), resolver)
+            && let Ok(bytes) = res.resolve(tex_file)
+        {
+            mesh.materials.push(Material::Simple(SimpleMaterial {
+                diffuse_texture: Some(LazyImage::new(bytes)),
+                ..Default::default()
+            }));
         }
 
         // Set load source
@@ -602,10 +603,10 @@ impl PlyModel {
             }
             if has_colors {
                 let c = &mesh.attributes_vertex.colors[0][i];
-                row.push(PropertyData::Scalar(c.x as f64));
-                row.push(PropertyData::Scalar(c.y as f64));
-                row.push(PropertyData::Scalar(c.z as f64));
-                row.push(PropertyData::Scalar(c.w as f64));
+                row.push(PropertyData::Scalar(f64::from(c.x)));
+                row.push(PropertyData::Scalar(f64::from(c.y)));
+                row.push(PropertyData::Scalar(f64::from(c.z)));
+                row.push(PropertyData::Scalar(f64::from(c.w)));
             }
             vertex_data.push(row);
         }
@@ -634,7 +635,7 @@ impl PlyModel {
             .collect();
 
         PlyModel {
-            format: PlyFormat::Ascii,
+            _format: PlyFormat::Ascii,
             comments: Vec::new(),
             elements: vec![
                 Element {
@@ -658,24 +659,24 @@ impl PlyModel {
         out.push_str("format ascii 1.0\n");
 
         for comment in &self.comments {
-            write!(out, "comment {}\n", comment).unwrap();
+            writeln!(out, "comment {}", comment).unwrap();
         }
 
         for elem in &self.elements {
-            write!(out, "element {} {}\n", elem.def.name, elem.def.count).unwrap();
+            writeln!(out, "element {} {}", elem.def.name, elem.def.count).unwrap();
             for prop in &elem.def.properties {
                 match prop {
                     PropertyDef::Scalar { name, dtype } => {
-                        write!(out, "property {} {}\n", dtype.name(), name).unwrap();
+                        writeln!(out, "property {} {}", dtype.name(), name).unwrap();
                     }
                     PropertyDef::List {
                         name,
                         count_type,
                         value_type,
                     } => {
-                        write!(
+                        writeln!(
                             out,
-                            "property list {} {} {}\n",
+                            "property list {} {} {}",
                             count_type.name(),
                             value_type.name(),
                             name
@@ -729,16 +730,23 @@ impl PlyModel {
     }
 }
 
+/// Export a Trimesh as a PLY ASCII string.
+pub fn export_ply(mesh: &Trimesh) -> String {
+    PlyModel::from_mesh(mesh).to_ply_string()
+}
+
 /// Find the byte offset immediately after the "end_header\n" line.
 fn find_header_end(data: &[u8]) -> Option<usize> {
     let needle = b"end_header";
     let i = data.windows(needle.len()).position(|w| w == needle)?;
     let after = i + needle.len();
     // Skip \r\n or \n
-    if after < data.len() && data[after] == b'\r' {
-        if after + 1 < data.len() && data[after + 1] == b'\n' {
-            return Some(after + 2);
-        }
+    if after < data.len()
+        && data[after] == b'\r'
+        && after + 1 < data.len()
+        && data[after + 1] == b'\n'
+    {
+        return Some(after + 2);
     }
     if after < data.len() && data[after] == b'\n' {
         return Some(after + 1);
@@ -848,6 +856,7 @@ fn parse_binary_body(
                         if count_f < 0.0 || count_f.is_nan() {
                             return Err(anyhow!("Invalid binary list count: {}", count_f));
                         }
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let count = count_f as usize;
                         let max_count = (body.len() - offset) / value_type.size();
                         if count > max_count {
@@ -879,13 +888,16 @@ fn parse_binary_body(
     Ok(elements)
 }
 
+type TriFaces = (Vec<[usize; 3]>, Option<Vec<[Vector2<f64>; 3]>>);
+
 /// Triangulate face index lists into triangle faces, optionally carrying
 /// per-face texcoord lists through the triangulation.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn triangulate_faces(
     index_lists: &[Vec<f64>],
     texcoord_lists: Option<&[Vec<f64>]>,
     vertices: &[Point3<f64>],
-) -> Result<(Vec<[usize; 3]>, Option<Vec<[Vector2<f64>; 3]>>)> {
+) -> Result<TriFaces> {
     let mut triangulator = Triangulator::new();
     let mut faces = Vec::new();
     let has_texcoords = texcoord_lists.is_some();
@@ -928,7 +940,7 @@ fn triangulate_faces(
 
         // Compute local-index triangles for the polygon
         let local_tris: Vec<[usize; 3]> = match n {
-            0 | 1 | 2 => Vec::new(),
+            0..=2 => Vec::new(),
             3 => vec![[0, 1, 2]],
             4 => vec![[0, 1, 2], [0, 2, 3]],
             _ => triangulator.triangulate_3d(&indices, &[], vertices, true, true)?,
@@ -951,6 +963,14 @@ fn triangulate_faces(
     Ok((faces, result_uvs))
 }
 
+type SplitResult = (
+    Vec<Point3<f64>>,
+    Vec<[usize; 3]>,
+    Vec<Vector2<f64>>,
+    Option<Vec<Vector3<f64>>>,
+    Option<Vec<Vector4<u8>>>,
+);
+
 /// Split vertices so that each unique (vertex, UV) pair gets its own index.
 /// This converts per-face UVs into per-vertex UVs suitable for indexed rendering.
 fn split_vertices_by_face_uvs(
@@ -959,13 +979,7 @@ fn split_vertices_by_face_uvs(
     face_uvs: &[[Vector2<f64>; 3]],
     normals: Option<&[Vector3<f64>]>,
     colors: Option<&[Vector4<u8>]>,
-) -> (
-    Vec<Point3<f64>>,
-    Vec<[usize; 3]>,
-    Vec<Vector2<f64>>,
-    Option<Vec<Vector3<f64>>>,
-    Option<Vec<Vector4<u8>>>,
-) {
+) -> SplitResult {
     use std::collections::HashMap;
 
     /// Canonicalize f64 bits so ±0.0 and NaN variants hash identically.
@@ -1045,7 +1059,7 @@ mod tests {
         }
 
         let ply = load_ply("fuze_ascii.ply");
-        assert_eq!(ply.format, PlyFormat::Ascii);
+        assert_eq!(ply._format, PlyFormat::Ascii);
 
         let vertex = ply
             .elements
@@ -1078,7 +1092,7 @@ mod tests {
         }
 
         let ply = load_ply("plane.ply");
-        assert_eq!(ply.format, PlyFormat::Ascii);
+        assert_eq!(ply._format, PlyFormat::Ascii);
 
         let vertex = ply
             .elements
@@ -1107,7 +1121,7 @@ mod tests {
         }
 
         let ply = load_ply("tet.ply");
-        assert_eq!(ply.format, PlyFormat::BinaryLittleEndian);
+        assert_eq!(ply._format, PlyFormat::BinaryLittleEndian);
 
         let mesh = ply.to_mesh(None).unwrap();
         assert_eq!(mesh.vertices.len(), 4);
