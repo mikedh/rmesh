@@ -2,6 +2,7 @@ use nalgebra::Point3;
 
 use crate::boundary::BrepModel;
 use crate::bounds::Bounds3;
+#[cfg(feature = "cad")]
 use crate::creation::feature::FeatureModel;
 use crate::mesh::Trimesh;
 use crate::path::{Path2D, Path3D};
@@ -34,6 +35,7 @@ pub enum Geometry {
     /// A 3D path (curves in space)
     Path3D(Path3D),
     /// A feature-based CAD model
+    #[cfg(feature = "cad")]
     Feature(Box<FeatureModel>),
     /// A point cloud
     PointCloud(PointCloud),
@@ -52,6 +54,7 @@ impl Geometry {
             Geometry::Path2D(path) => path.as_ref().bounds().map(Bounds3::from_bounds2),
             Geometry::Path3D(path) => path.bounds(),
             Geometry::PointCloud(pc) => pc.bounds(),
+            #[cfg(feature = "cad")]
             Geometry::Feature(_) => None,
             Geometry::Brep(brep) => brep.bounds(),
         }

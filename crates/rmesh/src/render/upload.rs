@@ -260,6 +260,7 @@ pub fn upload_scene(
                 Geometry::PointCloud(pc) => {
                     upload_point_cloud(device, pc, world_transform, &mut points, &mut bounds);
                 }
+                #[cfg(feature = "cad")]
                 Geometry::Feature(_) => {
                     // FeatureModel not directly renderable; would need meshing first.
                 }
@@ -306,6 +307,7 @@ pub fn upload_scene(
                 Geometry::PointCloud(pc) => {
                     upload_point_cloud(device, pc, &identity, &mut points, &mut bounds);
                 }
+                #[cfg(feature = "cad")]
                 Geometry::Feature(_) => {}
                 Geometry::Brep(brep) => {
                     // Tessellate BREP to mesh for rendering

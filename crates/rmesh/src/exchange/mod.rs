@@ -7,7 +7,9 @@ mod stl;
 
 use anyhow::Result;
 
+#[cfg(feature = "cad")]
 use crate::creation::feature::FeatureModel;
+#[cfg(feature = "cad")]
 use crate::creation::feature::exchange::{FeatureFormat, load_feature_model};
 use crate::geometry::Geometry;
 use crate::resolvers::Resolver;
@@ -15,6 +17,7 @@ use crate::scene::Scene;
 use crate::serialize::RmeshSerializable;
 
 pub use crate::exchange::gltf::GltfLoader;
+pub use crate::exchange::ply::export_ply;
 use crate::exchange::obj::ObjMesh;
 use crate::exchange::ply::PlyModel;
 use crate::exchange::stl::BinaryStl;
@@ -31,24 +34,36 @@ pub use crate::resolvers::{FileResolver, InMemoryResolver, ZipResolver};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileType {
     /// Binary or ASCII triangle soup
+    #[serde(rename = "stl")]
     STL,
     /// ASCII format with materials and groups
+    #[serde(rename = "obj")]
     OBJ,
     /// Binary format with ASCII header
+    #[serde(rename = "ply")]
     PLY,
     /// glTF 2.0 JSON
+    #[serde(rename = "gltf")]
     GLTF,
     /// glTF 2.0 Binary
+    #[serde(rename = "glb")]
     GLB,
     /// SolidWorks Part file (feature-based)
+    #[cfg(feature = "cad")]
+    #[serde(rename = "sldprt")]
     SLDPRT,
     /// rmesh CAD format (binary or JSON)
+    #[cfg(feature = "cad")]
+    #[serde(rename = "rcad")]
     RCAD,
     /// STEP / ISO 10303-21 boundary representation
+    #[serde(rename = "step")]
     STEP,
     /// Collada DAE (plain XML)
+    #[serde(rename = "dae")]
     DAE,
     /// Collada ZAE (ZIP-compressed DAE)
+    #[serde(rename = "zae")]
     ZAE,
 }
 
@@ -65,7 +80,9 @@ impl FileType {
             "ply" => Ok(FileType::PLY),
             "gltf" => Ok(FileType::GLTF),
             "glb" => Ok(FileType::GLB),
+            #[cfg(feature = "cad")]
             "sldprt" => Ok(FileType::SLDPRT),
+            #[cfg(feature = "cad")]
             "rcad" => Ok(FileType::RCAD),
             "step" | "stp" => Ok(FileType::STEP),
             "dae" | "collada" => Ok(FileType::DAE),
@@ -211,10 +228,12 @@ pub fn load(
             let loader = GltfLoader::from_gltf(data, resolver)?;
             return loader.to_scene();
         }
+        #[cfg(feature = "cad")]
         FileType::SLDPRT => {
             let model = load_feature_model(data, FeatureFormat::Sldprt)?;
             ("feature".to_string(), Geometry::Feature(Box::new(model)))
         }
+        #[cfg(feature = "cad")]
         FileType::RCAD => {
             let model = FeatureModel::from_bytes(data)?;
             ("feature".to_string(), Geometry::Feature(Box::new(model)))
@@ -274,23 +293,26 @@ mod tests {
         assert_eq!(FileType::from_extension(".gltf").unwrap(), FileType::GLTF);
 
         // SLDPRT variations
-        assert_eq!(
-            FileType::from_extension("sldprt").unwrap(),
-            FileType::SLDPRT
-        );
-        assert_eq!(
-            FileType::from_extension("SLDPRT").unwrap(),
-            FileType::SLDPRT
-        );
-        assert_eq!(
-            FileType::from_extension(".sldprt").unwrap(),
-            FileType::SLDPRT
-        );
+        #[cfg(feature = "cad")]
+        {
+            assert_eq!(
+                FileType::from_extension("sldprt").unwrap(),
+                FileType::SLDPRT
+            );
+            assert_eq!(
+                FileType::from_extension("SLDPRT").unwrap(),
+                FileType::SLDPRT
+            );
+            assert_eq!(
+                FileType::from_extension(".sldprt").unwrap(),
+                FileType::SLDPRT
+            );
 
-        // RCAD variations
-        assert_eq!(FileType::from_extension("rcad").unwrap(), FileType::RCAD);
-        assert_eq!(FileType::from_extension("RCAD").unwrap(), FileType::RCAD);
-        assert_eq!(FileType::from_extension(".rcad").unwrap(), FileType::RCAD);
+            // RCAD variations
+            assert_eq!(FileType::from_extension("rcad").unwrap(), FileType::RCAD);
+            assert_eq!(FileType::from_extension("RCAD").unwrap(), FileType::RCAD);
+            assert_eq!(FileType::from_extension(".rcad").unwrap(), FileType::RCAD);
+        }
 
         // STEP variations
         assert_eq!(FileType::from_extension("step").unwrap(), FileType::STEP);

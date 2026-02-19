@@ -988,8 +988,7 @@ fn detect_uv_crossings(
     for a in 0..inner_uvs_list.len() {
         let (uvs_a, pool_a) = &inner_uvs_list[a];
         let na = uvs_a.len();
-        for b in (a + 1)..inner_uvs_list.len() {
-            let (uvs_b, pool_b) = &inner_uvs_list[b];
+        for (uvs_b, pool_b) in &inner_uvs_list[(a + 1)..] {
             let nb = uvs_b.len();
             for i in 0..na {
                 let ni = (i + 1) % na;
@@ -1020,7 +1019,7 @@ struct FaceUvContours {
     vertex_loop_vertex: Option<usize>,
     /// Index of the loop used as effective outer (may differ from face.outer_loop
     /// when the true outer loop is a vertex loop).
-    effective_outer_idx: usize,
+    _effective_outer_idx: usize,
 }
 
 /// Compute UV contours for a face, handling vertex loop swapping,
@@ -1204,7 +1203,7 @@ fn compute_face_uv_contours(
         outer_pool: outer_pool_indices,
         inner_list,
         vertex_loop_vertex,
-        effective_outer_idx,
+        _effective_outer_idx: effective_outer_idx,
     })
 }
 
@@ -1241,37 +1240,6 @@ fn closest_polygon_edge(point: &Point2<f64>, polygon: &[Point2<f64>]) -> (usize,
 // UV coordinate utilities
 // ============================================================================
 
-/// Unwrap angular coordinates in a polygon to avoid discontinuities at ±π.
-///
-/// For surfaces with angular parametrization (cylinder, cone, sphere, torus),
-/// the u coordinate (theta/longitude) can jump from π to -π or vice versa.
-/// This creates self-intersecting polygons in UV space that triangulators can't handle.
-///
-/// Unwrap a single angular coordinate sequence to remove discontinuities.
-///
-/// Uses `period / 2.0` as the jump threshold and `period` as the shift amount.
-/// This generalizes the previous hardcoded π / 2π to work with any periodic domain.
-fn unwrap_angular_sequence(values: impl Iterator<Item = f64>, out: &mut [f64], period: f64) {
-    let half = period / 2.0;
-
-    let mut offset = 0.0;
-    let mut prev = None;
-
-    for (i, val) in values.enumerate() {
-        let curr = val + offset;
-        if let Some(p) = prev {
-            let diff = curr - p;
-            if diff > half {
-                offset -= period;
-            } else if diff < -half {
-                offset += period;
-            }
-        }
-        out[i] = val + offset;
-        prev = Some(out[i]);
-    }
-}
-
 /// Unwrap angular sequence using a larger threshold (`0.8 * period`).
 ///
 /// After `minimum_enclosing_arc` + `window_angle` places all UVs in
@@ -1304,15 +1272,6 @@ fn unwrap_windowed_sequence(values: impl Iterator<Item = f64>, out: &mut [f64], 
 }
 
 impl Surface {
-    /// Unwrap UV coordinates to remove angular discontinuities.
-    /// Dispatches to the appropriate unwrapping function based on surface type.
-    fn unwrap_uvs(&self, uvs: &mut [Point2<f64>]) {
-        let (u_period, v_period) = self.angular_period();
-        if u_period.is_some() || v_period.is_some() {
-            unwrap_angular_coords(uvs, u_period, v_period);
-        }
-    }
-
     /// Unwrap UV coordinates with a wider threshold (0.8 * period).
     ///
     /// Use this after `minimum_enclosing_arc` + `window_angle` has already
@@ -1352,26 +1311,6 @@ impl Surface {
             let uv_mid = uv_a.lerp(uv_b, 0.5);
             let p_mid = self.evaluate(uv_mid.x, uv_mid.y);
             (uv_mid, p_mid)
-        }
-    }
-}
-
-fn unwrap_angular_coords(uvs: &mut [Point2<f64>], u_period: Option<f64>, v_period: Option<f64>) {
-    if uvs.len() < 2 {
-        return;
-    }
-
-    let mut buf: Vec<f64> = vec![0.0; uvs.len()];
-    if let Some(period) = u_period {
-        unwrap_angular_sequence(uvs.iter().map(|p| p.x), &mut buf, period);
-        for (i, uv) in uvs.iter_mut().enumerate() {
-            uv.x = buf[i];
-        }
-    }
-    if let Some(period) = v_period {
-        unwrap_angular_sequence(uvs.iter().map(|p| p.y), &mut buf, period);
-        for (i, uv) in uvs.iter_mut().enumerate() {
-            uv.y = buf[i];
         }
     }
 }
@@ -1643,12 +1582,11 @@ fn triangulate_face_robust_pts(
             .collect();
         let vertices: Vec<Point2<f64>> = pts.iter().map(|&(x, y)| Point2::new(x, y)).collect();
         let mut tri = Triangulator::new();
-        let result = match tri.triangulate_2d(&exterior, &interiors, &vertices, false) {
-            Ok(r) => r,
-            Err(_) => {
-                earcut_empty = true;
-                vec![]
-            }
+        let result = if let Ok(r) = tri.triangulate_2d(&exterior, &interiors, &vertices, false) {
+            r
+        } else {
+            earcut_empty = true;
+            vec![]
         };
         if !result.is_empty() && contours_complete_with(&result, &expected) {
             let mut result = result;
@@ -1697,6 +1635,7 @@ fn triangulate_face_robust_pts(
 /// Tessellate a single face independently. New vertices are stored in a local
 /// buffer with sentinel pool indices (`sentinel_base + i`), to be rewritten
 /// during the serial merge phase.
+#[allow(clippy::too_many_arguments)]
 fn tessellate_face(
     face_idx: usize,
     model: &BrepModel,
@@ -2134,31 +2073,31 @@ impl<'a> ShellTessellator<'a> {
         // Line edges on ruled surfaces along the generator direction have zero
         // chord error — no subdivision needed. This also helps adjacent planar
         // faces that share these edges, reducing their CDT constraint count.
-        if matches!(curve, Curve::Line(_)) {
-            if let Some(uses) = self.edge_adjacency.get(&edge_idx) {
-                let p_start = curve.evaluate(edge.t_start);
-                let p_end = curve.evaluate(edge.t_end);
-                let tangent = (p_end - p_start).normalize();
+        if matches!(curve, Curve::Line(_))
+            && let Some(uses) = self.edge_adjacency.get(&edge_idx)
+        {
+            let p_start = curve.evaluate(edge.t_start);
+            let p_end = curve.evaluate(edge.t_end);
+            let tangent = (p_end - p_start).normalize();
 
-                let all_zero = uses.iter().all(|eu| {
-                    let face = &self.model.faces[eu.face_idx];
-                    let surface = &self.model.face_surfaces[face.surface];
-                    match surface {
-                        Surface::Plane(_) => true,
-                        Surface::Cylinder(c) => tangent.dot(&c.axis_unit()).abs() > 0.99,
-                        Surface::Cone(c) => {
-                            let t_mid = (edge.t_start + edge.t_end) / 2.0;
-                            let p_mid = curve.evaluate(t_mid);
-                            let generator = (p_mid - c.apex).normalize();
-                            tangent.dot(&generator).abs() > 0.99
-                        }
-                        _ => false,
+            let all_zero = uses.iter().all(|eu| {
+                let face = &self.model.faces[eu.face_idx];
+                let surface = &self.model.face_surfaces[face.surface];
+                match surface {
+                    Surface::Plane(_) => true,
+                    Surface::Cylinder(c) => tangent.dot(&c.axis_unit()).abs() > 0.99,
+                    Surface::Cone(c) => {
+                        let t_mid = (edge.t_start + edge.t_end) / 2.0;
+                        let p_mid = curve.evaluate(t_mid);
+                        let generator = (p_mid - c.apex).normalize();
+                        tangent.dot(&generator).abs() > 0.99
                     }
-                });
-
-                if all_zero {
-                    return 1;
+                    _ => false,
                 }
+            });
+
+            if all_zero {
+                return 1;
             }
         }
 
@@ -2291,11 +2230,10 @@ impl<'a> ShellTessellator<'a> {
             let mut next_dirty: HashSet<usize> = HashSet::new();
             for (pool_a, pool_b) in &edges_to_refine {
                 if let Some(brep_edge_idx) = self.refine_edge(*pool_a, *pool_b, MIDPOINTS_PER_EDGE)
+                    && let Some(uses) = self.edge_adjacency.get(&brep_edge_idx)
                 {
-                    if let Some(uses) = self.edge_adjacency.get(&brep_edge_idx) {
-                        for eu in uses {
-                            next_dirty.insert(eu.face_idx);
-                        }
+                    for eu in uses {
+                        next_dirty.insert(eu.face_idx);
                     }
                 }
             }
@@ -2342,12 +2280,9 @@ impl<'a> ShellTessellator<'a> {
     /// between `pool_a` and `pool_b`. This splits one edge into `n_midpoints + 1`
     /// sub-segments, making UV contours follow the 3D curve more closely.
     fn refine_edge(&mut self, pool_a: usize, pool_b: usize, n_midpoints: usize) -> Option<usize> {
-        let Some(&brep_edge_idx) = self
+        let &brep_edge_idx = self
             .pool_edge_to_brep
-            .get(&(pool_a.min(pool_b), pool_a.max(pool_b)))
-        else {
-            return None;
-        };
+            .get(&(pool_a.min(pool_b), pool_a.max(pool_b)))?;
 
         let edge = &self.model.edges[brep_edge_idx];
         let curve = &self.model.curves[edge.curve];
@@ -2723,7 +2658,9 @@ impl<'a> ShellTessellator<'a> {
 
         // Safety net: fill any remaining boundary holes from tessellation defects.
         // Only keep the filled result if it actually improves watertightness.
-        let mesh = if !mesh.is_watertight() {
+        let mesh = if mesh.is_watertight() {
+            mesh
+        } else {
             let filled = mesh.fill_holes();
             if filled.is_watertight() || filled.edges_boundary().len() < mesh.edges_boundary().len()
             {
@@ -2731,8 +2668,6 @@ impl<'a> ShellTessellator<'a> {
             } else {
                 mesh
             }
-        } else {
-            mesh
         };
 
         // Sympathy defect detection: a face is a sympathy defect if it used a

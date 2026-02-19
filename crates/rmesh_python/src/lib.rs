@@ -1,6 +1,7 @@
 mod feature;
 mod mesh;
 mod scene;
+mod viewer;
 
 pub use mesh::{
     PyFaceAttributes, PyGrouping, PyGroupingCollection, PyPath2D, PyPath3D, PyPolygon2D, PyTrimesh,
@@ -33,6 +34,9 @@ fn rmesh(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Feature submodule
     feature::register_feature_module(m)?;
+
+    // Viewer functions
+    viewer::register_viewer(m)?;
 
     Ok(())
 }

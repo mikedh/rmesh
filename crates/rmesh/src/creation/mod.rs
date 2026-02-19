@@ -6,6 +6,7 @@
 //! - Plane fitting and projection
 //! - Feature-based CAD system
 
+#[cfg(feature = "cad")]
 pub mod feature;
 
 use anyhow::Result;

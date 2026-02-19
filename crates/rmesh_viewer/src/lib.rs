@@ -2,8 +2,6 @@ mod app;
 mod app2d;
 pub(crate) mod gpu;
 pub(crate) mod input;
-#[cfg(feature = "python")]
-mod python;
 mod viewer_thread;
 
 use anyhow::Result;

@@ -341,6 +341,7 @@ mod tests {
     }
 
     /// Build spiked cylinder via FeatureModel + FidgetBackend.
+    #[cfg(feature = "cad")]
     fn spiked_cylinder_mesh() -> crate::mesh::Trimesh {
         use crate::creation::feature::FeatureBackend;
         use crate::creation::feature::{
@@ -378,6 +379,7 @@ mod tests {
 
     // ── Integration Tests ───────────────────────────────────────────────
 
+    #[cfg(feature = "cad")]
     #[test]
     fn test_decompose_spiked_cylinder() {
         let (dev, queue) = match crate::voxel::request_device() {

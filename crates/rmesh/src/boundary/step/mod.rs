@@ -353,10 +353,10 @@ fn convert_to_scene_flat<'a>(step: &'a StepFile<'a>) -> Result<Scene, StepError>
 
     // Second pass: collect work items, skipping MSBs already covered by ABSR
     for (id, entity) in step.entities.iter().enumerate() {
-        if let ap214::Entity::ManifoldSolidBrep(msb) = entity {
-            if !absr_msb_ids.contains(&id) {
-                work.push((format!("brep_{id}"), msb));
-            }
+        if let ap214::Entity::ManifoldSolidBrep(msb) = entity
+            && !absr_msb_ids.contains(&id)
+        {
+            work.push((format!("brep_{id}"), msb));
         }
         if let ap214::Entity::AdvancedBrepShapeRepresentation(absr) = entity {
             let name = absr.name.to_string();

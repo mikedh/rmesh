@@ -7,9 +7,9 @@ edition = "2024"
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }
-nalgebra-sparse = "0.11"
+nalgebra-sparse = { version = "0.11", optional = true }
 serde = { workspace = true }
-starlark = { workspace = true }
+starlark = { workspace = true, optional = true }
 
 ahash = "0.8.11"
 nom = "7"
@@ -38,13 +38,12 @@ quick-xml = { version = "0.38", features = ["serialize"] }
 xsd-parser-types = { version = "0.1", features = ["quick-xml", "serde"] }
 
 # Fidget SDF backend for feature meshing (mesh + jit for fast evaluation)
-fidget = { version = "0.4", default-features = false, features = ["mesh", "jit"] }
+fidget = { version = "0.4", default-features = false, features = ["mesh", "jit"], optional = true }
 
 [features]
 default = []
-wgpu = ["dep:wgpu", "dep:pollster"]
-render = ["wgpu", "dep:log"]
-bench = ["dep:pprof"]
+cad = ["dep:starlark", "dep:fidget", "dep:nalgebra-sparse"]
+wgpu = ["dep:wgpu", "dep:pollster", "dep:log"]
 
 [dependencies.wgpu]
 workspace = true
@@ -58,13 +57,9 @@ optional = true
 version = "0.4"
 optional = true
 
-[dependencies.pprof]
-version = "0.15"
-features = ["flamegraph"]
-optional = true
-
 [dev-dependencies]
 qhull = "0.4"
+pprof = { version = "0.15", features = ["flamegraph"] }
 
 [build-dependencies]
 quick-xml = "0.37"
